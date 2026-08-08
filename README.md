@@ -16,6 +16,10 @@ will be implemented through the reviewed phases in
 No current command should be treated as a security attestation or as proof of
 GitHub Actions parity.
 
+The implemented receipt integrity contract is documented in
+[`docs/RECEIPT_SPEC.md`](docs/RECEIPT_SPEC.md). It deliberately does not claim
+identity-bound attestation.
+
 ## Product direction
 
 The tool will:
@@ -66,4 +70,3 @@ advertising endorsement and does not grant trademark rights.
 ## Security
 
 Do not report vulnerabilities in public issues. Follow [`SECURITY.md`](SECURITY.md).
-

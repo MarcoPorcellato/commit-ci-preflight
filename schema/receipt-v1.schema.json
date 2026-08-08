@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReceiptEnvelopeV1",
+  "type": "object",
+  "properties": {
+    "receipt": {
+      "$ref": "#/$defs/ReceiptV1"
+    },
+    "receipt_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "receipt_id",
+    "receipt"
+  ],
+  "$defs": {
+    "CheckEvidence": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "cancelled": {
+          "type": "boolean"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "id": {
+          "type": "string"
+        },
+        "incomplete_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/EvidenceStatus"
+        },
+        "timed_out": {
+          "type": "boolean"
+        },
+        "working_directory": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "required",
+        "argv",
+        "working_directory",
+        "status",
+        "duration_ms",
+        "timed_out",
+        "cancelled"
+      ]
+    },
+    "EvidenceStatus": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "PENDING",
+        "NOT_RUN"
+      ]
+    },
+    "PlatformEvidence": {
+      "type": "object",
+      "properties": {
+        "host_arch": {
+          "type": "string"
+        },
+        "host_os": {
+          "type": "string"
+        },
+        "image_digest": {
+          "type": "string"
+        },
+        "image_reference": {
+          "type": "string"
+        },
+        "runtime_kind": {
+          "type": "string"
+        },
+        "runtime_version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host_os",
+        "host_arch",
+        "runtime_kind",
+        "runtime_version",
+        "image_reference",
+        "image_digest"
+      ]
+    },
+    "ProducerEvidence": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "ReceiptV1": {
+      "type": "object",
+      "properties": {
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckEvidence"
+          }
+        },
+        "configuration_digest": {
+          "type": "string"
+        },
+        "incomplete_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overall_status": {
+          "$ref": "#/$defs/EvidenceStatus"
+        },
+        "platform": {
+          "$ref": "#/$defs/PlatformEvidence"
+        },
+        "producer": {
+          "$ref": "#/$defs/ProducerEvidence"
+        },
+        "redaction_policy_version": {
+          "type": "string"
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositoryEvidence"
+        },
+        "run": {
+          "$ref": "#/$defs/RunEvidence"
+        },
+        "schema_version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "producer",
+        "repository",
+        "run",
+        "platform",
+        "configuration_digest",
+        "checks",
+        "overall_status",
+        "redaction_policy_version"
+      ]
+    },
+    "RepositoryEvidence": {
+      "type": "object",
+      "properties": {
+        "commit_sha": {
+          "type": "string"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "repository": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit_sha",
+        "dirty"
+      ]
+    },
+    "RunEvidence": {
+      "type": "object",
+      "properties": {
+        "finished_at_utc": {
+          "type": "string"
+        },
+        "generation": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "started_at_utc": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "generation",
+        "started_at_utc",
+        "finished_at_utc"
+      ]
+    }
+  }
+}
