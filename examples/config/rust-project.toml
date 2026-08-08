@@ -1,0 +1,37 @@
+schema_version = "1.0"
+project = "example/rust-project"
+
+[runtime]
+kind = "docker_compatible"
+image = "ghcr.io/example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 4
+memory_mib = 4096
+pids_limit = 512
+network = false
+
+[receipt]
+output = ".ccp/receipt.json"
+freshness_seconds = 86400
+
+[environment]
+allow = ["CI", "RUST_BACKTRACE"]
+
+[[caches]]
+id = "cargo-registry"
+mount_path = ".ccp-cache/cargo-registry"
+
+[[checks]]
+id = "format"
+required = true
+argv = ["cargo", "fmt", "--all", "--", "--check"]
+working_directory = "."
+timeout_seconds = 120
+
+[[checks]]
+id = "test"
+required = true
+argv = ["cargo", "test", "--all-targets", "--all-features", "--locked"]
+working_directory = "."
+timeout_seconds = 900
+depends_on = ["format"]
+artifacts = ["target/test-results.json"]

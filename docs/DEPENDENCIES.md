@@ -8,9 +8,11 @@ features, minimum Rust version, and transitive impact.
 
 | Crate | Version introduced | Purpose | Enabled features | License |
 |---|---:|---|---|---|
+| `clap` | 4.6.6 | Typed CLI parsing and stable help/usage errors | `derive`, `error-context`, `help`, `std`, `usage`; default features disabled | MIT OR Apache-2.0 |
 | `serde` | 1.0.229 | Typed receipt serialization and strict deserialization | `derive` | MIT OR Apache-2.0 |
 | `serde_json` | 1.0.151 | JSON values and deterministic compact encoding | default `std` | MIT OR Apache-2.0 |
 | `sha2` | 0.11.0 | Pure-Rust SHA-256 receipt integrity digest | no default features | MIT OR Apache-2.0 |
+| `toml` | 1.1.4 | Strict TOML v1 configuration deserialization | `parse`, `serde`, `std`; default features disabled | MIT OR Apache-2.0 |
 | `schemars` | 1.2.2 | Generate the pinned JSON Schema from Rust receipt types | default `derive`, `std` | MIT |
 
 ## Selection notes
@@ -28,4 +30,3 @@ features, minimum Rust version, and transitive impact.
 
 Versions in this document describe the first accepted lock state. `Cargo.lock`
 is authoritative for exact resolved versions.
-

@@ -12,39 +12,74 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+use std::path::PathBuf;
+
+use clap::{CommandFactory, Parser, Subcommand};
+use commit_ci_preflight::config::ConfigV1;
+
+#[derive(Debug, Parser)]
+#[command(name = "commit-ci-preflight", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Validate configuration and print the normalized read-only execution plan.
+    Plan {
+        /// Configuration file to validate.
+        #[arg(long, default_value = ".commit-ci-preflight.toml")]
+        config: PathBuf,
+        /// Emit canonical machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
 
 fn main() {
-    let mut arguments = std::env::args().skip(1);
-
-    match arguments.next().as_deref() {
-        Some("--version" | "-V") => println!("commit-ci-preflight {VERSION}"),
-        Some("--help" | "-h") | None => print_help(),
-        Some(argument) => {
-            eprintln!("error: unsupported bootstrap argument: {argument}");
-            std::process::exit(2);
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Some(Command::Plan { config, json }) => print_plan(&config, json),
+        None => {
+            Cli::command()
+                .print_help()
+                .expect("writing command help to stdout must succeed");
+            println!();
+            Ok(())
         }
+    };
+    if let Err(error) = result {
+        eprintln!("error: {error}");
+        std::process::exit(2);
     }
 }
 
-fn print_help() {
-    println!(
-        "Commit CI Preflight {VERSION}\n\
-         \n\
-         Bootstrap CLI. No CI parity or attestation command is active yet.\n\
-         \n\
-         Usage:\n\
-           commit-ci-preflight --help\n\
-           commit-ci-preflight --version"
-    );
+fn print_plan(path: &std::path::Path, json: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let envelope = ConfigV1::load(path)?.into_plan()?;
+    if json {
+        let bytes = envelope.canonical_bytes()?;
+        println!("{}", String::from_utf8(bytes)?);
+    } else {
+        println!("Plan: {}", envelope.plan_digest);
+        println!("Project: {}", envelope.plan.project);
+        println!("Runtime: {:?}", envelope.plan.runtime.kind);
+        println!("Checks: {}", envelope.plan.checks.len());
+        for check in envelope.plan.checks {
+            println!("  - {}", check.id);
+        }
+        println!("Read-only: no command was executed.");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::VERSION;
+    use super::Cli;
+    use clap::CommandFactory;
 
     #[test]
-    fn package_version_is_available() {
-        assert!(!VERSION.is_empty());
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
     }
 }

@@ -11,7 +11,9 @@ keywords = ["ci", "preflight", "containers", "evidence", "github-actions"]
 categories = ["command-line-utilities", "development-tools::testing"]
 
 [dependencies]
+clap = { version = "4.6.6", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = { version = "0.11.0", default-features = false }
+toml = { version = "1.1.4", default-features = false, features = ["parse", "serde", "std"] }

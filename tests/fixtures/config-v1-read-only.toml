@@ -1,0 +1,16 @@
+schema_version = "1.0"
+project = "example/read-only-proof"
+
+[runtime]
+kind = "docker_compatible"
+image = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+
+[[checks]]
+id = "must-not-execute"
+required = true
+argv = ["this-command-does-not-exist-and-must-not-run"]
+working_directory = "."
+timeout_seconds = 1

@@ -15,6 +15,7 @@
 use std::fs;
 use std::path::Path;
 
+use commit_ci_preflight::config::config_schema_json;
 use commit_ci_preflight::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, RECEIPT_SCHEMA_VERSION,
     ReceiptEnvelopeV1, ReceiptV1, RepositoryEvidence, RunEvidence, receipt_schema_json,
@@ -25,6 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     write_exact(
         Path::new("schema/receipt-v1.schema.json"),
         receipt_schema_json()?.as_bytes(),
+    )?;
+    write_exact(
+        Path::new("schema/config-v1.schema.json"),
+        config_schema_json()?.as_bytes(),
     )?;
     write_exact(
         Path::new("tests/fixtures/receipt-v1-pass.json"),

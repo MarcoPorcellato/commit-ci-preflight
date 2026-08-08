@@ -108,7 +108,7 @@ pub enum EvidenceStatus {
 impl ReceiptEnvelopeV1 {
     pub fn seal(receipt: ReceiptV1) -> Result<Self, ReceiptError> {
         receipt.validate()?;
-        let receipt_id = digest_canonical(&receipt)?;
+        let receipt_id = canonical_digest(&receipt)?;
         Ok(Self {
             receipt_id,
             receipt,
@@ -117,7 +117,7 @@ impl ReceiptEnvelopeV1 {
 
     pub fn verify(&self) -> Result<(), ReceiptError> {
         self.receipt.validate()?;
-        let expected = digest_canonical(&self.receipt)?;
+        let expected = canonical_digest(&self.receipt)?;
         if self.receipt_id != expected {
             return Err(ReceiptError::DigestMismatch {
                 expected,
@@ -259,7 +259,7 @@ pub fn receipt_schema_json() -> Result<String, ReceiptError> {
     serde_json::to_string_pretty(&schema).map_err(ReceiptError::Serialization)
 }
 
-fn digest_canonical<T: Serialize>(value: &T) -> Result<String, ReceiptError> {
+pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String, ReceiptError> {
     let bytes = canonical_json(value)?;
     let digest = Sha256::digest(bytes);
     Ok(format!("{RECEIPT_ID_PREFIX}{}", encode_hex(&digest)))

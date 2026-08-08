@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConfigV1",
+  "type": "object",
+  "properties": {
+    "caches": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CacheConfig"
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CheckConfig"
+      }
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentConfig"
+    },
+    "project": {
+      "type": "string"
+    },
+    "receipt": {
+      "$ref": "#/$defs/ReceiptConfig"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeConfig"
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "runtime",
+    "checks"
+  ],
+  "$defs": {
+    "CacheConfig": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "mount_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "mount_path"
+      ]
+    },
+    "CheckConfig": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "depends_on": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "working_directory": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "required",
+        "argv",
+        "working_directory",
+        "timeout_seconds"
+      ]
+    },
+    "EnvironmentConfig": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReceiptConfig": {
+      "type": "object",
+      "properties": {
+        "freshness_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 86400,
+          "minimum": 0
+        },
+        "output": {
+          "type": "string",
+          "default": ".ccp/receipt.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeConfig": {
+      "type": "object",
+      "properties": {
+        "cpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "image": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RuntimeKind"
+        },
+        "memory_mib": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "network": {
+          "type": "boolean",
+          "default": false
+        },
+        "pids_limit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "image",
+        "cpu_count",
+        "memory_mib",
+        "pids_limit"
+      ]
+    },
+    "RuntimeKind": {
+      "type": "string",
+      "enum": [
+        "docker_compatible",
+        "host"
+      ]
+    }
+  }
+}
