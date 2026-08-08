@@ -1,0 +1,13 @@
+[package]
+name = "commit-ci-preflight"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Run reproducible local CI preflights and emit verifiable evidence before remote CI."
+license = "Apache-2.0"
+repository = "https://github.com/MarcoPorcellato/commit-ci-preflight"
+readme = "README.md"
+keywords = ["ci", "preflight", "containers", "evidence", "github-actions"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[dependencies]
