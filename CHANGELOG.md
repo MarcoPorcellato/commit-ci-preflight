@@ -14,3 +14,5 @@ Semantic Versioning after its first public release.
 - Security, contribution, architecture, and autonomous implementation plans.
 - Versioned receipt v1 types, strict semantic validation, canonical JSON,
   SHA-256 integrity IDs, generated schema, and deterministic golden fixtures.
+- Fail-closed TOML configuration v1, deterministic DAG normalization, bounded
+  runtime/check/cache policy, and the read-only `ccp plan` CLI surface.

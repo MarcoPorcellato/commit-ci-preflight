@@ -20,6 +20,10 @@ The implemented receipt integrity contract is documented in
 [`docs/RECEIPT_SPEC.md`](docs/RECEIPT_SPEC.md). It deliberately does not claim
 identity-bound attestation.
 
+The read-only TOML planner is documented in
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md). It validates and hashes an
+execution plan but cannot execute checks yet.
+
 ## Product direction
 
 The tool will:
@@ -47,6 +51,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 cargo run -- --version
+cargo run -- plan --config examples/config/rust-project.toml
 ```
 
 ## Independence and clean-room boundary
