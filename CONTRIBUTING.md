@@ -22,6 +22,8 @@ cargo test --all-targets --all-features
 Every user-visible change must update `CHANGELOG.md`. Architecture or trust
 decisions require an ADR under `docs/adr/`.
 
+Dependency additions or upgrades must update `docs/DEPENDENCIES.md` with their
+purpose, enabled features, license, and transitive-risk review.
+
 By submitting a contribution, you agree that it is licensed under the Apache
 License, Version 2.0, as stated in `LICENSE`.
-
