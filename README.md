@@ -20,10 +20,10 @@ The implemented receipt integrity contract is documented in
 [`docs/RECEIPT_SPEC.md`](docs/RECEIPT_SPEC.md). It deliberately does not claim
 identity-bound attestation.
 
-The read-only TOML planner is documented in
-[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md). It validates and hashes an
-execution plan but cannot execute project checks yet. The process supervisor,
-runtime probe, and non-executing container argv renderer are documented in
+The TOML planner and local runner are documented in
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) and
+[`docs/LOCAL_RUN.md`](docs/LOCAL_RUN.md). The process supervisor, runtime
+probe, and explicit container argv renderer are documented in
 [`docs/RUNTIME.md`](docs/RUNTIME.md). Persistent cache ownership, inventory,
 and explicit workspace mounts are documented in
 [`docs/CACHE_AND_WORKSPACE.md`](docs/CACHE_AND_WORKSPACE.md).
@@ -59,6 +59,8 @@ cargo run -- --version
 cargo run -- plan --config examples/config/rust-project.toml
 cargo run -- dry-run --config examples/config/rust-project.toml
 cargo run -- doctor --config examples/config/rust-project.toml
+cargo run -- run --config examples/projects/rust/.commit-ci-preflight.toml \
+  --repository examples/projects/rust --generation 1
 cargo run -- cache path
 cargo run -- cache init
 cargo run -- cache inventory --json
@@ -67,9 +69,10 @@ cargo run -- cache cleanup --dry-run
 
 `doctor` performs only a bounded, read-only Docker-compatible capability probe.
 `dry-run` prints explicit argv and mount bindings, but never starts Docker,
-creates the cache root, or executes a declared check. `cache init` is the only
-cache command in this tranche that creates state. Cleanup remains preview-only.
-Actual project execution remains unavailable until the later run tranche.
+creates the cache root, or executes a declared check. `run` requires a clean
+Git checkout, executes checks without an implicit shell, and writes a canonical
+receipt. Cleanup remains preview-only. The receipt is integrity evidence, not
+an identity attestation; independent policy verification arrives in PR 06.
 
 ## Independence and clean-room boundary
 

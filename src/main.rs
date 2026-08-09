@@ -19,6 +19,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use commit_ci_preflight::cache::{CacheError, CacheRootOptions, ManagedCache, ResolvedCacheRoot};
 use commit_ci_preflight::config::{ConfigV1, ExecutionPlanEnvelopeV1};
 use commit_ci_preflight::process::{CancellationToken, ProcessSupervisor};
+use commit_ci_preflight::receipt::EvidenceStatus;
+use commit_ci_preflight::run::{RunError, RunRequest, SystemClock, execute_local_run};
 use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
 };
@@ -59,6 +61,20 @@ enum Command {
         #[command(flatten)]
         location: CacheLocationArgs,
         /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Execute the validated checks locally and write a canonical receipt.
+    Run {
+        /// Configuration file to validate.
+        #[arg(long, default_value = ".commit-ci-preflight.toml")]
+        config: PathBuf,
+        #[command(flatten)]
+        location: CacheLocationArgs,
+        /// Monotonic operator-selected generation bound into the receipt.
+        #[arg(long, default_value_t = 1)]
+        generation: u64,
+        /// Emit the canonical receipt as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -128,6 +144,12 @@ fn main() {
             location,
             json,
         }) => print_dry_run(&config, &location, json),
+        Some(Command::Run {
+            config,
+            location,
+            generation,
+            json,
+        }) => print_run(&config, &location, generation, json),
         Some(Command::Cache { action }) => run_cache_command(action),
         None => {
             Cli::command()
@@ -140,6 +162,54 @@ fn main() {
     if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(error.exit_code());
+    }
+}
+
+fn print_run(
+    path: &Path,
+    location: &CacheLocationArgs,
+    generation: u64,
+    json: bool,
+) -> Result<(), CliError> {
+    let envelope = load_plan(path)?;
+    let root = resolve_cache_root(location)?;
+    let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
+    let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
+    let supervisor = ProcessSupervisor::standard();
+    let cancellation = CancellationToken::default();
+    install_cancellation_handler(&cancellation)?;
+    let outcome = execute_local_run(
+        &RunRequest {
+            envelope: &envelope,
+            repository: &location.repository,
+            cache: &cache,
+            generation,
+        },
+        runtime.as_ref(),
+        &supervisor,
+        &cancellation,
+        &SystemClock,
+    )
+    .map_err(CliError::Run)?;
+    if json {
+        let bytes = outcome
+            .receipt
+            .canonical_bytes()
+            .map_err(CliError::internal)?;
+        println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+    } else {
+        println!("Run: {}", outcome.receipt.receipt.run.run_id);
+        println!("Commit: {}", outcome.receipt.receipt.repository.commit_sha);
+        for check in &outcome.receipt.receipt.checks {
+            println!("  - {}: {:?}", check.id, check.status);
+        }
+        println!("Receipt: {}", envelope.plan.receipt.output);
+        println!("Overall: {:?}", outcome.receipt.receipt.overall_status);
+    }
+    if outcome.exit_code() == 0 {
+        Ok(())
+    } else {
+        Err(CliError::RunOutcome(outcome.receipt.receipt.overall_status))
     }
 }
 
@@ -356,6 +426,8 @@ enum CliError {
     Cache(CacheError),
     Workspace(WorkspaceError),
     Runtime(RuntimeError),
+    Run(RunError),
+    RunOutcome(EvidenceStatus),
     Internal(Box<dyn std::error::Error>),
 }
 
@@ -374,6 +446,10 @@ impl CliError {
             Self::Cache(error) => error.exit_code(),
             Self::Workspace(_) => 2,
             Self::Runtime(error) => error.exit_code(),
+            Self::Run(error) => error.exit_code(),
+            Self::RunOutcome(EvidenceStatus::Fail) => 1,
+            Self::RunOutcome(EvidenceStatus::Pending | EvidenceStatus::NotRun) => 5,
+            Self::RunOutcome(EvidenceStatus::Pass) => 0,
             Self::Internal(_) => 70,
         }
     }
@@ -386,6 +462,8 @@ impl fmt::Display for CliError {
             Self::Cache(error) => write!(formatter, "{error}"),
             Self::Workspace(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
+            Self::Run(error) => write!(formatter, "{error}"),
+            Self::RunOutcome(status) => write!(formatter, "run completed with {status:?}"),
             Self::Internal(_) => formatter.write_str("internal command failure"),
         }
     }
@@ -398,6 +476,8 @@ impl std::error::Error for CliError {
             Self::Cache(error) => Some(error),
             Self::Workspace(error) => Some(error),
             Self::Runtime(error) => Some(error),
+            Self::Run(error) => Some(error),
+            Self::RunOutcome(_) => None,
         }
     }
 }

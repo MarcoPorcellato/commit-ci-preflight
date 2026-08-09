@@ -110,7 +110,14 @@ impl RuntimePort for DockerCompatibleRuntime {
             .plan
             .checks
             .iter()
-            .map(|check| docker_dry_run_check(&envelope.plan.runtime, check, workspace))
+            .map(|check| {
+                docker_dry_run_check(
+                    &envelope.plan.runtime,
+                    check,
+                    &envelope.plan.environment_allow,
+                    workspace,
+                )
+            })
             .collect::<Result<_, _>>()?;
         Ok(DryRunPlan {
             schema_version: "1.0",
@@ -227,9 +234,20 @@ fn runtime_environment() -> BTreeMap<OsString, OsString> {
         .collect()
 }
 
+pub fn docker_execution_environment(allowed_names: &[String]) -> BTreeMap<OsString, OsString> {
+    let mut environment = runtime_environment();
+    for name in allowed_names {
+        if let Some(value) = std::env::var_os(name) {
+            environment.insert(OsString::from(name), value);
+        }
+    }
+    environment
+}
+
 fn docker_dry_run_check(
     runtime: &NormalizedRuntime,
     check: &NormalizedCheck,
+    environment_allow: &[String],
     workspace: &WorkspacePlanV1,
 ) -> Result<DryRunCheck, RuntimeError> {
     let mut argv = vec![
@@ -248,7 +266,15 @@ fn docker_dry_run_check(
         format!("{}m", runtime.memory_mib),
         "--pids-limit".to_owned(),
         runtime.pids_limit.to_string(),
+        "--tmpfs".to_owned(),
+        "/tmp:rw,noexec,nosuid,nodev,size=64m".to_owned(),
     ];
+    for name in environment_allow {
+        argv.push("--env".to_owned());
+        argv.push(name.clone());
+    }
+    argv.push("--env".to_owned());
+    argv.push("TMPDIR=/tmp".to_owned());
     for mount in &workspace.mounts {
         argv.push("--mount".to_owned());
         argv.push(docker_mount_argument(mount)?);
@@ -677,6 +703,24 @@ timeout_seconds = 60
                 .any(|pair| pair == ["--network", "none"])
         );
         assert!(first.checks[0].argv.contains(&"--read-only".to_owned()));
+        assert!(
+            first.checks[0]
+                .argv
+                .windows(2)
+                .any(|pair| { pair == ["--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m"] })
+        );
+        assert!(
+            first.checks[0]
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--env", "TMPDIR=/tmp"])
+        );
+        assert!(
+            !first.checks[0]
+                .argv
+                .iter()
+                .any(|part| part.contains("dst=/tmp"))
+        );
         assert!(first.checks[0].argv.contains(&"--mount".to_owned()));
         assert!(
             first.checks[0]
@@ -690,6 +734,30 @@ timeout_seconds = 60
                 .iter()
                 .any(|part| part == "sh" || part == "-c")
         );
+    }
+
+    #[test]
+    fn dry_run_exposes_only_allowlisted_environment_names() {
+        let envelope = ConfigV1::parse(&CONFIG.replace(
+            "[[checks]]",
+            "[environment]\nallow = [\"SAFE_TOKEN\", \"TMPDIR\"]\n\n[[checks]]",
+        ))
+        .expect("config")
+        .into_plan()
+        .expect("plan");
+        let workspace = workspace(&envelope);
+        let dry_run = DockerCompatibleRuntime
+            .dry_run(&envelope, &workspace)
+            .expect("dry run");
+        let argv = &dry_run.checks[0].argv;
+        assert!(argv.windows(2).any(|pair| pair == ["--env", "SAFE_TOKEN"]));
+        let tmpdir_values: Vec<_> = argv
+            .windows(2)
+            .filter(|pair| pair[0] == "--env" && pair[1].starts_with("TMPDIR"))
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(tmpdir_values.last(), Some(&"TMPDIR=/tmp"));
+        assert!(!argv.iter().any(|part| part.contains("secret-value")));
     }
 
     #[test]

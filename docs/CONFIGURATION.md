@@ -2,10 +2,10 @@
 
 ## Status
 
-`.commit-ci-preflight.toml` schema `1.0` is implemented for read-only planning,
-runtime diagnosis, and non-executing container argv rendering. Project checks
-cannot be executed in this phase. `doctor` is the sole process-creating command
-and performs only the bounded runtime probe described in `docs/RUNTIME.md`.
+`.commit-ci-preflight.toml` schema `1.0` is implemented for planning, runtime
+diagnosis, deterministic container argv rendering, and local execution.
+`doctor` performs only the bounded runtime probe described in `docs/RUNTIME.md`;
+`run` performs the separately documented execution flow in `docs/LOCAL_RUN.md`.
 
 The generated structural schema is pinned at
 [`../schema/config-v1.schema.json`](../schema/config-v1.schema.json). Semantic
@@ -54,8 +54,9 @@ Required limits:
 - `pids_limit`: 1–65536;
 - `network`: defaults to `false` and must be explicitly enabled.
 
-The current phase validates these values. `doctor` starts the Docker CLI only
-for a read-only `docker info` probe; `dry-run` and `plan` start no process.
+The current phase validates and enforces these values. `doctor` starts the
+Docker CLI only for a read-only `docker info` probe; `dry-run` and `plan` start
+no project process.
 `dry-run` resolves a persistent cache path and renders the exact repository,
 cache, and artifact mount bindings without creating them. No project check or
 container is started yet.
@@ -90,7 +91,8 @@ Absolute Unix paths, Windows drive paths, backslashes, `~`, empty segments,
 receipt output, or artifact.
 
 Cache mounts cannot overlap one another, the receipt output, or declared
-artifacts. Artifact paths are globally unique. These restrictions prevent two
+artifacts. Artifact paths are globally unique and identify files in contract
+v1; directory artifacts are not yet supported. These restrictions prevent two
 steps from silently assigning different meanings to the same writable path.
 The repository root is mounted read-only at `/workspace`; only declared cache
 and artifact paths receive nested read-write bindings. Host mount paths that
@@ -102,9 +104,9 @@ precedence, ownership, persistence, inventory, and cleanup rules.
 ## Environment privacy
 
 Only valid environment-variable names are stored in a plan. Values are never
-read by `ccp plan` and never serialized. A later execution phase will copy only
-explicitly allowed names into a bounded runtime environment while receipts
-continue to exclude values.
+read by `ccp plan` and never serialized. `ccp run` copies only explicitly
+allowed names into a bounded runtime environment; receipts continue to exclude
+values and raw process output.
 
 ## Plan digest
 

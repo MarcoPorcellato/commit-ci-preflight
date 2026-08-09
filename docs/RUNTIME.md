@@ -2,11 +2,10 @@
 
 ## Status and scope
 
-This tranche implements the process-supervision boundary, a Docker-compatible
-runtime adapter, `doctor`, and `dry-run`. It also renders the explicit workspace
-mount contract introduced in PR 04. It does **not** execute a project check,
-mount a repository in a live container, create a container, restore a cache, or
-emit a PASS receipt. Those responsibilities begin in PR 05.
+This contract implements the process-supervision boundary, a Docker-compatible
+runtime adapter, `doctor`, `dry-run`, and the PR 05 local execution path. Live
+runs mount the repository read-only, expose only declared writable paths, and
+emit a canonical receipt after supervised completion.
 
 The implemented evidence is:
 
@@ -20,7 +19,8 @@ The implemented evidence is:
 | Windows Job Object compilation and cleanup | PENDING genuine Windows-native execution |
 | Linux-native cleanup behavior | PENDING genuine Linux-native execution |
 | Workspace/cache mount contract | Implemented and deterministic |
-| Live container execution | Deferred to PR 05 |
+| Live container execution | PASS on macOS arm64 with OrbStack 29.4.0 |
+| Rust, Python, and Node clean-room fixtures | PASS on macOS arm64 |
 
 No macOS test is represented as Windows or Linux evidence.
 
@@ -31,6 +31,7 @@ commit-ci-preflight doctor --config .commit-ci-preflight.toml
 commit-ci-preflight doctor --config .commit-ci-preflight.toml --json
 commit-ci-preflight dry-run --config .commit-ci-preflight.toml
 commit-ci-preflight dry-run --config .commit-ci-preflight.toml --json
+commit-ci-preflight run --config .commit-ci-preflight.toml --repository .
 ```
 
 `doctor` validates the configuration, then invokes exactly:
@@ -51,6 +52,11 @@ and the declared check argv. The repository binding is read-only. Only declared
 cache and artifact bindings are read-write, and every writable source is
 contained by the resolved managed cache root. The output labels this policy
 `explicit_bindings`.
+
+Live runs preserve that argv. They add a private, non-host-backed tmpfs at
+`/tmp`, bounded to 64 MiB with `noexec`, `nosuid`, and `nodev`, and set the
+fixed container value `TMPDIR=/tmp`. This permits compiler temporary files
+without making the repository or container root writable.
 
 Absolute host paths are shown only in local dry-run output because an operator
 must be able to audit the exact mount. They must not be copied into receipts or
@@ -105,14 +111,16 @@ contract and are not claimed here.
 |---:|---|
 | 2 | Invalid configuration or CLI usage |
 | 4 | Runtime unavailable, unsupported, or invalid probe |
-| 5 | Cancelled, stale generation, or deadline exceeded |
+| 1 | One or more required checks completed with FAIL |
+| 5 | PENDING evidence, cancellation, stale generation, or deadline exceeded |
 | 70 | Internal invariant or uncertain cleanup/result collection |
 
 The CLI prints sanitized classifications. It does not echo raw runtime stderr.
 
 ## Security boundary
 
-Container execution is not a complete sandbox against hostile code. This
-tranche does not mount the Docker socket into a job, enable privileged mode,
-insert a shell, or execute the declared check. Future mount and execution work
-must preserve those boundaries and add its own native evidence.
+Container execution is not a complete sandbox against hostile code. The live
+runner does not mount the Docker socket into a job, enable privileged mode,
+insert a shell, or expose undeclared host paths. Network remains disabled unless
+the configuration explicitly enables it. See `docs/LOCAL_RUN.md` for evidence
+and remaining platform limitations.

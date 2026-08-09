@@ -16,5 +16,6 @@ pub mod cache;
 pub mod config;
 pub mod process;
 pub mod receipt;
+pub mod run;
 pub mod runtime;
 pub mod workspace;
