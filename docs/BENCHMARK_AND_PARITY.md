@@ -132,6 +132,16 @@ and native platforms not covered by accepted local receipts.
 ## Evidence directory
 
 Actual PR09 receipts and GitHub run metadata are recorded under
-[`evidence/pr09/`](evidence/pr09/) only after native execution. The matrix uses
-`PASS`, `PENDING`, or `NOT_RUN` literally and never infers one platform from
-another.
+[`evidence/pr09/`](evidence/pr09/). The qualified source commit is
+`15f858403b19ade38373176879fb518ef167580d`. Its fixed correctness digest
+matched on all three native processes:
+
+- macOS arm64 with an OrbStack capability probe;
+- Linux x86_64 on the standard `ubuntu-24.04` runner;
+- Windows x86_64 on the standard `windows-2025` runner.
+
+The matrix and exact receipt IDs are maintained in the evidence README. GitHub
+run `31342216377` is captured in a machine-readable provenance record. These
+observations qualify only the fixed benchmark contract; they do not prove that
+arbitrary workflows behave identically across platforms or establish producer
+identity.
