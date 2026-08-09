@@ -14,6 +14,7 @@
 
 pub mod cache;
 pub mod config;
+pub mod github_actions;
 pub mod process;
 pub mod receipt;
 pub mod run;

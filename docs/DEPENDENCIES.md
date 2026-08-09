@@ -17,6 +17,8 @@ features, minimum Rust version, and transitive impact.
 | `sha2` | 0.11.0 | Pure-Rust SHA-256 receipt integrity digest | no default features | MIT OR Apache-2.0 |
 | `toml` | 1.1.4 | Strict TOML v1 configuration deserialization | `parse`, `serde`, `std`; default features disabled | MIT OR Apache-2.0 |
 | `schemars` | 1.2.2 | Generate the pinned JSON Schema from Rust receipt types | default `derive`, `std` | MIT |
+| `saphyr` | 0.0.6 | Parse bounded GitHub Actions YAML as inert data | default features disabled | MIT OR Apache-2.0 |
+| `saphyr-parser` | 0.0.6 | Reject YAML anchors, aliases, and tags before object loading | default features disabled | MIT OR Apache-2.0 |
 
 ## Selection notes
 
@@ -27,6 +29,10 @@ features, minimum Rust version, and transitive impact.
 - No dependency performs network access or telemetry. Process creation occurs
   only through the reviewed supervisor boundary; environment inheritance is
   allowlisted and explicit argv never passes through an implicit shell.
+- `saphyr` and its matching low-level `saphyr-parser` are maintained YAML 1.2
+  crates used only by the read-only migration assistant. Encoding support is
+  disabled because workflow input is required to be UTF-8; parser events reject
+  anchors, aliases, and tags before compatibility analysis.
 - `process-wrap` replaced the deprecated `command-group` line. Its MSRV of
   Rust 1.87 sets the repository MSRV. The wrapper owns the platform-specific
   containment primitive while CCP independently verifies Unix group cleanup.

@@ -1,0 +1,22 @@
+name: Unsupported surfaces
+on: pull_request
+permissions:
+  contents: write
+future-feature: enabled
+
+jobs:
+  matrix:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    services:
+      database:
+        image: postgres:latest
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: vendor/arbitrary-action@v1
+      - shell: bash
+        run: echo "${{ secrets.DEPLOY_TOKEN }}"
