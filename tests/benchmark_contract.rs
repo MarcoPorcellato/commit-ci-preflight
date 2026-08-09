@@ -24,6 +24,10 @@ use commit_ci_preflight::benchmark::{
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PINNED_SCHEMA: &str = include_str!("../schema/benchmark-v1.schema.json");
 
+fn expected_ci_environment() -> Option<&'static str> {
+    (std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")).then_some("github_actions")
+}
+
 #[test]
 fn native_benchmark_replays_the_fixed_result_and_verifies_current_platform() {
     let first = run_benchmark(COMMIT, None).expect("first benchmark");
@@ -38,7 +42,7 @@ fn native_benchmark_replays_the_fixed_result_and_verifies_current_platform() {
         COMMIT,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        None,
+        expected_ci_environment(),
         None,
     )
     .expect("verify native benchmark");
@@ -112,19 +116,23 @@ fn cli_run_and_independent_verify_use_stable_exit_codes() {
         envelope.canonical_bytes().expect("canonical receipt"),
     )
     .expect("write CLI receipt");
-    let verify = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
-        .args([
-            "verify-benchmark",
-            "--receipt",
-            receipt.to_str().expect("UTF-8 receipt path"),
-            "--expected-commit",
-            COMMIT,
-            "--expected-os",
-            std::env::consts::OS,
-            "--expected-arch",
-            std::env::consts::ARCH,
-            "--json",
-        ])
+    let mut verify_command = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"));
+    verify_command.args([
+        "verify-benchmark",
+        "--receipt",
+        receipt.to_str().expect("UTF-8 receipt path"),
+        "--expected-commit",
+        COMMIT,
+        "--expected-os",
+        std::env::consts::OS,
+        "--expected-arch",
+        std::env::consts::ARCH,
+    ]);
+    if let Some(environment) = expected_ci_environment() {
+        verify_command.args(["--expected-ci-environment", environment]);
+    }
+    let verify = verify_command
+        .arg("--json")
         .output()
         .expect("verify benchmark CLI");
     assert!(verify.status.success());

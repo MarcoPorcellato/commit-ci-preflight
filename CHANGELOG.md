@@ -46,3 +46,8 @@ Semantic Versioning after its first public release.
 - Fixed native benchmark receipt and independent verifier with pinned correctness
   digest, create-new output, Mac/OrbStack probing, opt-in Linux/Windows public
   runner evidence, and an assumptions-based cost model.
+
+### Fixed
+
+- Made benchmark contract verification explicit about GitHub Actions metadata
+  and kept versioned text contracts byte-identical across Windows checkouts.
