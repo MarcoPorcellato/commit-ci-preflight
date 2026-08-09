@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BenchmarkEnvelopeV1",
+  "type": "object",
+  "properties": {
+    "benchmark_id": {
+      "type": "string"
+    },
+    "receipt": {
+      "$ref": "#/$defs/BenchmarkReceiptV1"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "receipt",
+    "benchmark_id"
+  ],
+  "$defs": {
+    "BenchmarkPlatformV1": {
+      "type": "object",
+      "properties": {
+        "ci_environment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "execution_kind": {
+          "type": "string"
+        },
+        "host_arch": {
+          "type": "string"
+        },
+        "host_os": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host_os",
+        "host_arch",
+        "execution_kind"
+      ]
+    },
+    "BenchmarkReceiptV1": {
+      "type": "object",
+      "properties": {
+        "benchmark_commit": {
+          "type": "string"
+        },
+        "correctness_status": {
+          "$ref": "#/$defs/EvidenceStatus"
+        },
+        "median_ns": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "platform": {
+          "$ref": "#/$defs/BenchmarkPlatformV1"
+        },
+        "result_digest": {
+          "type": "string"
+        },
+        "runtime_probe": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BenchmarkRuntimeProbeV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "samples_ns": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "workload": {
+          "$ref": "#/$defs/BenchmarkWorkloadV1"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "benchmark_commit",
+        "workload",
+        "platform",
+        "samples_ns",
+        "median_ns",
+        "result_digest",
+        "correctness_status"
+      ]
+    },
+    "BenchmarkRuntimeProbeV1": {
+      "type": "object",
+      "properties": {
+        "containment": {
+          "type": "string"
+        },
+        "graceful_stop": {
+          "type": "string"
+        },
+        "operating_system": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "os_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime_flavor": {
+          "type": "string"
+        },
+        "runtime_kind": {
+          "type": "string"
+        },
+        "server_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "runtime_kind",
+        "runtime_flavor",
+        "containment",
+        "graceful_stop"
+      ]
+    },
+    "BenchmarkWorkloadV1": {
+      "type": "object",
+      "properties": {
+        "expected_result_digest": {
+          "type": "string"
+        },
+        "iterations_per_sample": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "name": {
+          "type": "string"
+        },
+        "payload_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "samples": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "iterations_per_sample",
+        "samples",
+        "payload_bytes",
+        "expected_result_digest"
+      ]
+    },
+    "EvidenceStatus": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "PENDING",
+        "NOT_RUN"
+      ]
+    }
+  }
+}

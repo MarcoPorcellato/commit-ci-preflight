@@ -43,3 +43,6 @@ Semantic Versioning after its first public release.
 - Read-only GitHub Actions migration assistant with a versioned deterministic
   compatibility report, explicit translated/manual/unsupported classifications,
   public fixtures, and fail-closed handling of arbitrary actions and expressions.
+- Fixed native benchmark receipt and independent verifier with pinned correctness
+  digest, create-new output, Mac/OrbStack probing, opt-in Linux/Windows public
+  runner evidence, and an assumptions-based cost model.

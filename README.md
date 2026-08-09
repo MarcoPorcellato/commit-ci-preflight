@@ -34,6 +34,9 @@ The minimal remote control-plane adapter and its threat model are documented in
 The read-only GitHub Actions migration assistant and its explicit compatibility
 table are documented in
 [`docs/GITHUB_ACTIONS_COMPATIBILITY.md`](docs/GITHUB_ACTIONS_COMPATIBILITY.md).
+The deterministic native benchmark, platform evidence rules, and assumptions-
+based cost model are documented in
+[`docs/BENCHMARK_AND_PARITY.md`](docs/BENCHMARK_AND_PARITY.md).
 
 ## Product direction
 
@@ -78,6 +81,8 @@ cargo run -- cache inventory --json
 cargo run -- cache cleanup --dry-run
 cargo run -- migrate-github-actions \
   --workflow tests/fixtures/github-actions/supported.yml --json
+cargo run -- benchmark \
+  --commit 0123456789abcdef0123456789abcdef01234567 --json
 ```
 
 `doctor` performs only a bounded, read-only Docker-compatible capability probe.
