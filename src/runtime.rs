@@ -253,6 +253,7 @@ fn docker_dry_run_check(
     let mut argv = vec![
         "run".to_owned(),
         "--rm".to_owned(),
+        "--init".to_owned(),
         "--read-only".to_owned(),
         "--network".to_owned(),
         if runtime.network {
@@ -494,9 +495,14 @@ timeout_seconds = 60
     fn workspace(envelope: &ExecutionPlanEnvelopeV1) -> WorkspacePlanV1 {
         let repository = std::env::current_dir().expect("current dir");
         let cache = ResolvedCacheRoot {
-            path: repository
-                .parent()
-                .expect("repository parent")
+            path: std::env::var_os("CCP_TEST_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    repository
+                        .parent()
+                        .expect("repository parent")
+                        .to_path_buf()
+                })
                 .join(format!(".ccp-runtime-test-cache-{}", std::process::id())),
             source: CacheRootSource::Explicit,
         };
@@ -702,6 +708,7 @@ timeout_seconds = 60
                 .windows(2)
                 .any(|pair| pair == ["--network", "none"])
         );
+        assert!(first.checks[0].argv.contains(&"--init".to_owned()));
         assert!(first.checks[0].argv.contains(&"--read-only".to_owned()));
         assert!(
             first.checks[0]

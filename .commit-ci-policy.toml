@@ -1,0 +1,11 @@
+schema_version = "1.0"
+project = "MarcoPorcellato/commit-ci-preflight"
+configuration_digest = "sha256:fa02390288f9b36f8a9d39d4aa8de9610a4644c0ba2607ab1008c57c306a6a90"
+required_checks = ["clippy", "docs", "format", "test"]
+image_reference = "docker.io/library/rust@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479"
+max_age_seconds = 86400
+
+[[platforms]]
+host_os = "macos"
+host_arch = "aarch64"
+runtime_kind = "docker_compatible"

@@ -368,10 +368,15 @@ mod tests {
     use crate::config::ConfigV1;
 
     fn test_root(name: &str) -> PathBuf {
-        std::env::current_dir()
-            .expect("current directory")
-            .parent()
-            .expect("repository parent")
+        std::env::var_os("CCP_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .expect("current directory")
+                    .parent()
+                    .expect("repository parent")
+                    .to_path_buf()
+            })
             .join(format!(".ccp-workspace-test-{}-{name}", std::process::id()))
     }
 

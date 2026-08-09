@@ -34,3 +34,9 @@ Semantic Versioning after its first public release.
   machine report; and stable verification exit code 3.
 - Pinned policy/report JSON schemas and deterministic tamper tests that keep
   integrity, policy, and identity assurance explicitly separate.
+- Lightweight GitHub receipt gate with exact pull-request SHA binding,
+  trusted-base verifier compilation, append-once evidence branches,
+  least-privilege permissions, bounded summaries, and no remote project tests.
+- Repository-local preflight configuration and policy for the Rust format,
+  test, clippy, and documentation gates on accepted Apple Silicon macOS
+  Docker-compatible execution.

@@ -38,10 +38,15 @@ struct PersistentFixture {
 impl PersistentFixture {
     fn new(label: &str) -> Self {
         let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::current_dir()
-            .expect("current directory")
-            .parent()
-            .expect("repository parent")
+        let root = std::env::var_os("CCP_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .expect("current directory")
+                    .parent()
+                    .expect("repository parent")
+                    .to_path_buf()
+            })
             .join(format!(
                 ".ccp-cli-test-{}-{sequence}-{label}",
                 std::process::id()
