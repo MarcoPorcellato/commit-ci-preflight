@@ -17,6 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use commit_ci_preflight::benchmark::{
+    BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
+};
 use commit_ci_preflight::cache::{CacheError, CacheRootOptions, ManagedCache, ResolvedCacheRoot};
 use commit_ci_preflight::config::{ConfigV1, ExecutionPlanEnvelopeV1};
 use commit_ci_preflight::github_actions::{
@@ -113,6 +116,45 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Run the fixed deterministic native benchmark and emit a verifiable receipt.
+    Benchmark {
+        /// Exact lowercase Git commit represented by this benchmark execution.
+        #[arg(long)]
+        commit: String,
+        /// Optional configuration whose Docker-compatible runtime is probed read-only.
+        #[arg(long)]
+        runtime_config: Option<PathBuf>,
+        /// Optional new output file; existing files are never overwritten.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Emit the canonical benchmark receipt as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Independently verify a benchmark receipt and its expected native platform.
+    VerifyBenchmark {
+        /// Benchmark receipt JSON to verify.
+        #[arg(long)]
+        receipt: PathBuf,
+        /// Exact lowercase Git commit expected by the calling boundary.
+        #[arg(long)]
+        expected_commit: String,
+        /// Expected native process operating system: linux, macos, or windows.
+        #[arg(long)]
+        expected_os: String,
+        /// Expected native process architecture: aarch64 or x86_64.
+        #[arg(long)]
+        expected_arch: String,
+        /// Optional expected CI environment, currently github_actions.
+        #[arg(long)]
+        expected_ci_environment: Option<String>,
+        /// Optional expected probed runtime flavor, such as orbstack.
+        #[arg(long)]
+        expected_runtime_flavor: Option<String>,
+        /// Emit a machine-readable PASS report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect or initialize the persistent managed cache.
     Cache {
         #[command(subcommand)]
@@ -201,6 +243,29 @@ fn main() {
         Some(Command::MigrateGithubActions { workflow, json }) => {
             print_github_actions_migration(&workflow, json)
         }
+        Some(Command::Benchmark {
+            commit,
+            runtime_config,
+            output,
+            json,
+        }) => print_benchmark(&commit, runtime_config.as_deref(), output.as_deref(), json),
+        Some(Command::VerifyBenchmark {
+            receipt,
+            expected_commit,
+            expected_os,
+            expected_arch,
+            expected_ci_environment,
+            expected_runtime_flavor,
+            json,
+        }) => print_verify_benchmark(
+            &receipt,
+            &expected_commit,
+            &expected_os,
+            &expected_arch,
+            expected_ci_environment.as_deref(),
+            expected_runtime_flavor.as_deref(),
+            json,
+        ),
         Some(Command::Cache { action }) => run_cache_command(action),
         None => {
             Cli::command()
@@ -214,6 +279,97 @@ fn main() {
         eprintln!("error: {error}");
         std::process::exit(error.exit_code());
     }
+}
+
+fn print_benchmark(
+    commit: &str,
+    runtime_config: Option<&Path>,
+    output: Option<&Path>,
+    json: bool,
+) -> Result<(), CliError> {
+    let runtime_probe = runtime_config.map(collect_runtime_probe).transpose()?;
+    let envelope = run_benchmark(commit, runtime_probe.as_ref()).map_err(CliError::Benchmark)?;
+    if let Some(path) = output {
+        write_new_receipt(path, &envelope).map_err(CliError::Benchmark)?;
+    }
+    if json {
+        let bytes = envelope.canonical_bytes().map_err(CliError::Benchmark)?;
+        println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+    } else {
+        println!("Benchmark: {}", envelope.benchmark_id);
+        println!(
+            "Platform: {}/{}",
+            envelope.receipt.platform.host_os, envelope.receipt.platform.host_arch
+        );
+        println!("Median: {} ns", envelope.receipt.median_ns);
+        println!("Correctness: PASS");
+        if let Some(path) = output {
+            println!("Receipt: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn print_verify_benchmark(
+    receipt_path: &Path,
+    expected_commit: &str,
+    expected_os: &str,
+    expected_arch: &str,
+    expected_ci_environment: Option<&str>,
+    expected_runtime_flavor: Option<&str>,
+    json: bool,
+) -> Result<(), CliError> {
+    let input = fs::read(receipt_path).map_err(|source| {
+        CliError::BenchmarkVerification(BenchmarkError::Io {
+            path: receipt_path.to_path_buf(),
+            source,
+        })
+    })?;
+    let envelope = verify_benchmark_document(
+        &input,
+        expected_commit,
+        expected_os,
+        expected_arch,
+        expected_ci_environment,
+        expected_runtime_flavor,
+    )
+    .map_err(CliError::BenchmarkVerification)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "benchmark_id": envelope.benchmark_id,
+                "decision": "PASS",
+                "expected_commit": expected_commit,
+                "expected_os": expected_os,
+                "expected_arch": expected_arch,
+            }))
+            .map_err(CliError::internal)?
+        );
+    } else {
+        println!("Benchmark: {}", envelope.benchmark_id);
+        println!("Decision: PASS");
+    }
+    Ok(())
+}
+
+fn collect_runtime_probe(path: &Path) -> Result<RuntimeProbe, CliError> {
+    let envelope = load_plan(path)?;
+    let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
+    let supervisor = ProcessSupervisor::standard();
+    let cancellation = CancellationToken::default();
+    install_cancellation_handler(&cancellation)?;
+    let generation = doctor_guard(&envelope);
+    let current_dir = std::env::current_dir().map_err(CliError::internal)?;
+    runtime
+        .probe(
+            &envelope,
+            &supervisor,
+            &current_dir,
+            &cancellation,
+            &generation,
+        )
+        .map_err(CliError::Runtime)
 }
 
 fn print_github_actions_migration(path: &Path, json: bool) -> Result<(), CliError> {
@@ -547,6 +703,8 @@ enum CliError {
     VerifyOutcome(VerificationDecision),
     GithubActions(GithubActionsError),
     MigrationBlocked,
+    Benchmark(BenchmarkError),
+    BenchmarkVerification(BenchmarkError),
     Internal(Box<dyn std::error::Error>),
 }
 
@@ -572,6 +730,8 @@ impl CliError {
             Self::VerifyOutcome(_) => 3,
             Self::GithubActions(_) => 2,
             Self::MigrationBlocked => 4,
+            Self::Benchmark(_) => 2,
+            Self::BenchmarkVerification(_) => 3,
             Self::Verification(VerificationError::Policy(_))
             | Self::Verification(VerificationError::InvalidExpectedCommit)
             | Self::Verification(VerificationError::InvalidEvaluationTime) => 2,
@@ -598,6 +758,10 @@ impl fmt::Display for CliError {
             Self::MigrationBlocked => {
                 formatter.write_str("workflow migration is blocked by unsupported features")
             }
+            Self::Benchmark(error) => write!(formatter, "{error}"),
+            Self::BenchmarkVerification(error) => {
+                write!(formatter, "benchmark verification failed: {error}")
+            }
             Self::Internal(_) => formatter.write_str("internal command failure"),
         }
     }
@@ -616,6 +780,7 @@ impl std::error::Error for CliError {
             Self::VerifyOutcome(_) => None,
             Self::GithubActions(error) => Some(error),
             Self::MigrationBlocked => None,
+            Self::Benchmark(error) | Self::BenchmarkVerification(error) => Some(error),
         }
     }
 }

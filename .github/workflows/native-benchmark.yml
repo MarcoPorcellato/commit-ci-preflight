@@ -1,0 +1,74 @@
+name: Native benchmark evidence
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-benchmark-${{ github.event.pull_request.number || github.run_id }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+env:
+  CCP_BENCHMARK_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Native benchmark (${{ matrix.receipt }})
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+      github.event.label.name == 'native-benchmark' &&
+      github.event.pull_request.head.repo.full_name == github.repository)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            receipt: linux-x86_64-github
+          - runner: windows-2025
+            receipt: windows-x86_64-github
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact pull-request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          lfs: false
+          submodules: false
+
+      - name: Verify benchmark contract
+        run: cargo test --locked --test benchmark_contract
+
+      - name: Produce Linux native receipt
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/run_native_benchmark.sh \
+            "$CCP_BENCHMARK_COMMIT" \
+            "benchmark-receipts/${{ matrix.receipt }}.json"
+
+      - name: Produce Windows native receipt
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/run_native_benchmark.ps1 `
+            -Commit $env:CCP_BENCHMARK_COMMIT `
+            -Output "benchmark-receipts/${{ matrix.receipt }}.json"
+
+      - name: Upload one short-lived receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.receipt }}-${{ github.event.pull_request.head.sha || github.sha }}
+          path: benchmark-receipts/${{ matrix.receipt }}.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
