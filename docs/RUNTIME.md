@@ -3,9 +3,10 @@
 ## Status and scope
 
 This tranche implements the process-supervision boundary, a Docker-compatible
-runtime adapter, `doctor`, and `dry-run`. It does **not** execute a project
-check, mount a repository, create a container, restore a cache, or emit a PASS
-receipt. Those responsibilities begin in later tranches.
+runtime adapter, `doctor`, and `dry-run`. It also renders the explicit workspace
+mount contract introduced in PR 04. It does **not** execute a project check,
+mount a repository in a live container, create a container, restore a cache, or
+emit a PASS receipt. Those responsibilities begin in PR 05.
 
 The implemented evidence is:
 
@@ -18,7 +19,8 @@ The implemented evidence is:
 | Unix process-group timeout and descendant cleanup | PASS on macOS arm64 |
 | Windows Job Object compilation and cleanup | PENDING genuine Windows-native execution |
 | Linux-native cleanup behavior | PENDING genuine Linux-native execution |
-| Workspace/cache mounts and container execution | Deferred to PR 04/05 |
+| Workspace/cache mount contract | Implemented and deterministic |
+| Live container execution | Deferred to PR 05 |
 
 No macOS test is represented as Windows or Linux evidence.
 
@@ -42,11 +44,17 @@ only the minimum runtime-discovery environment (`PATH`, platform home fields,
 and documented Docker context/config fields). Raw stderr, machine name, and
 environment values are never included in the structured probe.
 
-`dry-run` starts no process. It renders a deterministic `docker run` argv with
-read-only root filesystem, explicit CPU/memory/PID limits, explicit network
-mode, a pinned image digest, and the declared check argv. It labels workspace
-mount policy as `deferred_to_pr04` because showing a plausible but unenforced
-mount would be misleading.
+`dry-run` starts no process and creates no cache directory. It renders a
+deterministic `docker run` argv with a read-only container root filesystem,
+explicit CPU/memory/PID limits, explicit network mode, a pinned image digest,
+and the declared check argv. The repository binding is read-only. Only declared
+cache and artifact bindings are read-write, and every writable source is
+contained by the resolved managed cache root. The output labels this policy
+`explicit_bindings`.
+
+Absolute host paths are shown only in local dry-run output because an operator
+must be able to audit the exact mount. They must not be copied into receipts or
+telemetry. See [`CACHE_AND_WORKSPACE.md`](CACHE_AND_WORKSPACE.md).
 
 ## Lifecycle and fail-closed rules
 

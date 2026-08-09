@@ -20,3 +20,7 @@ Semantic Versioning after its first public release.
   cancellation, stale-generation rejection, and fail-closed cleanup semantics.
 - Docker-compatible runtime capability probe, OrbStack identification, and a
   deterministic non-executing `dry-run` argv surface.
+- Persistent cross-platform cache-root resolution with atomic ownership,
+  content-addressed keys, bounded inventory, and preview-only cleanup.
+- Deterministic workspace isolation contract with a read-only repository mount
+  and narrowly scoped read-write cache and artifact bindings.

@@ -24,8 +24,9 @@ inventing product, security, licensing, or release decisions along the way.
 |---|---|---|
 | PR 01 — receipt contract | Merged | main `0095002b49f4fd09532c796ddc9955a6be6f8c1f` |
 | PR 02 — configuration plan | Merged | main `2cfee83eea8ab16f1d37b128e980d7441f6ee94e` |
-| PR 03 — runtime and supervisor | In progress | macOS/Unix source gates only; Windows-native proof pending |
-| PR 04–10 | Not started | No implementation claim |
+| PR 03 — runtime and supervisor | Merged | main `65f3ae5560a711aea21d9b2f9fefbfdeda0d125a`; Windows/Linux native proof pending |
+| PR 04 — cache and workspace isolation | In progress | source and macOS gates in isolated branch; no execution claim |
+| PR 05–10 | Not started | No implementation claim |
 
 ## 2. Mission
 
@@ -348,12 +349,14 @@ Required commands:
 
 ```console
 ccp cache path
-ccp cache inspect
-ccp cache prune --dry-run
-ccp cache prune --older-than 30d
+ccp cache init
+ccp cache inventory
+ccp cache cleanup --dry-run
 ```
 
-Actual deletion requires a resolved cache root, ownership marker, dry-run
+PR 04 deliberately exposes preview-only cleanup. Actual deletion remains
+unavailable until a later tranche can add a truthful age/retention policy.
+Future deletion requires a resolved cache root, ownership marker, dry-run
 preview, path containment check, and explicit operator command. The tool never
 recursively deletes a broad or unresolved path.
 

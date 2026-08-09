@@ -51,7 +51,18 @@ fn dry_run_json_is_deterministic_and_never_executes_the_declared_argv() {
     assert!(!marker.exists());
     let value: Value = serde_json::from_slice(&first.stdout).expect("JSON output");
     assert_eq!(value["executed"], false);
-    assert_eq!(value["workspace_mount_policy"], "deferred_to_pr04");
+    assert_eq!(value["workspace_mount_policy"], "explicit_bindings");
+    let mounts = value["workspace"]["mounts"]
+        .as_array()
+        .expect("explicit mount array");
+    assert_eq!(mounts[0]["access"], "read_only");
+    assert_eq!(mounts[0]["purpose"], "repository");
+    assert!(
+        mounts
+            .iter()
+            .skip(1)
+            .all(|mount| mount["access"] == "read_write")
+    );
 }
 
 #[test]

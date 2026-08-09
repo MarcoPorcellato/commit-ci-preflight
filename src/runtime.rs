@@ -26,6 +26,7 @@ use crate::process::{
     CancellationToken, CleanupStatus, GenerationGuard, ProcessError, ProcessRequest, ProcessResult,
     ProcessTermination, RunIdentity, SupervisorPort,
 };
+use crate::workspace::{MountAccess, WorkspaceError, WorkspacePlanV1, validate_host_path};
 
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
 const DOCTOR_CAPTURE_BYTES: usize = 65_536;
@@ -42,7 +43,11 @@ pub trait RuntimePort: Send + Sync {
         generation: &GenerationGuard,
     ) -> Result<RuntimeProbe, RuntimeError>;
 
-    fn dry_run(&self, envelope: &ExecutionPlanEnvelopeV1) -> Result<DryRunPlan, RuntimeError>;
+    fn dry_run(
+        &self,
+        envelope: &ExecutionPlanEnvelopeV1,
+        workspace: &WorkspacePlanV1,
+    ) -> Result<DryRunPlan, RuntimeError>;
 }
 
 pub fn runtime_for(kind: RuntimeKind) -> Result<Box<dyn RuntimePort>, RuntimeError> {
@@ -96,20 +101,25 @@ impl RuntimePort for DockerCompatibleRuntime {
         interpret_docker_probe(result)
     }
 
-    fn dry_run(&self, envelope: &ExecutionPlanEnvelopeV1) -> Result<DryRunPlan, RuntimeError> {
+    fn dry_run(
+        &self,
+        envelope: &ExecutionPlanEnvelopeV1,
+        workspace: &WorkspacePlanV1,
+    ) -> Result<DryRunPlan, RuntimeError> {
         let checks = envelope
             .plan
             .checks
             .iter()
-            .map(|check| docker_dry_run_check(&envelope.plan.runtime, check))
-            .collect();
+            .map(|check| docker_dry_run_check(&envelope.plan.runtime, check, workspace))
+            .collect::<Result<_, _>>()?;
         Ok(DryRunPlan {
             schema_version: "1.0",
             plan_digest: envelope.plan_digest.clone(),
             runtime: RuntimeKind::DockerCompatible,
             program: "docker",
             checks,
-            workspace_mount_policy: WorkspaceMountPolicy::DeferredToPr04,
+            workspace: workspace.clone(),
+            workspace_mount_policy: WorkspaceMountPolicy::ExplicitBindings,
             executed: false,
         })
     }
@@ -217,7 +227,11 @@ fn runtime_environment() -> BTreeMap<OsString, OsString> {
         .collect()
 }
 
-fn docker_dry_run_check(runtime: &NormalizedRuntime, check: &NormalizedCheck) -> DryRunCheck {
+fn docker_dry_run_check(
+    runtime: &NormalizedRuntime,
+    check: &NormalizedCheck,
+    workspace: &WorkspacePlanV1,
+) -> Result<DryRunCheck, RuntimeError> {
     let mut argv = vec![
         "run".to_owned(),
         "--rm".to_owned(),
@@ -234,9 +248,15 @@ fn docker_dry_run_check(runtime: &NormalizedRuntime, check: &NormalizedCheck) ->
         format!("{}m", runtime.memory_mib),
         "--pids-limit".to_owned(),
         runtime.pids_limit.to_string(),
+    ];
+    for mount in &workspace.mounts {
+        argv.push("--mount".to_owned());
+        argv.push(docker_mount_argument(mount)?);
+    }
+    argv.extend([
         "--workdir".to_owned(),
         container_working_directory(&check.working_directory),
-    ];
+    ]);
     for name in &check.argv {
         if name.contains('\0') {
             unreachable!("normalized configuration rejects NUL characters");
@@ -244,12 +264,29 @@ fn docker_dry_run_check(runtime: &NormalizedRuntime, check: &NormalizedCheck) ->
     }
     argv.push(runtime.image.clone());
     argv.extend(check.argv.clone());
-    DryRunCheck {
+    Ok(DryRunCheck {
         id: check.id.clone(),
         program: "docker",
         argv,
         depends_on: check.depends_on.clone(),
-    }
+    })
+}
+
+fn docker_mount_argument(mount: &crate::workspace::MountBinding) -> Result<String, RuntimeError> {
+    validate_host_path(&mount.source).map_err(RuntimeError::Workspace)?;
+    let source = mount
+        .source
+        .to_str()
+        .ok_or(RuntimeError::Workspace(WorkspaceError::UnsupportedHostPath))?;
+    let readonly = if mount.access == MountAccess::ReadOnly {
+        ",readonly"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "type=bind,src={source},dst={}{}",
+        mount.target, readonly
+    ))
 }
 
 fn container_working_directory(relative: &str) -> String {
@@ -319,6 +356,7 @@ pub struct DryRunPlan {
     pub runtime: RuntimeKind,
     pub program: &'static str,
     pub checks: Vec<DryRunCheck>,
+    pub workspace: WorkspacePlanV1,
     pub workspace_mount_policy: WorkspaceMountPolicy,
     pub executed: bool,
 }
@@ -334,7 +372,7 @@ pub struct DryRunCheck {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceMountPolicy {
-    DeferredToPr04,
+    ExplicitBindings,
 }
 
 #[derive(Debug)]
@@ -345,6 +383,7 @@ pub enum RuntimeError {
     Cancelled,
     CleanupUncertain,
     InvalidProbe(&'static str),
+    Workspace(WorkspaceError),
     Process(ProcessError),
 }
 
@@ -353,6 +392,7 @@ impl RuntimeError {
         match self {
             Self::Unsupported(_) | Self::Unavailable | Self::InvalidProbe(_) => 4,
             Self::TimedOut | Self::Cancelled => 5,
+            Self::Workspace(_) => 2,
             Self::CleanupUncertain | Self::Process(ProcessError::CleanupUncertain { .. }) => 70,
             Self::Process(ProcessError::StaleGeneration) => 5,
             Self::Process(_) => 70,
@@ -369,6 +409,7 @@ impl fmt::Display for RuntimeError {
             Self::Cancelled => formatter.write_str("runtime probe was cancelled"),
             Self::CleanupUncertain => formatter.write_str("runtime probe cleanup is uncertain"),
             Self::InvalidProbe(message) => write!(formatter, "invalid runtime probe: {message}"),
+            Self::Workspace(error) => write!(formatter, "invalid workspace plan: {error}"),
             Self::Process(error) => write!(formatter, "{error}"),
         }
     }
@@ -377,6 +418,7 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Workspace(error) => Some(error),
             Self::Process(error) => Some(error),
             Self::Unsupported(_)
             | Self::Unavailable
@@ -391,6 +433,7 @@ impl std::error::Error for RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cache::{CacheRootSource, ResolvedCacheRoot};
     use crate::config::ConfigV1;
     use crate::process::{CapturedStream, ExitOutcome};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -420,6 +463,18 @@ timeout_seconds = 60
             .expect("config")
             .into_plan()
             .expect("plan")
+    }
+
+    fn workspace(envelope: &ExecutionPlanEnvelopeV1) -> WorkspacePlanV1 {
+        let repository = std::env::current_dir().expect("current dir");
+        let cache = ResolvedCacheRoot {
+            path: repository
+                .parent()
+                .expect("repository parent")
+                .join(format!(".ccp-runtime-test-cache-{}", std::process::id())),
+            source: CacheRootSource::Explicit,
+        };
+        WorkspacePlanV1::build(envelope, &repository, &cache).expect("workspace")
     }
 
     #[derive(Clone, Copy)]
@@ -600,16 +655,19 @@ timeout_seconds = 60
     #[test]
     fn dry_run_is_deterministic_shell_free_and_non_executing() {
         let envelope = envelope();
-        let first = DockerCompatibleRuntime.dry_run(&envelope).expect("dry run");
+        let workspace = workspace(&envelope);
+        let first = DockerCompatibleRuntime
+            .dry_run(&envelope, &workspace)
+            .expect("dry run");
         let second = DockerCompatibleRuntime
-            .dry_run(&envelope)
+            .dry_run(&envelope, &workspace)
             .expect("dry run replay");
 
         assert_eq!(first, second);
         assert!(!first.executed);
         assert_eq!(
             first.workspace_mount_policy,
-            WorkspaceMountPolicy::DeferredToPr04
+            WorkspaceMountPolicy::ExplicitBindings
         );
         assert_eq!(first.checks[0].program, "docker");
         assert!(
@@ -619,6 +677,13 @@ timeout_seconds = 60
                 .any(|pair| pair == ["--network", "none"])
         );
         assert!(first.checks[0].argv.contains(&"--read-only".to_owned()));
+        assert!(first.checks[0].argv.contains(&"--mount".to_owned()));
+        assert!(
+            first.checks[0]
+                .argv
+                .iter()
+                .any(|part| part.ends_with("dst=/workspace,readonly"))
+        );
         assert!(
             !first.checks[0]
                 .argv

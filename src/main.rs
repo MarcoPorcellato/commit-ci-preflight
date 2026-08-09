@@ -15,12 +15,14 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
+use commit_ci_preflight::cache::{CacheError, CacheRootOptions, ManagedCache, ResolvedCacheRoot};
 use commit_ci_preflight::config::{ConfigV1, ExecutionPlanEnvelopeV1};
 use commit_ci_preflight::process::{CancellationToken, ProcessSupervisor};
 use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
 };
+use commit_ci_preflight::workspace::{WorkspaceError, WorkspacePlanV1};
 
 #[derive(Debug, Parser)]
 #[command(name = "commit-ci-preflight", version, about)]
@@ -54,7 +56,63 @@ enum Command {
         /// Configuration file to validate.
         #[arg(long, default_value = ".commit-ci-preflight.toml")]
         config: PathBuf,
+        #[command(flatten)]
+        location: CacheLocationArgs,
         /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect or initialize the persistent managed cache.
+    Cache {
+        #[command(subcommand)]
+        action: CacheCommand,
+    },
+}
+
+#[derive(Debug, Clone, Args)]
+struct CacheLocationArgs {
+    /// Repository whose checkout must remain outside the cache root.
+    #[arg(long, default_value = ".")]
+    repository: PathBuf,
+    /// Explicit persistent cache root; overrides CCP_CACHE_DIR and platform defaults.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+enum CacheCommand {
+    /// Resolve the persistent cache path without creating it.
+    Path {
+        #[command(flatten)]
+        location: CacheLocationArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create and atomically mark the managed cache root.
+    Init {
+        #[command(flatten)]
+        location: CacheLocationArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inventory an initialized cache without modifying it.
+    Inventory {
+        #[command(flatten)]
+        location: CacheLocationArgs,
+        #[arg(long, default_value_t = commit_ci_preflight::cache::DEFAULT_DISK_BUDGET_BYTES)]
+        disk_budget_bytes: u64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Plan cleanup of incomplete entries; deletion is intentionally unavailable.
+    Cleanup {
+        #[command(flatten)]
+        location: CacheLocationArgs,
+        /// Required acknowledgement that this command only reports candidates.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value_t = commit_ci_preflight::cache::DEFAULT_DISK_BUDGET_BYTES)]
+        disk_budget_bytes: u64,
         #[arg(long)]
         json: bool,
     },
@@ -65,7 +123,12 @@ fn main() {
     let result = match cli.command {
         Some(Command::Plan { config, json }) => print_plan(&config, json),
         Some(Command::Doctor { config, json }) => print_doctor(&config, json),
-        Some(Command::DryRun { config, json }) => print_dry_run(&config, json),
+        Some(Command::DryRun {
+            config,
+            location,
+            json,
+        }) => print_dry_run(&config, &location, json),
+        Some(Command::Cache { action }) => run_cache_command(action),
         None => {
             Cli::command()
                 .print_help()
@@ -105,10 +168,15 @@ fn print_plan(path: &Path, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-fn print_dry_run(path: &Path, json: bool) -> Result<(), CliError> {
+fn print_dry_run(path: &Path, location: &CacheLocationArgs, json: bool) -> Result<(), CliError> {
     let envelope = load_plan(path)?;
+    let cache = resolve_cache_root(location)?;
+    let workspace = WorkspacePlanV1::build(&envelope, &location.repository, &cache)
+        .map_err(CliError::Workspace)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
-    let dry_run = runtime.dry_run(&envelope).map_err(CliError::Runtime)?;
+    let dry_run = runtime
+        .dry_run(&envelope, &workspace)
+        .map_err(CliError::Runtime)?;
     if json {
         println!(
             "{}",
@@ -123,7 +191,10 @@ fn print_dry_run(path: &Path, json: bool) -> Result<(), CliError> {
 fn print_human_dry_run(dry_run: &DryRunPlan) -> Result<(), CliError> {
     println!("Plan: {}", dry_run.plan_digest);
     println!("Runtime: {:?}", dry_run.runtime);
-    println!("Workspace mounts: deferred to PR 04");
+    println!(
+        "Workspace mounts: {} explicit bindings",
+        dry_run.workspace.mounts.len()
+    );
     for check in &dry_run.checks {
         println!("Check: {}", check.id);
         println!("  Program: {}", check.program);
@@ -133,6 +204,100 @@ fn print_human_dry_run(dry_run: &DryRunPlan) -> Result<(), CliError> {
         );
     }
     println!("Dry-run: no command was executed.");
+    Ok(())
+}
+
+fn run_cache_command(action: CacheCommand) -> Result<(), CliError> {
+    match action {
+        CacheCommand::Path { location, json } => {
+            let root = resolve_cache_root(&location)?;
+            print_serializable_or_path(&root, &root.path, json)
+        }
+        CacheCommand::Init { location, json } => {
+            let root = resolve_cache_root(&location)?;
+            let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
+            print_serializable_or_path(cache.root(), &cache.root().path, json)
+        }
+        CacheCommand::Inventory {
+            location,
+            disk_budget_bytes,
+            json,
+        } => {
+            let root = resolve_cache_root(&location)?;
+            let inventory = ManagedCache::open(root)
+                .map_err(CliError::Cache)?
+                .with_disk_budget(disk_budget_bytes)
+                .map_err(CliError::Cache)?
+                .inventory()
+                .map_err(CliError::Cache)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&inventory).map_err(CliError::internal)?
+                );
+            } else {
+                println!("Cache root: {}", inventory.root.display());
+                println!("Entries: {}", inventory.entries.len());
+                println!("Bytes: {}", inventory.total_bytes);
+                println!("Budget exceeded: {}", inventory.budget_exceeded);
+            }
+            Ok(())
+        }
+        CacheCommand::Cleanup {
+            location,
+            dry_run,
+            disk_budget_bytes,
+            json,
+        } => {
+            if !dry_run {
+                return Err(CliError::usage(CliMessageError(
+                    "cache cleanup requires --dry-run; deletion is unavailable",
+                )));
+            }
+            let root = resolve_cache_root(&location)?;
+            let plan = ManagedCache::open(root)
+                .map_err(CliError::Cache)?
+                .with_disk_budget(disk_budget_bytes)
+                .map_err(CliError::Cache)?
+                .cleanup_dry_run()
+                .map_err(CliError::Cache)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&plan).map_err(CliError::internal)?
+                );
+            } else {
+                println!("Cache root: {}", plan.root.display());
+                println!("Candidates: {}", plan.candidates.len());
+                println!("Reclaimable bytes: {}", plan.reclaimable_bytes);
+                println!("Deletion performed: false");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn resolve_cache_root(location: &CacheLocationArgs) -> Result<ResolvedCacheRoot, CliError> {
+    ResolvedCacheRoot::resolve(
+        &location.repository,
+        &CacheRootOptions::from_process(location.cache_dir.clone()),
+    )
+    .map_err(CliError::Cache)
+}
+
+fn print_serializable_or_path(
+    value: &impl serde::Serialize,
+    path: &Path,
+    json: bool,
+) -> Result<(), CliError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(value).map_err(CliError::internal)?
+        );
+    } else {
+        println!("{}", path.display());
+    }
     Ok(())
 }
 
@@ -188,6 +353,8 @@ fn print_human_probe(probe: &RuntimeProbe) {
 #[derive(Debug)]
 enum CliError {
     Usage(Box<dyn std::error::Error>),
+    Cache(CacheError),
+    Workspace(WorkspaceError),
     Runtime(RuntimeError),
     Internal(Box<dyn std::error::Error>),
 }
@@ -204,6 +371,8 @@ impl CliError {
     fn exit_code(&self) -> i32 {
         match self {
             Self::Usage(_) => 2,
+            Self::Cache(error) => error.exit_code(),
+            Self::Workspace(_) => 2,
             Self::Runtime(error) => error.exit_code(),
             Self::Internal(_) => 70,
         }
@@ -214,6 +383,8 @@ impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage(error) => write!(formatter, "{error}"),
+            Self::Cache(error) => write!(formatter, "{error}"),
+            Self::Workspace(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Internal(_) => formatter.write_str("internal command failure"),
         }
@@ -224,10 +395,23 @@ impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Usage(error) | Self::Internal(error) => Some(error.as_ref()),
+            Self::Cache(error) => Some(error),
+            Self::Workspace(error) => Some(error),
             Self::Runtime(error) => Some(error),
         }
     }
 }
+
+#[derive(Debug)]
+struct CliMessageError(&'static str);
+
+impl fmt::Display for CliMessageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for CliMessageError {}
 
 #[cfg(test)]
 mod tests {
