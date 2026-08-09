@@ -27,7 +27,8 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 03 — runtime and supervisor | Merged | main `65f3ae5560a711aea21d9b2f9fefbfdeda0d125a`; Windows/Linux native proof pending |
 | PR 04 — cache and workspace isolation | In progress | source and macOS gates in isolated branch; no execution claim |
 | PR 05 — end-to-end local run | Implemented in this tranche | Source, deterministic tests, and macOS OrbStack proof included |
-| PR 06–10 | Not started | No implementation claim |
+| PR 06 — independent verifier and policy | Implemented in this tranche | Strict policy, machine report, and tamper matrix included |
+| PR 07–10 | Not started | No implementation claim |
 
 ## 2. Mission
 

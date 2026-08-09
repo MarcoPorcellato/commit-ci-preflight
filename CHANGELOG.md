@@ -29,3 +29,8 @@ Semantic Versioning after its first public release.
   fail-closed cache completion.
 - Clean-room Rust, Python, and Node sample projects plus macOS OrbStack evidence
   for pinned-image execution with a read-only repository.
+- Independent `verify` command with strict repository policy for commit,
+  configuration, required checks, image, platform, and freshness; canonical
+  machine report; and stable verification exit code 3.
+- Pinned policy/report JSON schemas and deterministic tamper tests that keep
+  integrity, policy, and identity assurance explicitly separate.

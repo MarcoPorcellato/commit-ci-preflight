@@ -104,9 +104,11 @@ Structural and integrity verification MUST:
 - recompute the canonical payload digest;
 - compare it exactly with `receipt_id`.
 
-Policy verification for freshness, accepted platforms, exact pull-request SHA,
-required check sets, and trusted identities belongs to later phases and must
-remain distinguishable from structural integrity.
+Policy verification for freshness, accepted platforms, exact externally
+supplied commit SHA, required check sets, image, and configuration is specified
+in [`VERIFICATION_POLICY.md`](VERIFICATION_POLICY.md). It remains distinguishable
+from structural integrity. Trusted identity and signatures belong to later
+phases.
 
 ## Regeneration
 
@@ -119,4 +121,3 @@ cargo test --test receipt_contract
 
 Regeneration is accepted only when the schema/fixture diff is intentionally
 reviewed. Tests require generated and pinned bytes to remain identical.
-
