@@ -20,6 +20,9 @@ use commit_ci_preflight::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, RECEIPT_SCHEMA_VERSION,
     ReceiptEnvelopeV1, ReceiptV1, RepositoryEvidence, RunEvidence, receipt_schema_json,
 };
+use commit_ci_preflight::verify::{
+    verification_policy_schema_json, verification_report_schema_json,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let envelope = ReceiptEnvelopeV1::seal(passing_receipt())?;
@@ -30,6 +33,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     write_exact(
         Path::new("schema/config-v1.schema.json"),
         config_schema_json()?.as_bytes(),
+    )?;
+    write_exact(
+        Path::new("schema/policy-v1.schema.json"),
+        verification_policy_schema_json()?.as_bytes(),
+    )?;
+    write_exact(
+        Path::new("schema/verification-report-v1.schema.json"),
+        verification_report_schema_json()?.as_bytes(),
     )?;
     write_exact(
         Path::new("tests/fixtures/receipt-v1-pass.json"),

@@ -18,4 +18,5 @@ pub mod process;
 pub mod receipt;
 pub mod run;
 pub mod runtime;
+pub mod verify;
 pub mod workspace;

@@ -27,6 +27,8 @@ probe, and explicit container argv renderer are documented in
 [`docs/RUNTIME.md`](docs/RUNTIME.md). Persistent cache ownership, inventory,
 and explicit workspace mounts are documented in
 [`docs/CACHE_AND_WORKSPACE.md`](docs/CACHE_AND_WORKSPACE.md).
+Independent receipt and repository-policy verification is documented in
+[`docs/VERIFICATION_POLICY.md`](docs/VERIFICATION_POLICY.md).
 
 ## Product direction
 
@@ -61,6 +63,9 @@ cargo run -- dry-run --config examples/config/rust-project.toml
 cargo run -- doctor --config examples/config/rust-project.toml
 cargo run -- run --config examples/projects/rust/.commit-ci-preflight.toml \
   --repository examples/projects/rust --generation 1
+cargo run -- verify --receipt tests/fixtures/receipt-v1-pass.json \
+  --policy tests/fixtures/policy-v1.toml \
+  --expected-commit 0123456789abcdef0123456789abcdef01234567
 cargo run -- cache path
 cargo run -- cache init
 cargo run -- cache inventory --json
@@ -71,8 +76,9 @@ cargo run -- cache cleanup --dry-run
 `dry-run` prints explicit argv and mount bindings, but never starts Docker,
 creates the cache root, or executes a declared check. `run` requires a clean
 Git checkout, executes checks without an implicit shell, and writes a canonical
-receipt. Cleanup remains preview-only. The receipt is integrity evidence, not
-an identity attestation; independent policy verification arrives in PR 06.
+receipt. `verify` independently checks receipt integrity and repository policy.
+Cleanup remains preview-only. Neither a receipt nor a verification PASS is an
+identity attestation.
 
 ## Independence and clean-room boundary
 

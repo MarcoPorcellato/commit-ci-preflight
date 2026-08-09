@@ -1,0 +1,105 @@
+// Copyright 2026 Marco Porcellato
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::process::Command;
+
+const RECEIPT: &str = "tests/fixtures/receipt-v1-pass.json";
+const POLICY: &str = "tests/fixtures/policy-v1.toml";
+const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
+
+fn verify_command(expected_commit: &str) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"));
+    command.args([
+        "verify",
+        "--receipt",
+        RECEIPT,
+        "--policy",
+        POLICY,
+        "--expected-commit",
+        expected_commit,
+        "--evaluated-at-utc",
+        EVALUATED_AT,
+        "--json",
+    ]);
+    command
+}
+
+#[test]
+fn verify_cli_emits_machine_report_and_zero_only_for_pass() {
+    let output = verify_command(COMMIT).output().expect("verify CLI");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(report["integrity_status"], "PASS");
+    assert_eq!(report["policy_status"], "PASS");
+    assert_eq!(report["decision"], "PASS");
+}
+
+#[test]
+fn valid_but_wrong_external_commit_exits_three_with_policy_report() {
+    let output = verify_command(&"b".repeat(40))
+        .output()
+        .expect("policy failure CLI");
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(report["integrity_status"], "PASS");
+    assert_eq!(report["policy_status"], "FAIL");
+    assert_eq!(report["decision"], "FAIL");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("verification completed with Fail"));
+}
+
+#[test]
+fn missing_receipt_is_verification_failure_and_invalid_commit_is_usage() {
+    let missing = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "verify",
+            "--receipt",
+            "tests/fixtures/does-not-exist.json",
+            "--policy",
+            POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--json",
+        ])
+        .output()
+        .expect("missing receipt CLI");
+    assert_eq!(missing.status.code(), Some(3));
+    let missing_report: serde_json::Value =
+        serde_json::from_slice(&missing.stdout).expect("missing receipt report");
+    assert_eq!(missing_report["integrity_status"], "FAIL");
+    assert_eq!(missing_report["policy_status"], "NOT_RUN");
+    assert_eq!(missing_report["findings"][0]["code"], "receipt.read_failed");
+
+    let invalid = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "verify",
+            "--receipt",
+            RECEIPT,
+            "--policy",
+            POLICY,
+            "--expected-commit",
+            "HEAD",
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+        ])
+        .output()
+        .expect("invalid commit CLI");
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+}

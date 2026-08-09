@@ -1,0 +1,11 @@
+schema_version = "1.0"
+project = "example/project"
+configuration_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+required_checks = ["rust-test"]
+image_reference = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+max_age_seconds = 3600
+
+[[platforms]]
+host_os = "macos"
+host_arch = "aarch64"
+runtime_kind = "docker_compatible"

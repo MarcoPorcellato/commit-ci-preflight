@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VerificationReportV1",
+  "type": "object",
+  "properties": {
+    "assurance_scope": {
+      "type": "string"
+    },
+    "decision": {
+      "$ref": "#/$defs/VerificationDecision"
+    },
+    "evaluated_at_utc": {
+      "type": "string"
+    },
+    "expected_commit": {
+      "type": "string"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/VerificationFindingV1"
+      }
+    },
+    "integrity_status": {
+      "$ref": "#/$defs/VerificationStatus"
+    },
+    "policy_status": {
+      "$ref": "#/$defs/VerificationStatus"
+    },
+    "receipt_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assurance_scope",
+    "evaluated_at_utc",
+    "expected_commit",
+    "integrity_status",
+    "policy_status",
+    "decision",
+    "findings"
+  ],
+  "$defs": {
+    "VerificationDecision": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL"
+      ]
+    },
+    "VerificationFindingV1": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "field": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "field",
+        "message"
+      ]
+    },
+    "VerificationStatus": {
+      "type": "string",
+      "enum": [
+        "PASS",
+        "FAIL",
+        "NOT_RUN"
+      ]
+    }
+  }
+}

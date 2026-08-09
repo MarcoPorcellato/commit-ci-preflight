@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -23,6 +24,10 @@ use commit_ci_preflight::receipt::EvidenceStatus;
 use commit_ci_preflight::run::{RunError, RunRequest, SystemClock, execute_local_run};
 use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
+};
+use commit_ci_preflight::verify::{
+    VerificationDecision, VerificationError, VerificationPolicyV1, receipt_input_failure_report,
+    system_evaluated_at_utc, verify_receipt_document,
 };
 use commit_ci_preflight::workspace::{WorkspaceError, WorkspacePlanV1};
 
@@ -75,6 +80,24 @@ enum Command {
         #[arg(long, default_value_t = 1)]
         generation: u64,
         /// Emit the canonical receipt as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Independently verify receipt integrity and repository policy.
+    Verify {
+        /// Canonical receipt JSON to verify.
+        #[arg(long, default_value = ".ccp/receipt.json")]
+        receipt: PathBuf,
+        /// Strict repository verification policy.
+        #[arg(long, default_value = ".commit-ci-policy.toml")]
+        policy: PathBuf,
+        /// Exact lowercase Git SHA supplied by the calling trust boundary.
+        #[arg(long)]
+        expected_commit: String,
+        /// Explicit strict UTC evaluation instant; defaults to the local system clock.
+        #[arg(long)]
+        evaluated_at_utc: Option<String>,
+        /// Emit the canonical machine-readable verification report.
         #[arg(long)]
         json: bool,
     },
@@ -150,6 +173,19 @@ fn main() {
             generation,
             json,
         }) => print_run(&config, &location, generation, json),
+        Some(Command::Verify {
+            receipt,
+            policy,
+            expected_commit,
+            evaluated_at_utc,
+            json,
+        }) => print_verify(
+            &receipt,
+            &policy,
+            &expected_commit,
+            evaluated_at_utc.as_deref(),
+            json,
+        ),
         Some(Command::Cache { action }) => run_cache_command(action),
         None => {
             Cli::command()
@@ -162,6 +198,45 @@ fn main() {
     if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(error.exit_code());
+    }
+}
+
+fn print_verify(
+    receipt_path: &Path,
+    policy_path: &Path,
+    expected_commit: &str,
+    evaluated_at_utc: Option<&str>,
+    json: bool,
+) -> Result<(), CliError> {
+    let policy = VerificationPolicyV1::load(policy_path).map_err(CliError::usage)?;
+    let evaluated_at = evaluated_at_utc
+        .map(str::to_owned)
+        .map(Ok)
+        .unwrap_or_else(system_evaluated_at_utc)
+        .map_err(CliError::Verification)?;
+    let report = match fs::read(receipt_path) {
+        Ok(receipt) => verify_receipt_document(&receipt, &policy, expected_commit, &evaluated_at),
+        Err(_) => receipt_input_failure_report(expected_commit, &evaluated_at),
+    }
+    .map_err(CliError::Verification)?;
+    if json {
+        let bytes = report.canonical_bytes().map_err(CliError::Verification)?;
+        println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+    } else {
+        println!("Integrity: {:?}", report.integrity_status);
+        println!("Policy: {:?}", report.policy_status);
+        for finding in &report.findings {
+            println!(
+                "  - {} [{}]: {}",
+                finding.code, finding.field, finding.message
+            );
+        }
+        println!("Decision: {:?}", report.decision);
+    }
+    if report.decision == VerificationDecision::Pass {
+        Ok(())
+    } else {
+        Err(CliError::VerifyOutcome(report.decision))
     }
 }
 
@@ -428,6 +503,8 @@ enum CliError {
     Runtime(RuntimeError),
     Run(RunError),
     RunOutcome(EvidenceStatus),
+    Verification(VerificationError),
+    VerifyOutcome(VerificationDecision),
     Internal(Box<dyn std::error::Error>),
 }
 
@@ -450,6 +527,11 @@ impl CliError {
             Self::RunOutcome(EvidenceStatus::Fail) => 1,
             Self::RunOutcome(EvidenceStatus::Pending | EvidenceStatus::NotRun) => 5,
             Self::RunOutcome(EvidenceStatus::Pass) => 0,
+            Self::VerifyOutcome(_) => 3,
+            Self::Verification(VerificationError::Policy(_))
+            | Self::Verification(VerificationError::InvalidExpectedCommit)
+            | Self::Verification(VerificationError::InvalidEvaluationTime) => 2,
+            Self::Verification(VerificationError::Receipt(_)) => 70,
             Self::Internal(_) => 70,
         }
     }
@@ -464,6 +546,10 @@ impl fmt::Display for CliError {
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Run(error) => write!(formatter, "{error}"),
             Self::RunOutcome(status) => write!(formatter, "run completed with {status:?}"),
+            Self::Verification(error) => write!(formatter, "{error}"),
+            Self::VerifyOutcome(decision) => {
+                write!(formatter, "verification completed with {decision:?}")
+            }
             Self::Internal(_) => formatter.write_str("internal command failure"),
         }
     }
@@ -478,6 +564,8 @@ impl std::error::Error for CliError {
             Self::Runtime(error) => Some(error),
             Self::Run(error) => Some(error),
             Self::RunOutcome(_) => None,
+            Self::Verification(error) => Some(error),
+            Self::VerifyOutcome(_) => None,
         }
     }
 }
