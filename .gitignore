@@ -1,1 +1,11 @@
 /target
+/.ccp
+/.ccp-cache
+/.ccp-mounts/cargo-home/*
+!/.ccp-mounts/cargo-home/.gitkeep
+/.ccp-mounts/cargo-target/*
+!/.ccp-mounts/cargo-target/.gitkeep
+/.ccp-mounts/rustup-home/*
+!/.ccp-mounts/rustup-home/.gitkeep
+/.ccp-mounts/test-work/*
+!/.ccp-mounts/test-work/.gitkeep

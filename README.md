@@ -29,6 +29,8 @@ and explicit workspace mounts are documented in
 [`docs/CACHE_AND_WORKSPACE.md`](docs/CACHE_AND_WORKSPACE.md).
 Independent receipt and repository-policy verification is documented in
 [`docs/VERIFICATION_POLICY.md`](docs/VERIFICATION_POLICY.md).
+The minimal remote control-plane adapter and its threat model are documented in
+[`docs/GITHUB_GATE.md`](docs/GITHUB_GATE.md).
 
 ## Product direction
 
@@ -66,6 +68,7 @@ cargo run -- run --config examples/projects/rust/.commit-ci-preflight.toml \
 cargo run -- verify --receipt tests/fixtures/receipt-v1-pass.json \
   --policy tests/fixtures/policy-v1.toml \
   --expected-commit 0123456789abcdef0123456789abcdef01234567
+cargo run -- plan --config .commit-ci-preflight.toml --json
 cargo run -- cache path
 cargo run -- cache init
 cargo run -- cache inventory --json
@@ -79,6 +82,18 @@ Git checkout, executes checks without an implicit shell, and writes a canonical
 receipt. `verify` independently checks receipt integrity and repository policy.
 Cleanup remains preview-only. Neither a receipt nor a verification PASS is an
 identity attestation.
+
+For this repository's complete local preflight, export
+CARGO_HOME=.ccp-mounts/cargo-home and
+CARGO_TARGET_DIR=.ccp-mounts/cargo-target, export
+RUSTUP_HOME=.ccp-mounts/rustup-home, then run the root
+configuration as described in
+[`docs/GITHUB_GATE.md`](docs/GITHUB_GATE.md). GitHub verifies the resulting
+commit-bound receipt; it does not repeat the heavy project checks.
+
+Container self-tests receive an explicit fixture root in a managed writable
+cache mount while the source checkout remains read-only. Direct host runs keep
+their historical sibling-fixture behavior.
 
 ## Independence and clean-room boundary
 

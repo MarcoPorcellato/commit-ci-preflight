@@ -828,10 +828,15 @@ mod tests {
 
     impl RunFixture {
         fn new(label: &str) -> Self {
-            let root = std::env::current_dir()
-                .expect("current directory")
-                .parent()
-                .expect("repository parent")
+            let root = std::env::var_os("CCP_TEST_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .parent()
+                        .expect("repository parent")
+                        .to_path_buf()
+                })
                 .join(format!(".ccp-run-test-{}-{label}", std::process::id()));
             if root.exists() {
                 fs::remove_dir_all(&root).expect("clean fixture root");

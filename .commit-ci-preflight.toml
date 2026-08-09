@@ -1,0 +1,64 @@
+schema_version = "1.0"
+project = "MarcoPorcellato/commit-ci-preflight"
+
+[runtime]
+kind = "docker_compatible"
+image = "docker.io/library/rust@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479"
+cpu_count = 4
+memory_mib = 4096
+pids_limit = 512
+network = true
+
+[receipt]
+output = ".ccp/receipt.json"
+freshness_seconds = 86400
+
+[environment]
+allow = ["CARGO_HOME", "CARGO_TARGET_DIR", "RUSTUP_HOME"]
+
+[[caches]]
+id = "cargo-home"
+mount_path = ".ccp-mounts/cargo-home"
+
+[[caches]]
+id = "cargo-target"
+mount_path = ".ccp-mounts/cargo-target"
+
+[[caches]]
+id = "rustup-home"
+mount_path = ".ccp-mounts/rustup-home"
+
+[[caches]]
+id = "test-work"
+mount_path = ".ccp-mounts/test-work"
+
+[[checks]]
+id = "format"
+required = true
+argv = ["cargo", "fmt", "--all", "--", "--check"]
+working_directory = "."
+timeout_seconds = 900
+
+[[checks]]
+id = "test"
+required = true
+argv = ["env", "CCP_TEST_ROOT=/workspace/.ccp-mounts/test-work", "cargo", "test", "--locked", "--all-targets", "--all-features"]
+working_directory = "."
+timeout_seconds = 900
+depends_on = ["format"]
+
+[[checks]]
+id = "clippy"
+required = true
+argv = ["cargo", "clippy", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"]
+working_directory = "."
+timeout_seconds = 900
+depends_on = ["test"]
+
+[[checks]]
+id = "docs"
+required = true
+argv = ["cargo", "doc", "--locked", "--no-deps"]
+working_directory = "."
+timeout_seconds = 600
+depends_on = ["clippy"]

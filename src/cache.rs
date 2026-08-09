@@ -285,7 +285,7 @@ impl ManagedCache {
                 ensure_unowned_root_is_empty(&root.path)?;
                 write_owner_marker(&root.path, &marker)?;
             }
-            validate_owner_marker(&marker)?;
+            validate_owner_marker_after_initialization(&marker)?;
         }
         ensure_managed_directory(&root.path.join(ENTRIES_DIR))?;
         ensure_managed_directory(&root.path.join(WORKSPACES_DIR))?;
@@ -501,6 +501,18 @@ fn wait_for_concurrent_initializer(root: &Path, marker: &Path) -> Result<(), Cac
         return Ok(());
     }
     Ok(())
+}
+
+fn validate_owner_marker_after_initialization(marker: &Path) -> Result<(), CacheError> {
+    for attempt in 0..INIT_RETRIES {
+        match validate_owner_marker(marker) {
+            Err(CacheError::OwnershipMissing(_)) if attempt + 1 < INIT_RETRIES => {
+                thread::sleep(INIT_RETRY_DELAY);
+            }
+            result => return result,
+        }
+    }
+    unreachable!("bounded marker validation always returns")
 }
 
 fn ensure_unowned_root_is_empty(root: &Path) -> Result<(), CacheError> {
@@ -868,10 +880,15 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     fn test_root(name: &str) -> PathBuf {
-        std::env::current_dir()
-            .expect("current directory")
-            .parent()
-            .expect("repository parent")
+        std::env::var_os("CCP_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .expect("current directory")
+                    .parent()
+                    .expect("repository parent")
+                    .to_path_buf()
+            })
             .join(format!(".ccp-cache-test-{}-{name}", std::process::id()))
     }
 

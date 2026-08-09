@@ -25,10 +25,11 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 01 — receipt contract | Merged | main `0095002b49f4fd09532c796ddc9955a6be6f8c1f` |
 | PR 02 — configuration plan | Merged | main `2cfee83eea8ab16f1d37b128e980d7441f6ee94e` |
 | PR 03 — runtime and supervisor | Merged | main `65f3ae5560a711aea21d9b2f9fefbfdeda0d125a`; Windows/Linux native proof pending |
-| PR 04 — cache and workspace isolation | In progress | source and macOS gates in isolated branch; no execution claim |
-| PR 05 — end-to-end local run | Implemented in this tranche | Source, deterministic tests, and macOS OrbStack proof included |
-| PR 06 — independent verifier and policy | Implemented in this tranche | Strict policy, machine report, and tamper matrix included |
-| PR 07–10 | Not started | No implementation claim |
+| PR 04 — cache and workspace isolation | Merged | main 2661266fb0f1276eb39d382ede64fba2b0fd1f80 |
+| PR 05 — end-to-end local run | Merged | main af7d760061a64b908ddb50c625c62843d467bb60 |
+| PR 06 — independent verifier and policy | Merged | main 80222e16353e8e626b6e5e55e92d8d0a2c2ddede |
+| PR 07 — lightweight GitHub gate | Implemented in this tranche | Trusted-base verifier, SHA-bound evidence branch, least-privilege workflow, and fail-closed tests |
+| PR 08–10 | Not started | No implementation claim |
 
 ## 2. Mission
 

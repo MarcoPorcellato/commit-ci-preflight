@@ -21,6 +21,10 @@ Both the expected commit and an explicit evaluation instant are caller trust
 inputs and are copied into the report. A future remote gate must derive them
 from its trusted event and clock, never from the uploaded receipt.
 
+The implemented GitHub adapter follows that rule: it supplies the pull-request
+head SHA as the expected commit and uses the trusted runner clock. See
+[`GITHUB_GATE.md`](GITHUB_GATE.md).
+
 ## Policy file
 
 The strict TOML schema is pinned at
@@ -91,3 +95,6 @@ integrity and repository policy only. It does not establish producer identity,
 host trust, signature validity, GitHub event identity, reviewer state,
 permissions, or native evidence for a platform that was not executed. Those
 claims remain outside v1 and must not be inferred from a PASS report.
+
+The GitHub gate adds event binding and a commit status, but does not upgrade the
+unsigned receipt into producer identity or host attestation.
