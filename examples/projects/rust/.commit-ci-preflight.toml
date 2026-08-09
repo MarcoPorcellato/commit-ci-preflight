@@ -1,0 +1,21 @@
+schema_version = "1.0"
+project = "examples/rust"
+
+[runtime]
+kind = "docker_compatible"
+image = "docker.io/library/rust@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479"
+cpu_count = 2
+memory_mib = 1024
+pids_limit = 128
+network = false
+
+[[caches]]
+id = "cargo-target"
+mount_path = "target"
+
+[[checks]]
+id = "test"
+required = true
+argv = ["cargo", "test", "--locked"]
+working_directory = "."
+timeout_seconds = 300

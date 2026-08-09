@@ -24,3 +24,8 @@ Semantic Versioning after its first public release.
   content-addressed keys, bounded inventory, and preview-only cleanup.
 - Deterministic workspace isolation contract with a read-only repository mount
   and narrowly scoped read-write cache and artifact bindings.
+- End-to-end local `run` orchestration with clean-commit binding, deterministic
+  result aggregation, stable exit codes, atomic canonical receipts, and
+  fail-closed cache completion.
+- Clean-room Rust, Python, and Node sample projects plus macOS OrbStack evidence
+  for pinned-image execution with a read-only repository.

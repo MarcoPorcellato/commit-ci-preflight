@@ -12,17 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
-use crate::cache::{CacheError, CacheKey, ResolvedCacheRoot};
+use crate::cache::{CacheError, CacheKey, ManagedCache, ResolvedCacheRoot};
 use crate::config::ExecutionPlanEnvelopeV1;
 
 const CONTAINER_WORKSPACE: &str = "/workspace";
+const RUN_LOCK_FILE: &str = ".run-lock-v1";
+static RUN_LOCK_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +67,15 @@ impl WorkspacePlanV1 {
         repository: &Path,
         cache: &ResolvedCacheRoot,
     ) -> Result<Self, WorkspaceError> {
+        Self::build_with_cache_sources(envelope, repository, cache, &BTreeMap::new())
+    }
+
+    fn build_with_cache_sources(
+        envelope: &ExecutionPlanEnvelopeV1,
+        repository: &Path,
+        cache: &ResolvedCacheRoot,
+        cache_sources: &BTreeMap<String, PathBuf>,
+    ) -> Result<Self, WorkspaceError> {
         let repository = fs::canonicalize(repository).map_err(WorkspaceError::Io)?;
         if !repository.is_dir() {
             return Err(WorkspaceError::RepositoryNotDirectory);
@@ -85,7 +98,10 @@ impl WorkspacePlanV1 {
         for declared in &envelope.plan.caches {
             let key =
                 CacheKey::for_plan_cache(envelope, declared).map_err(WorkspaceError::Cache)?;
-            let source = cache.entry_data_path(&key);
+            let source = cache_sources
+                .get(&declared.id)
+                .cloned()
+                .unwrap_or_else(|| cache.entry_data_path(&key));
             validate_under_root(&source, &cache.path)?;
             let target = container_target(&declared.mount_path)?;
             if !targets.insert(target.clone()) {
@@ -127,6 +143,154 @@ impl WorkspacePlanV1 {
     }
 }
 
+pub struct PreparedWorkspace {
+    pub plan: WorkspacePlanV1,
+    cache_keys: Vec<CacheKey>,
+    lock: WorkspaceLock,
+}
+
+impl PreparedWorkspace {
+    pub fn prepare(
+        envelope: &ExecutionPlanEnvelopeV1,
+        repository: &Path,
+        cache: &ManagedCache,
+    ) -> Result<Self, WorkspaceError> {
+        let run_root = cache
+            .workspace_path(&envelope.plan_digest)
+            .map_err(WorkspaceError::Cache)?;
+        create_managed_directory_chain(&run_root, &cache.root().path)?;
+        let lock = WorkspaceLock::acquire(&run_root)?;
+
+        let mut cache_sources = BTreeMap::new();
+        let mut cache_keys = Vec::new();
+        for declared in &envelope.plan.caches {
+            let key =
+                CacheKey::for_plan_cache(envelope, declared).map_err(WorkspaceError::Cache)?;
+            let prepared = cache.prepare_entry(&key).map_err(WorkspaceError::Cache)?;
+            validate_under_root(&prepared.data_path, &cache.root().path)?;
+            cache_sources.insert(declared.id.clone(), prepared.data_path);
+            cache_keys.push(key);
+        }
+
+        for check in &envelope.plan.checks {
+            for artifact in &check.artifacts {
+                prepare_artifact_file(&run_root, artifact)?;
+            }
+        }
+
+        let plan = WorkspacePlanV1::build_with_cache_sources(
+            envelope,
+            repository,
+            cache.root(),
+            &cache_sources,
+        )?;
+        Ok(Self {
+            plan,
+            cache_keys,
+            lock,
+        })
+    }
+
+    pub fn mark_caches_complete(&self, cache: &ManagedCache) -> Result<(), WorkspaceError> {
+        for key in &self.cache_keys {
+            cache
+                .mark_entry_complete(key)
+                .map_err(WorkspaceError::Cache)?;
+        }
+        Ok(())
+    }
+
+    pub fn lock_path(&self) -> &Path {
+        &self.lock.path
+    }
+}
+
+struct WorkspaceLock {
+    path: PathBuf,
+    owner: Vec<u8>,
+}
+
+impl WorkspaceLock {
+    fn acquire(run_root: &Path) -> Result<Self, WorkspaceError> {
+        let path = run_root.join(RUN_LOCK_FILE);
+        let sequence = RUN_LOCK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let owner = format!("pid={} sequence={sequence}\n", std::process::id()).into_bytes();
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    WorkspaceError::Busy(path.clone())
+                } else {
+                    WorkspaceError::Io(error)
+                }
+            })?;
+        let result = (|| {
+            file.write_all(&owner).map_err(WorkspaceError::Io)?;
+            file.sync_all().map_err(WorkspaceError::Io)
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&path);
+            return Err(error);
+        }
+        Ok(Self { path, owner })
+    }
+}
+
+impl Drop for WorkspaceLock {
+    fn drop(&mut self) {
+        if fs::read(&self.path).is_ok_and(|bytes| bytes == self.owner) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn create_managed_directory_chain(path: &Path, root: &Path) -> Result<(), WorkspaceError> {
+    validate_under_root(path, root)?;
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| WorkspaceError::PathEscape)?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        ensure_plain_directory(&current)?;
+    }
+    Ok(())
+}
+
+fn ensure_plain_directory(path: &Path) -> Result<(), WorkspaceError> {
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let metadata = fs::symlink_metadata(path).map_err(WorkspaceError::Io)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                Err(WorkspaceError::UnsafeManagedObject)
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) => Err(WorkspaceError::Io(error)),
+    }
+}
+
+fn prepare_artifact_file(run_root: &Path, artifact: &str) -> Result<(), WorkspaceError> {
+    let path = run_root.join("artifacts").join(artifact);
+    validate_under_root(&path, run_root)?;
+    let parent = path.parent().ok_or(WorkspaceError::PathEscape)?;
+    create_managed_directory_chain(parent, run_root)?;
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(WorkspaceError::UnsafeManagedObject);
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(WorkspaceError::Io(error)),
+    }
+    File::create(path).map_err(WorkspaceError::Io)?;
+    Ok(())
+}
+
 fn container_target(relative: &str) -> Result<String, WorkspaceError> {
     if relative.is_empty() || relative.starts_with('/') || relative.contains('\\') {
         return Err(WorkspaceError::InvalidLogicalPath);
@@ -157,6 +321,8 @@ pub enum WorkspaceError {
     UnsupportedHostPath,
     DuplicateTarget(String),
     PathEscape,
+    Busy(PathBuf),
+    UnsafeManagedObject,
     Cache(CacheError),
     Io(std::io::Error),
 }
@@ -171,6 +337,14 @@ impl fmt::Display for WorkspaceError {
             }
             Self::DuplicateTarget(target) => write!(formatter, "duplicate mount target: {target}"),
             Self::PathEscape => formatter.write_str("writable mount escaped its managed root"),
+            Self::Busy(path) => write!(
+                formatter,
+                "another run owns this workspace generation; verify no runner is active before removing {}",
+                path.display()
+            ),
+            Self::UnsafeManagedObject => {
+                formatter.write_str("unsafe object found inside managed workspace")
+            }
             Self::Cache(error) => write!(formatter, "{error}"),
             Self::Io(_) => formatter.write_str("workspace filesystem operation failed"),
         }
@@ -295,5 +469,50 @@ artifacts = ["target/results.json"]
             validate_host_path(Path::new("/safe/path,with-comma")),
             Err(WorkspaceError::UnsupportedHostPath)
         ));
+    }
+
+    #[test]
+    fn prepared_workspace_creates_only_managed_writable_paths_and_releases_lock() {
+        let name = "prepared";
+        let (repository, resolved, envelope) = fixture(name);
+        let cache = ManagedCache::initialize(resolved.clone()).expect("cache");
+        let lock_path;
+        {
+            let prepared =
+                PreparedWorkspace::prepare(&envelope, &repository, &cache).expect("prepare");
+            lock_path = prepared.lock_path().to_path_buf();
+            assert!(lock_path.is_file());
+            assert!(
+                prepared
+                    .plan
+                    .mounts
+                    .iter()
+                    .filter(|mount| mount.access == MountAccess::ReadWrite)
+                    .all(|mount| mount.source.starts_with(&resolved.path))
+            );
+            assert!(matches!(
+                PreparedWorkspace::prepare(&envelope, &repository, &cache),
+                Err(WorkspaceError::Busy(path)) if path == lock_path
+            ));
+        }
+        assert!(!lock_path.exists());
+        fs::remove_dir_all(test_root(name)).expect("clean fixture");
+    }
+
+    #[test]
+    fn workspace_drop_never_removes_a_replaced_lock_owner() {
+        let name = "replaced-lock";
+        let (repository, resolved, envelope) = fixture(name);
+        let cache = ManagedCache::initialize(resolved).expect("cache");
+        let prepared = PreparedWorkspace::prepare(&envelope, &repository, &cache).expect("prepare");
+        let lock_path = prepared.lock_path().to_path_buf();
+        fs::write(&lock_path, b"replacement-owner\n").expect("replace lock owner");
+        drop(prepared);
+        assert_eq!(
+            fs::read(&lock_path).expect("replacement lock remains"),
+            b"replacement-owner\n"
+        );
+        fs::remove_file(lock_path).expect("remove exact replacement lock");
+        fs::remove_dir_all(test_root(name)).expect("clean fixture");
     }
 }

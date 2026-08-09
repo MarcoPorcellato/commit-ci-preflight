@@ -26,7 +26,8 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 02 — configuration plan | Merged | main `2cfee83eea8ab16f1d37b128e980d7441f6ee94e` |
 | PR 03 — runtime and supervisor | Merged | main `65f3ae5560a711aea21d9b2f9fefbfdeda0d125a`; Windows/Linux native proof pending |
 | PR 04 — cache and workspace isolation | In progress | source and macOS gates in isolated branch; no execution claim |
-| PR 05–10 | Not started | No implementation claim |
+| PR 05 — end-to-end local run | Implemented in this tranche | Source, deterministic tests, and macOS OrbStack proof included |
+| PR 06–10 | Not started | No implementation claim |
 
 ## 2. Mission
 

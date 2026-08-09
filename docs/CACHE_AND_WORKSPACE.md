@@ -2,10 +2,10 @@
 
 ## Status and scope
 
-PR 04 implements persistent cache-root resolution, atomic ownership,
+PR 04 introduced persistent cache-root resolution, atomic ownership,
 content-addressed cache keys, bounded inventory, preview-only cleanup, and a
-pure workspace mount plan. It does not restore cache contents, create a
-container, execute project commands, delete cache data, or emit a PASS receipt.
+pure workspace mount plan. PR 05 prepares those paths and executes the plan;
+automatic cache deletion remains intentionally unavailable.
 
 The separation is intentional:
 
@@ -13,7 +13,8 @@ The separation is intentional:
   read-only;
 - `cache init` creates only the owned cache root and its fixed directory
   skeleton;
-- live workspace preparation and execution begin in PR 05.
+- `run` creates only declared managed paths, holds a generation lock, executes
+  checks, and marks cache entries complete only after every check passes.
 
 ## Persistent root resolution
 
@@ -129,7 +130,18 @@ Docker socket mount, or undeclared writable repository binding.
 
 The read-only repository plus nested writable bindings is a containment
 contract, not a complete sandbox against hostile code. The live runtime must
-revalidate and prepare these exact paths in PR 05 before execution.
+revalidate and prepare these exact paths before every execution.
+
+Each plan digest has a `.run-lock-v1` file while a runner owns its workspace.
+Normal completion removes it. A crash may leave the lock behind; the next run
+fails closed and reports its exact path. The tool never guesses that such a lock
+is stale. An operator may remove only that file after independently verifying
+that no runner using the same cache root is active.
+
+Cache payloads are mutable performance state. Their bytes are neither copied
+into receipts nor claimed as reproducibility evidence. The immutable image,
+normalized plan, commit, command results, and output digests are the attested
+surface.
 
 ## Privacy and evidence limits
 

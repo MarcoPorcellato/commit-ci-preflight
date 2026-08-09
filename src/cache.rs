@@ -330,6 +330,75 @@ impl ManagedCache {
         self.root.workspace_path(plan_digest)
     }
 
+    pub fn prepare_entry(&self, key: &CacheKey) -> Result<PreparedCacheEntry, CacheError> {
+        validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
+        let entries_root = self.root.path.join(ENTRIES_DIR);
+        validate_plain_directory(&entries_root)?;
+        let path = self.entry_path(key);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CacheError::SymlinkInManagedRoot(path));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(CacheError::UnexpectedEntry(path));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                fs::create_dir(&path).map_err(CacheError::Io)?;
+            }
+            Err(error) => return Err(CacheError::Io(error)),
+        }
+        let complete = entry_status(&path, &key.directory_name())? == CacheEntryStatus::Complete;
+        let data_path = path.join("data");
+        ensure_managed_directory(&data_path)?;
+        Ok(PreparedCacheEntry {
+            path,
+            data_path,
+            was_complete: complete,
+        })
+    }
+
+    pub fn mark_entry_complete(&self, key: &CacheKey) -> Result<(), CacheError> {
+        validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
+        let entry = self.entry_path(key);
+        validate_plain_directory(&entry)?;
+        validate_plain_directory(&entry.join("data"))?;
+        let marker = entry.join(COMPLETE_FILE);
+        match fs::symlink_metadata(&marker) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CacheError::SymlinkInManagedRoot(marker));
+            }
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(CacheError::UnexpectedEntry(marker));
+            }
+            Ok(_) => {
+                if fs::read(&marker).map_err(CacheError::Io)? == COMPLETE_BYTES {
+                    return Ok(());
+                }
+                return Err(CacheError::UnexpectedEntry(marker));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CacheError::Io(error)),
+        }
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = entry.join(format!(".complete-tmp-{}-{sequence}", std::process::id()));
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(CacheError::Io)?;
+            file.write_all(COMPLETE_BYTES).map_err(CacheError::Io)?;
+            file.sync_all().map_err(CacheError::Io)?;
+            fs::rename(&temporary, &marker).map_err(CacheError::Io)
+        })();
+        if temporary.exists() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        Ok(())
+    }
+
     pub fn inventory(&self) -> Result<CacheInventory, CacheError> {
         validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
         let entries_root = self.root.path.join(ENTRIES_DIR);
@@ -402,6 +471,13 @@ impl ManagedCache {
             deletion_performed: false,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedCacheEntry {
+    pub path: PathBuf,
+    pub data_path: PathBuf,
+    pub was_complete: bool,
 }
 
 fn wait_for_concurrent_initializer(root: &Path, marker: &Path) -> Result<(), CacheError> {
@@ -1069,6 +1145,23 @@ timeout_seconds = 60
             ManagedCache::open(resolved.clone()),
             Err(CacheError::SymlinkInManagedRoot(_))
         ));
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn prepared_entry_is_incomplete_until_atomically_marked() {
+        let (repo, resolved) = resolved_fixture("prepare-entry");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let envelope = envelope();
+        let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
+
+        let prepared = cache.prepare_entry(&key).expect("prepare");
+        assert!(!prepared.was_complete);
+        assert!(prepared.data_path.is_dir());
+        cache.mark_entry_complete(&key).expect("mark complete");
+        assert!(cache.prepare_entry(&key).expect("reopen").was_complete);
+
         clean(&resolved.path);
         clean(&repo);
     }
