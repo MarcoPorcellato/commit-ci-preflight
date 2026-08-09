@@ -31,6 +31,9 @@ Independent receipt and repository-policy verification is documented in
 [`docs/VERIFICATION_POLICY.md`](docs/VERIFICATION_POLICY.md).
 The minimal remote control-plane adapter and its threat model are documented in
 [`docs/GITHUB_GATE.md`](docs/GITHUB_GATE.md).
+The read-only GitHub Actions migration assistant and its explicit compatibility
+table are documented in
+[`docs/GITHUB_ACTIONS_COMPATIBILITY.md`](docs/GITHUB_ACTIONS_COMPATIBILITY.md).
 
 ## Product direction
 
@@ -73,6 +76,8 @@ cargo run -- cache path
 cargo run -- cache init
 cargo run -- cache inventory --json
 cargo run -- cache cleanup --dry-run
+cargo run -- migrate-github-actions \
+  --workflow tests/fixtures/github-actions/supported.yml --json
 ```
 
 `doctor` performs only a bounded, read-only Docker-compatible capability probe.
@@ -82,6 +87,11 @@ Git checkout, executes checks without an implicit shell, and writes a canonical
 receipt. `verify` independently checks receipt integrity and repository policy.
 Cleanup remains preview-only. Neither a receipt nor a verification PASS is an
 identity attestation.
+
+`migrate-github-actions` parses a bounded workflow as untrusted data and emits
+only an inert compatibility report. It never downloads or executes actions,
+commands, expressions, or secrets, and it does not emit executable
+configuration.
 
 For this repository's complete local preflight, export
 CARGO_HOME=.ccp-mounts/cargo-home and

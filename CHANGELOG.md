@@ -40,3 +40,6 @@ Semantic Versioning after its first public release.
 - Repository-local preflight configuration and policy for the Rust format,
   test, clippy, and documentation gates on accepted Apple Silicon macOS
   Docker-compatible execution.
+- Read-only GitHub Actions migration assistant with a versioned deterministic
+  compatibility report, explicit translated/manual/unsupported classifications,
+  public fixtures, and fail-closed handling of arbitrary actions and expressions.

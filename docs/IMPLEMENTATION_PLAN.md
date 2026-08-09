@@ -28,8 +28,9 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 04 — cache and workspace isolation | Merged | main 2661266fb0f1276eb39d382ede64fba2b0fd1f80 |
 | PR 05 — end-to-end local run | Merged | main af7d760061a64b908ddb50c625c62843d467bb60 |
 | PR 06 — independent verifier and policy | Merged | main 80222e16353e8e626b6e5e55e92d8d0a2c2ddede |
-| PR 07 — lightweight GitHub gate | Implemented in this tranche | Trusted-base verifier, SHA-bound evidence branch, least-privilege workflow, and fail-closed tests |
-| PR 08–10 | Not started | No implementation claim |
+| PR 07 — lightweight GitHub gate | Merged | main `362625e6ced93f8e699558ac44fd69be95417c52` |
+| PR 08 — GitHub Actions compatibility subset | Implemented in this tranche | Read-only migration report; no action execution or executable config emission |
+| PR 09–10 | Not started | No implementation claim |
 
 ## 2. Mission
 
@@ -548,6 +549,12 @@ Initial supported candidates are checkout, setup metadata, environment names,
 service declarations, matrices, and plain `run` steps. Expression semantics,
 secrets, permissions, reusable workflows, and marketplace actions remain
 unsupported until independently specified and tested.
+
+Contract v1 translates pinned checkout metadata, portable environment names,
+and literal POSIX `run` steps into inert proposals. Setup metadata, Linux runner
+labels, services, matrices, job dependencies, and containers are surfaced for
+manual review. The assistant emits no executable configuration because image,
+resource, cache, artifact, and trust decisions remain operator-owned.
 
 ### PR 09 — Benchmark and parity evidence
 

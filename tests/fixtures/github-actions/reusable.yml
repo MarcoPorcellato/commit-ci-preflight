@@ -1,0 +1,7 @@
+name: Reusable workflow caller
+on: workflow_dispatch
+
+jobs:
+  delegated:
+    uses: example/shared-workflows/.github/workflows/ci.yml@main
+    secrets: inherit

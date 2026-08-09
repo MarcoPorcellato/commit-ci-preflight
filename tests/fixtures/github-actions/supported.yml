@@ -1,0 +1,25 @@
+name: Public Rust quality
+on:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: crates/core
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Unit tests
+        shell: sh
+        working-directory: .
+        env:
+          RUST_BACKTRACE: "1"
+        run: cargo test --locked

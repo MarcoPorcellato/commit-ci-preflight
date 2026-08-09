@@ -19,6 +19,9 @@ use std::path::{Path, PathBuf};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use commit_ci_preflight::cache::{CacheError, CacheRootOptions, ManagedCache, ResolvedCacheRoot};
 use commit_ci_preflight::config::{ConfigV1, ExecutionPlanEnvelopeV1};
+use commit_ci_preflight::github_actions::{
+    GithubActionsError, MigrationReadiness, analyze_workflow_file,
+};
 use commit_ci_preflight::process::{CancellationToken, ProcessSupervisor};
 use commit_ci_preflight::receipt::EvidenceStatus;
 use commit_ci_preflight::run::{RunError, RunRequest, SystemClock, execute_local_run};
@@ -98,6 +101,15 @@ enum Command {
         #[arg(long)]
         evaluated_at_utc: Option<String>,
         /// Emit the canonical machine-readable verification report.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Analyze a GitHub Actions workflow as data and report migration compatibility.
+    MigrateGithubActions {
+        /// Workflow YAML file to analyze without executing any action or command.
+        #[arg(long)]
+        workflow: PathBuf,
+        /// Emit the versioned machine-readable compatibility report.
         #[arg(long)]
         json: bool,
     },
@@ -186,6 +198,9 @@ fn main() {
             evaluated_at_utc.as_deref(),
             json,
         ),
+        Some(Command::MigrateGithubActions { workflow, json }) => {
+            print_github_actions_migration(&workflow, json)
+        }
         Some(Command::Cache { action }) => run_cache_command(action),
         None => {
             Cli::command()
@@ -198,6 +213,31 @@ fn main() {
     if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(error.exit_code());
+    }
+}
+
+fn print_github_actions_migration(path: &Path, json: bool) -> Result<(), CliError> {
+    let report = analyze_workflow_file(path).map_err(CliError::GithubActions)?;
+    if json {
+        let bytes = report.json_bytes().map_err(CliError::GithubActions)?;
+        println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+    } else {
+        println!(
+            "Workflow: {}",
+            report.workflow_name.as_deref().unwrap_or("unnamed")
+        );
+        println!("Readiness: {:?}", report.readiness);
+        println!("Translated: {}", report.summary.translated);
+        println!("Manual review: {}", report.summary.manual_review);
+        println!("Unsupported: {}", report.summary.unsupported);
+        println!("Proposed checks: {}", report.proposed_checks.len());
+        println!("Executable configuration emitted: false");
+        println!("Read-only: no action or command was executed.");
+    }
+    if report.readiness == MigrationReadiness::Blocked {
+        Err(CliError::MigrationBlocked)
+    } else {
+        Ok(())
     }
 }
 
@@ -505,6 +545,8 @@ enum CliError {
     RunOutcome(EvidenceStatus),
     Verification(VerificationError),
     VerifyOutcome(VerificationDecision),
+    GithubActions(GithubActionsError),
+    MigrationBlocked,
     Internal(Box<dyn std::error::Error>),
 }
 
@@ -528,6 +570,8 @@ impl CliError {
             Self::RunOutcome(EvidenceStatus::Pending | EvidenceStatus::NotRun) => 5,
             Self::RunOutcome(EvidenceStatus::Pass) => 0,
             Self::VerifyOutcome(_) => 3,
+            Self::GithubActions(_) => 2,
+            Self::MigrationBlocked => 4,
             Self::Verification(VerificationError::Policy(_))
             | Self::Verification(VerificationError::InvalidExpectedCommit)
             | Self::Verification(VerificationError::InvalidEvaluationTime) => 2,
@@ -550,6 +594,10 @@ impl fmt::Display for CliError {
             Self::VerifyOutcome(decision) => {
                 write!(formatter, "verification completed with {decision:?}")
             }
+            Self::GithubActions(error) => write!(formatter, "{error}"),
+            Self::MigrationBlocked => {
+                formatter.write_str("workflow migration is blocked by unsupported features")
+            }
             Self::Internal(_) => formatter.write_str("internal command failure"),
         }
     }
@@ -566,6 +614,8 @@ impl std::error::Error for CliError {
             Self::RunOutcome(_) => None,
             Self::Verification(error) => Some(error),
             Self::VerifyOutcome(_) => None,
+            Self::GithubActions(error) => Some(error),
+            Self::MigrationBlocked => None,
         }
     }
 }
