@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod cache;
 pub mod config;
 pub mod process;
 pub mod receipt;
 pub mod runtime;
+pub mod workspace;

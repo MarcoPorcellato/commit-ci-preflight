@@ -56,7 +56,9 @@ Required limits:
 
 The current phase validates these values. `doctor` starts the Docker CLI only
 for a read-only `docker info` probe; `dry-run` and `plan` start no process.
-No project check or container is started yet.
+`dry-run` resolves a persistent cache path and renders the exact repository,
+cache, and artifact mount bindings without creating them. No project check or
+container is started yet.
 
 ## Checks
 
@@ -90,6 +92,12 @@ receipt output, or artifact.
 Cache mounts cannot overlap one another, the receipt output, or declared
 artifacts. Artifact paths are globally unique. These restrictions prevent two
 steps from silently assigning different meanings to the same writable path.
+The repository root is mounted read-only at `/workspace`; only declared cache
+and artifact paths receive nested read-write bindings. Host mount paths that
+cannot be represented safely by the Docker `--mount` syntax are rejected.
+
+See [`CACHE_AND_WORKSPACE.md`](CACHE_AND_WORKSPACE.md) for cache-root
+precedence, ownership, persistence, inventory, and cleanup rules.
 
 ## Environment privacy
 
