@@ -18,6 +18,15 @@ bootstrap commit to a truthful public beta. It is intentionally detailed so a
 capable coding agent can proceed after one explicit owner authorization without
 inventing product, security, licensing, or release decisions along the way.
 
+### 1.1 Implementation progress
+
+| Tranche | Status | Evidence |
+|---|---|---|
+| PR 01 — receipt contract | Merged | main `0095002b49f4fd09532c796ddc9955a6be6f8c1f` |
+| PR 02 — configuration plan | Merged | main `2cfee83eea8ab16f1d37b128e980d7441f6ee94e` |
+| PR 03 — runtime and supervisor | In progress | macOS/Unix source gates only; Windows-native proof pending |
+| PR 04–10 | Not started | No implementation claim |
+
 ## 2. Mission
 
 Commit CI Preflight reduces paid remote-CI work by moving reproducible,
@@ -688,4 +697,3 @@ At the end of every PR, record:
 The final programme report aggregates these receipts, compares delivered scope
 against every section of this plan, and leaves no `PENDING` item disguised as
 complete.
-

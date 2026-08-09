@@ -22,7 +22,9 @@ identity-bound attestation.
 
 The read-only TOML planner is documented in
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md). It validates and hashes an
-execution plan but cannot execute checks yet.
+execution plan but cannot execute project checks yet. The process supervisor,
+runtime probe, and non-executing container argv renderer are documented in
+[`docs/RUNTIME.md`](docs/RUNTIME.md).
 
 ## Product direction
 
@@ -42,9 +44,10 @@ The tool will:
 
 ## Rust core
 
-The production core is written in Rust 2024 edition. The initial bootstrap has
-no third-party Rust dependencies; dependencies will be added only in scoped,
-reviewed pull requests.
+The production core is written in Rust 2024 edition with a minimum supported
+Rust version of 1.87. Third-party dependencies are added only in scoped,
+reviewed pull requests and recorded in
+[`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md).
 
 ```console
 cargo fmt --all -- --check
@@ -52,7 +55,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
 cargo run -- --version
 cargo run -- plan --config examples/config/rust-project.toml
+cargo run -- dry-run --config examples/config/rust-project.toml
+cargo run -- doctor --config examples/config/rust-project.toml
 ```
+
+`doctor` performs only a bounded, read-only Docker-compatible capability probe.
+`dry-run` prints explicit argv and never starts Docker or a declared check.
+Actual project execution remains unavailable until the later run tranche.
 
 ## Independence and clean-room boundary
 

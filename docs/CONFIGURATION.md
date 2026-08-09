@@ -2,8 +2,10 @@
 
 ## Status
 
-`.commit-ci-preflight.toml` schema `1.0` is implemented for read-only planning.
-No command execution is active in this phase.
+`.commit-ci-preflight.toml` schema `1.0` is implemented for read-only planning,
+runtime diagnosis, and non-executing container argv rendering. Project checks
+cannot be executed in this phase. `doctor` is the sole process-creating command
+and performs only the bounded runtime probe described in `docs/RUNTIME.md`.
 
 The generated structural schema is pinned at
 [`../schema/config-v1.schema.json`](../schema/config-v1.schema.json). Semantic
@@ -23,7 +25,9 @@ commit-ci-preflight plan --config examples/config/rust-project.toml --json
 ```
 
 Both forms only parse, validate, normalize, and display the plan. The JSON form
-is canonical and includes a SHA-256 digest of the normalized plan.
+is canonical and includes a SHA-256 digest of the normalized plan. Use
+`commit-ci-preflight dry-run` to inspect non-shell container argv without
+starting the runtime.
 
 ## Top-level fields
 
@@ -50,7 +54,9 @@ Required limits:
 - `pids_limit`: 1–65536;
 - `network`: defaults to `false` and must be explicitly enabled.
 
-The current phase validates these values but does not start a runtime.
+The current phase validates these values. `doctor` starts the Docker CLI only
+for a read-only `docker info` probe; `dry-run` and `plan` start no process.
+No project check or container is started yet.
 
 ## Checks
 
