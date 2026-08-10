@@ -118,9 +118,10 @@ It does not rerun the heavy project test suite. The evidence branch contains
 only the canonical receipt for its exact source SHA. Missing, symbolic,
 oversized, malformed, stale, mismatched, or incomplete evidence fails closed.
 
-The workflow uses pinned official action commits and least-privilege
-permissions. No `pull_request_target` execution, write-capable checkout,
-Actions cache, uploaded project logs, Docker invocation, or secret is used.
+The workflow uses the base-branch `pull_request_target` definition, pinned
+official action commits, and least-privilege permissions. It never executes
+pull-request-controlled code under that event and uses no write-capable
+checkout, Actions cache, uploaded project logs, Docker invocation, or secret.
 
 ## 8. Privacy review
 

@@ -40,7 +40,7 @@ receipt.
 | `config` | Strict TOML schema, semantic validation, DAG normalization, and deterministic plan digest |
 | `runtime` | Bounded Docker-compatible capability probe and explicit container argv rendering |
 | `process` | Cross-platform timeout, cancellation, output bounds, Unix process groups, Windows Job Objects, and cleanup verification |
-| `workspace` | Clean commit binding, read-only source mount, and declared writable cache/artifact mounts |
+| `workspace` | Read-only source mount plan and declared writable cache/artifact mounts |
 | `cache` | Persistent root resolution, ownership marker, content-addressed entries, inventory, locks, and preview-only cleanup |
 | `run` | End-to-end orchestration and fail-closed aggregation |
 | `receipt` | Versioned evidence types, canonical JSON, SHA-256 integrity ID, schema, and atomic publication |
@@ -150,8 +150,10 @@ The GitHub workflow:
 - caps input size;
 - verifies the exact pull-request head;
 - publishes `commit-ci-preflight/receipt`;
-- uses no project test execution, Docker, cache, secret, deployment credential,
-  or `pull_request_target`.
+- uses the trusted base-branch `pull_request_target` definition but never
+  executes pull-request-controlled code under it;
+- uses no project test execution, Docker, cache, secret, or deployment
+  credential.
 
 ## Migration assistant
 

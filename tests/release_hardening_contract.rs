@@ -165,6 +165,8 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(THREAT_MODEL.starts_with("# Threat model and review closure"));
     assert!(THREAT_MODEL.contains("does not treat a container as a complete sandbox"));
     assert!(THREAT_MODEL.contains("Identity overclaim"));
+    assert!(THREAT_MODEL.contains("never executes\npull-request-controlled code"));
+    assert!(!THREAT_MODEL.contains("No `pull_request_target` execution"));
     assert!(BETA_SUPPORT.starts_with("# Beta limitations and support policy"));
     assert!(BETA_SUPPORT.contains("Complete project `run` path on Windows x86_64 | `PENDING`"));
     assert!(TUTORIAL.starts_with("# End-to-end tutorial"));
