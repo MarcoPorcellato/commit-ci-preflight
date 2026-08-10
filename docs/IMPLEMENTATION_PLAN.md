@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| Status | 0.1.0 source release candidate implemented; publication requires separate owner authorization |
+| Status | Implementation plan complete through PR 10; 0.1.0 source release candidate ready; publication requires separate owner authorization |
 | Owner | Marco Porcellato |
 | Initial date | 2026-08-08 |
 | License | Apache-2.0 with repository `NOTICE` |
@@ -32,7 +32,7 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 08 — GitHub Actions compatibility subset | Merged | main `104275f8a8465bad380130d8fbec5837c6a0ef10` |
 | PR 09A — benchmark and parity contract | Merged | main `2305c1f46930069614b023bc6b8dcfb8a6ae27d5`; portability follow-up main `15f858403b19ade38373176879fb518ef167580d` |
 | PR 09B — native qualification evidence | Merged | main `aaaef7be67200d6f4f62bac5c77b4d0989329d92`; three native receipts and exact GitHub run metadata |
-| PR 10 — beta hardening and candidate | Implemented in this tranche | Human-first README, SPDX SBOM, third-party notices, installation/checksums, rollback, threat model, tutorial, support policy, and local packaging proof; PR pending |
+| PR 10 — beta hardening and candidate | Merged | main `cd4f418d9083b6dbad3112d12374b7c53f900758`; human-first README, SPDX SBOM, third-party notices, installation/checksums, rollback, threat model, tutorial, support policy, local packaging proof, and trusted-base transition receipt |
 
 ## 2. Mission
 
