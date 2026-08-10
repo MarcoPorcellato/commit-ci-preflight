@@ -30,8 +30,8 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 06 — independent verifier and policy | Merged | main 80222e16353e8e626b6e5e55e92d8d0a2c2ddede |
 | PR 07 — lightweight GitHub gate | Merged | main `362625e6ced93f8e699558ac44fd69be95417c52` |
 | PR 08 — GitHub Actions compatibility subset | Merged | main `104275f8a8465bad380130d8fbec5837c6a0ef10` |
-| PR 09A — benchmark and parity contract | Implemented in this tranche | Platform PASS remains pending until the workflow exists on the default branch |
-| PR 09B — native qualification evidence | Pending | Manual default-branch run, independent verification, and immutable receipts |
+| PR 09A — benchmark and parity contract | Merged | main `2305c1f46930069614b023bc6b8dcfb8a6ae27d5`; portability follow-up main `15f858403b19ade38373176879fb518ef167580d` |
+| PR 09B — native qualification evidence | Implemented in this tranche | macOS arm64/OrbStack, Linux x86_64, and Windows x86_64 receipts independently verified for source `15f858403b19ade38373176879fb518ef167580d`; documentation PR pending |
 | PR 10 | Not started | No implementation claim |
 
 ## 2. Mission

@@ -46,6 +46,9 @@ Semantic Versioning after its first public release.
 - Fixed native benchmark receipt and independent verifier with pinned correctness
   digest, create-new output, Mac/OrbStack probing, opt-in Linux/Windows public
   runner evidence, and an assumptions-based cost model.
+- Genuine macOS arm64 with OrbStack, Linux x86_64, and Windows x86_64 native
+  benchmark receipts plus exact GitHub run, job, runner-label, and artifact
+  provenance for the fixed PR09 qualification workload.
 
 ### Fixed
 
