@@ -159,7 +159,10 @@ fn release_candidate_builder_is_local_bounded_and_non_publishing() {
 #[test]
 fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.starts_with("# Installation and artifact verification"));
-    assert!(INSTALLATION.contains("not a published package"));
+    assert!(INSTALLATION.contains("published as a GitHub prerelease"));
+    assert!(INSTALLATION.contains("unsigned macOS arm64 archive"));
+    assert!(INSTALLATION.contains("There is no crate, Homebrew"));
+    assert!(INSTALLATION.contains("or signed artifact"));
     assert!(ROLLBACK.starts_with("# Upgrade, rollback, and uninstall"));
     assert!(ROLLBACK.contains("does not remove"));
     assert!(THREAT_MODEL.starts_with("# Threat model and review closure"));
@@ -168,6 +171,10 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(THREAT_MODEL.contains("never executes\npull-request-controlled code"));
     assert!(!THREAT_MODEL.contains("No `pull_request_target` execution"));
     assert!(BETA_SUPPORT.starts_with("# Beta limitations and support policy"));
+    assert!(BETA_SUPPORT.contains("| `PUBLISHED_RC` |"));
+    assert!(
+        BETA_SUPPORT.contains("Registry packages and signed release artifacts | `NOT_PUBLISHED`")
+    );
     assert!(BETA_SUPPORT.contains("Complete project `run` path on Windows x86_64 | `PENDING`"));
     assert!(TUTORIAL.starts_with("# End-to-end tutorial"));
     assert!(TUTORIAL.contains("does not prove who ran the command"));

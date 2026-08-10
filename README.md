@@ -9,9 +9,11 @@ Rust core. It is designed for teams whose remote CI cost or queue time is
 growing, but who do not want savings to weaken review, security, or platform
 coverage.
 
-> Status: **0.1.0 release candidate**. The source implementation and native
-> benchmark evidence are complete. No package, signed artifact, tag, or GitHub
-> Release has been published.
+> Status: **v0.1.0-rc.1 prerelease**. The source implementation and native
+> benchmark evidence are complete. The
+> [GitHub prerelease](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.1)
+> distributes an unsigned macOS arm64 archive and checksum. No crate, Homebrew
+> formula, Winget package, container image, or signed artifact is published.
 
 ## The problem
 

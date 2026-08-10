@@ -2,10 +2,9 @@
 
 ## Current status
 
-Commit CI Preflight 0.1.0 is a source-available release candidate under
-Apache-2.0. It is not yet a published release and is not approved for
-security-sensitive production enforcement without an operator review of the
-threat model, policy, and local runtime.
+Commit CI Preflight `v0.1.0-rc.1` is a public GitHub prerelease under
+Apache-2.0. It is not approved for security-sensitive production enforcement
+without an operator review of the threat model, policy, and local runtime.
 
 ## Qualification matrix
 
@@ -15,11 +14,12 @@ threat model, policy, and local runtime.
 | Fixed benchmark on native macOS arm64 | `QUALIFIED` | Deterministic correctness digest matched |
 | Fixed benchmark on native Linux x86_64 | `QUALIFIED` | Standard `ubuntu-24.04` runner receipt independently verified |
 | Fixed benchmark on native Windows x86_64 | `QUALIFIED` | Standard `windows-2025` runner receipt independently verified |
+| Unsigned macOS arm64 archive in GitHub prerelease `v0.1.0-rc.1` | `PUBLISHED_RC` | Exact tagged source, archive checksum, SBOM, notices, and rollback evidence |
 | Complete project `run` path on Linux x86_64 | `PENDING` | Benchmark evidence is not full runtime qualification |
 | Complete project `run` path on Windows x86_64 | `PENDING` | Benchmark evidence is not full runtime qualification |
 | Docker Desktop and other Docker-compatible engines | `COMPATIBLE_UNQUALIFIED` | Adapter contract exists; no complete platform receipt is claimed |
 | Identity-bound attestation or signing | `NOT_IMPLEMENTED` | Receipts prove integrity and policy, not producer identity |
-| Public packages and signed release artifacts | `NOT_PUBLISHED` | Separate authorization and key-custody decisions are required |
+| Registry packages and signed release artifacts | `NOT_PUBLISHED` | Separate authorization and key-custody decisions are required |
 
 Exact native receipts and claim boundaries are in
 [the PR09 evidence matrix](evidence/pr09/README.md).

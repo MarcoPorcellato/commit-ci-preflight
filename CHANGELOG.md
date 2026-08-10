@@ -7,6 +7,8 @@ Semantic Versioning after its first public release.
 
 ## [Unreleased]
 
+## [0.1.0-rc.1] - 2026-08-10
+
 ### Added
 
 - Initial Rust 2024 application skeleton.
@@ -61,3 +63,6 @@ Semantic Versioning after its first public release.
   read-only repository mount.
 - Made benchmark contract verification explicit about GitHub Actions metadata
   and kept versioned text contracts byte-identical across Windows checkouts.
+
+[Unreleased]: https://github.com/MarcoPorcellato/commit-ci-preflight/compare/v0.1.0-rc.1...HEAD
+[0.1.0-rc.1]: https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.1

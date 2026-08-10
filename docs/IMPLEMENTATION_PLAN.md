@@ -4,7 +4,7 @@
 
 | Field | Value |
 |---|---|
-| Status | Implementation plan complete through PR 10; 0.1.0 source release candidate ready; publication requires separate owner authorization |
+| Status | Implementation complete through PR 10; `v0.1.0-rc.1` GitHub prerelease published; registry packages and signatures require separate authorization |
 | Owner | Marco Porcellato |
 | Initial date | 2026-08-08 |
 | License | Apache-2.0 with repository `NOTICE` |
