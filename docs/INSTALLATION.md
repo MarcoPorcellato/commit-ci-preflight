@@ -2,11 +2,13 @@
 
 ## Release status
 
-Commit CI Preflight 0.1.0 is a release candidate, not a published package.
-There is currently no crate, Homebrew formula, Winget package, container image,
-or GitHub Release to trust. Install from a reviewed source commit or build a
-local candidate archive. Public release and package publication require a
-separate owner authorization.
+Commit CI Preflight `v0.1.0-rc.1` is published as a GitHub prerelease. Its
+reviewed assets are an unsigned macOS arm64 archive and `SHA256SUMS`; GitHub
+also generates source archives from the exact tag. There is no crate, Homebrew
+formula, Winget package, container image, or signed artifact. Download only
+from the
+[`v0.1.0-rc.1` release page](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.1)
+or build from a reviewed source commit.
 
 ## Prerequisites
 
