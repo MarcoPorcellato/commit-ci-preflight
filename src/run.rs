@@ -842,7 +842,9 @@ mod tests {
                 fs::remove_dir_all(&root).expect("clean fixture root");
             }
             let repository = root.join("repository");
-            fs::create_dir_all(&repository).expect("repository");
+            fs::create_dir_all(repository.join(".cache/cargo")).expect("cache mount target");
+            fs::create_dir_all(repository.join("results")).expect("artifact parent");
+            fs::File::create(repository.join("results/first.json")).expect("artifact mount target");
             let resolved = ResolvedCacheRoot::resolve(
                 &repository,
                 &CacheRootOptions {

@@ -4,12 +4,12 @@
 
 | Field | Value |
 |---|---|
-| Status | Approved architecture baseline; implementation not yet complete |
+| Status | 0.1.0 source release candidate implemented; publication requires separate owner authorization |
 | Owner | Marco Porcellato |
 | Initial date | 2026-08-08 |
 | License | Apache-2.0 with repository `NOTICE` |
 | Core language | Rust 2024 edition |
-| Public identity | Independent and vendor-neutral; no Matryca branding |
+| Public identity | Independent and vendor-neutral; no unrelated product branding |
 | Recommended repository | `MarcoPorcellato/commit-ci-preflight` |
 | Initial release target | `0.1.0` after real multi-platform qualification |
 
@@ -31,8 +31,8 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 07 — lightweight GitHub gate | Merged | main `362625e6ced93f8e699558ac44fd69be95417c52` |
 | PR 08 — GitHub Actions compatibility subset | Merged | main `104275f8a8465bad380130d8fbec5837c6a0ef10` |
 | PR 09A — benchmark and parity contract | Merged | main `2305c1f46930069614b023bc6b8dcfb8a6ae27d5`; portability follow-up main `15f858403b19ade38373176879fb518ef167580d` |
-| PR 09B — native qualification evidence | Implemented in this tranche | macOS arm64/OrbStack, Linux x86_64, and Windows x86_64 receipts independently verified for source `15f858403b19ade38373176879fb518ef167580d`; documentation PR pending |
-| PR 10 | Not started | No implementation claim |
+| PR 09B — native qualification evidence | Merged | main `aaaef7be67200d6f4f62bac5c77b4d0989329d92`; three native receipts and exact GitHub run metadata |
+| PR 10 — beta hardening and candidate | Implemented in this tranche | Human-first README, SPDX SBOM, third-party notices, installation/checksums, rollback, threat model, tutorial, support policy, and local packaging proof; PR pending |
 
 ## 2. Mission
 
@@ -83,7 +83,7 @@ The first public release will not:
   deployment checks;
 - claim macOS results are Windows-native evidence;
 - upload repository contents, environment values, or raw logs by default;
-- include code, fixtures, names, or dependencies copied from Matryca;
+- include code, fixtures, names, or dependencies copied from an unrelated product or repository;
 - provide a hosted SaaS control plane;
 - publish to crates.io, Homebrew, Winget, or an action marketplace without a
   separate release authorization.
@@ -140,7 +140,7 @@ The authorization does **not** permit:
 - representing Windows, Linux x86_64, or hosted-runner evidence as executed
   when it was not;
 - making legal promises beyond Apache-2.0 and the `NOTICE` file;
-- using the Matryca name, trademarks, private code, or proprietary corpus.
+- using unrelated product names, trademarks, private code, or proprietary corpora.
 
 Those excluded actions require fresh, explicit owner approval.
 
@@ -422,7 +422,7 @@ Acceptance:
 
 - `cargo fmt --check`, Clippy with warnings denied, and tests pass;
 - license files are exact and packaging includes them;
-- repository contains no Matryca source, brand assets, secrets, or generated
+- repository contains no unrelated product source, brand assets, secrets, or generated
   caches;
 - default branch is `main`.
 
@@ -649,9 +649,9 @@ Before `0.1.0`, maintain:
 - `docs/IMPLEMENTATION_PLAN.md`: future programme and gates;
 - `docs/RECEIPT_SPEC.md`: normative receipt contract;
 - `docs/THREAT_MODEL.md`: assets, actors, boundaries, and mitigations;
-- `docs/CACHE_AND_CLEANUP.md`: persistent locations and safe deletion;
-- `docs/GITHUB_INTEGRATION.md`: remote/local responsibility split;
-- `docs/BENCHMARKS.md`: reproducible methodology and receipts;
+- `docs/CACHE_AND_WORKSPACE.md`: persistent locations, ownership, mounts, and preview-only cleanup;
+- `docs/GITHUB_GATE.md`: remote/local responsibility split and exact receipt gate;
+- `docs/BENCHMARK_AND_PARITY.md`: reproducible methodology, cost assumptions, and native receipts;
 - `docs/adr/`: irreversible and cross-cutting decisions;
 - `CHANGELOG.md`: user-visible evolution.
 
@@ -671,7 +671,7 @@ planned behavior, and unavailable platform evidence.
 | Supply-chain compromise | Pins, lockfile, license/advisory review, SBOM | Critical unresolved advisory blocks release |
 | CI savings reduce confidence | Preserve remote control-plane checks and native gaps | Cost goal never overrides quality gate |
 | Cross-platform process drift | Native receipts and adapter tests | Missing native evidence remains pending |
-| Project confused with Matryca | Independent name, assets, fixtures, and docs | Remove any accidental product branding |
+| Project confused with an unrelated product | Independent name, assets, fixtures, and docs | Remove any accidental product branding |
 
 ## 16. Definition of Done for `0.1.0`
 
@@ -687,7 +687,7 @@ The plan is complete only when all conditions below are evidenced:
 - the lightweight GitHub gate verifies exact PR commit evidence;
 - benchmark methodology is repeatable and reports limitations;
 - cache survives reboot and has documented safe cleanup;
-- no proprietary source, fixture, secret, or Matryca branding is present;
+- no proprietary source, fixture, secret, or unrelated product branding is present;
 - Apache-2.0 `LICENSE`, `NOTICE`, SBOM, and third-party notices ship in release
   artifacts;
 - rollback and uninstall instructions are tested;

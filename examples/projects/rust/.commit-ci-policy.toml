@@ -1,0 +1,21 @@
+schema_version = "1.0"
+project = "examples/rust"
+configuration_digest = "sha256:cff29e073937f7bd51d611fbd407c94e2ce5915f01ee018f7fb3d8f35819ea98"
+required_checks = ["test"]
+image_reference = "docker.io/library/rust@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479"
+max_age_seconds = 86400
+
+[[platforms]]
+host_os = "macos"
+host_arch = "aarch64"
+runtime_kind = "docker_compatible"
+
+[[platforms]]
+host_os = "linux"
+host_arch = "x86_64"
+runtime_kind = "docker_compatible"
+
+[[platforms]]
+host_os = "windows"
+host_arch = "x86_64"
+runtime_kind = "docker_compatible"

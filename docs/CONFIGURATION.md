@@ -97,6 +97,12 @@ steps from silently assigning different meanings to the same writable path.
 The repository root is mounted read-only at `/workspace`; only declared cache
 and artifact paths receive nested read-write bindings. Host mount paths that
 cannot be represented safely by the Docker `--mount` syntax are rejected.
+Before a live `run`, every cache destination must already exist as a real
+directory in the repository and every artifact destination as a real file.
+They may be ignored generated placeholders, but must not be symlinks. This is
+required by nested Docker bindings beneath a read-only repository mount; the
+runner fails before Docker rather than mutating the source checkout to create
+them.
 
 See [`CACHE_AND_WORKSPACE.md`](CACHE_AND_WORKSPACE.md) for cache-root
 precedence, ownership, persistence, inventory, and cleanup rules.

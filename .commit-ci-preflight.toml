@@ -62,3 +62,11 @@ argv = ["cargo", "doc", "--locked", "--no-deps"]
 working_directory = "."
 timeout_seconds = 600
 depends_on = ["clippy"]
+
+[[checks]]
+id = "release-metadata"
+required = true
+argv = ["cargo", "run", "--locked", "--quiet", "--example", "generate_release_metadata", "--", "--check"]
+working_directory = "."
+timeout_seconds = 300
+depends_on = ["docs"]
