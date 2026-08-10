@@ -155,6 +155,7 @@ impl PreparedWorkspace {
         repository: &Path,
         cache: &ManagedCache,
     ) -> Result<Self, WorkspaceError> {
+        validate_repository_mount_targets(envelope, repository)?;
         let run_root = cache
             .workspace_path(&envelope.plan_digest)
             .map_err(WorkspaceError::Cache)?;
@@ -274,6 +275,51 @@ fn ensure_plain_directory(path: &Path) -> Result<(), WorkspaceError> {
     }
 }
 
+fn validate_repository_mount_targets(
+    envelope: &ExecutionPlanEnvelopeV1,
+    repository: &Path,
+) -> Result<(), WorkspaceError> {
+    let repository = fs::canonicalize(repository).map_err(WorkspaceError::Io)?;
+    for cache in &envelope.plan.caches {
+        validate_repository_mount_target(&repository, &cache.mount_path, true)?;
+    }
+    for check in &envelope.plan.checks {
+        for artifact in &check.artifacts {
+            validate_repository_mount_target(&repository, artifact, false)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_repository_mount_target(
+    repository: &Path,
+    relative: &str,
+    expect_directory: bool,
+) -> Result<(), WorkspaceError> {
+    let logical = PathBuf::from(relative);
+    let target = repository.join(&logical);
+    let metadata = match fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(WorkspaceError::MissingRepositoryMountTarget(logical));
+        }
+        Err(error) => return Err(WorkspaceError::Io(error)),
+    };
+    let correct_type = if expect_directory {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    if metadata.file_type().is_symlink() || !correct_type {
+        return Err(WorkspaceError::UnsafeRepositoryMountTarget(logical));
+    }
+    let canonical = fs::canonicalize(&target).map_err(WorkspaceError::Io)?;
+    if !canonical.starts_with(repository) {
+        return Err(WorkspaceError::PathEscape);
+    }
+    Ok(())
+}
+
 fn prepare_artifact_file(run_root: &Path, artifact: &str) -> Result<(), WorkspaceError> {
     let path = run_root.join("artifacts").join(artifact);
     validate_under_root(&path, run_root)?;
@@ -320,6 +366,8 @@ pub enum WorkspaceError {
     InvalidLogicalPath,
     UnsupportedHostPath,
     DuplicateTarget(String),
+    MissingRepositoryMountTarget(PathBuf),
+    UnsafeRepositoryMountTarget(PathBuf),
     PathEscape,
     Busy(PathBuf),
     UnsafeManagedObject,
@@ -336,6 +384,16 @@ impl fmt::Display for WorkspaceError {
                 formatter.write_str("host mount path cannot be represented safely")
             }
             Self::DuplicateTarget(target) => write!(formatter, "duplicate mount target: {target}"),
+            Self::MissingRepositoryMountTarget(target) => write!(
+                formatter,
+                "repository mount target does not exist; create it before run: {}",
+                target.display()
+            ),
+            Self::UnsafeRepositoryMountTarget(target) => write!(
+                formatter,
+                "repository mount target has the wrong type or is unsafe: {}",
+                target.display()
+            ),
             Self::PathEscape => formatter.write_str("writable mount escaped its managed root"),
             Self::Busy(path) => write!(
                 formatter,
@@ -387,7 +445,9 @@ mod tests {
         }
         let repository = base.join("repository");
         let cache_root = base.join("persistent-cache");
-        fs::create_dir_all(&repository).expect("repository");
+        fs::create_dir_all(repository.join(".cache/cargo")).expect("cache mount target");
+        fs::create_dir_all(repository.join("target")).expect("artifact parent");
+        File::create(repository.join("target/results.json")).expect("artifact mount target");
         let resolved = ResolvedCacheRoot::resolve(
             &repository,
             &CacheRootOptions {
@@ -474,6 +534,43 @@ artifacts = ["target/results.json"]
             validate_host_path(Path::new("/safe/path,with-comma")),
             Err(WorkspaceError::UnsupportedHostPath)
         ));
+    }
+
+    #[test]
+    fn prepared_workspace_rejects_a_missing_repository_mount_target_before_mutation() {
+        let name = "missing-mount-target";
+        let (repository, resolved, envelope) = fixture(name);
+        fs::remove_dir_all(repository.join(".cache/cargo")).expect("remove cache target");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("cache");
+
+        assert!(matches!(
+            PreparedWorkspace::prepare(&envelope, &repository, &cache),
+            Err(WorkspaceError::MissingRepositoryMountTarget(path))
+                if path == Path::new(".cache/cargo")
+        ));
+        assert!(
+            !cache
+                .workspace_path(&envelope.plan_digest)
+                .expect("workspace path")
+                .exists()
+        );
+        fs::remove_dir_all(test_root(name)).expect("clean fixture");
+    }
+
+    #[test]
+    fn prepared_workspace_rejects_wrong_repository_mount_target_type() {
+        let name = "wrong-mount-target-type";
+        let (repository, resolved, envelope) = fixture(name);
+        fs::remove_dir_all(repository.join(".cache/cargo")).expect("remove cache target");
+        File::create(repository.join(".cache/cargo")).expect("replace target with file");
+        let cache = ManagedCache::initialize(resolved).expect("cache");
+
+        assert!(matches!(
+            PreparedWorkspace::prepare(&envelope, &repository, &cache),
+            Err(WorkspaceError::UnsafeRepositoryMountTarget(path))
+                if path == Path::new(".cache/cargo")
+        ));
+        fs::remove_dir_all(test_root(name)).expect("clean fixture");
     }
 
     #[test]

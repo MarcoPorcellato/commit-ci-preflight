@@ -128,6 +128,13 @@ path escapes, commas, control characters, and non-UTF-8 host paths are rejected
 before Docker argv is rendered. The runtime inserts no shell, privileged mode,
 Docker socket mount, or undeclared writable repository binding.
 
+Because the repository binding is read-only, each nested destination must
+already exist in the checkout: a directory for a cache and a file for an
+artifact. The destination may be Git-ignored. Live preparation rejects a
+missing destination, a symlink, a wrong object type, or a resolved escape
+before creating the run workspace or invoking Docker. It never creates these
+placeholders in the source checkout.
+
 The read-only repository plus nested writable bindings is a containment
 contract, not a complete sandbox against hostile code. The live runtime must
 revalidate and prepare these exact paths before every execution.

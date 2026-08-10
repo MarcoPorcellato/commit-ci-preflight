@@ -1,0 +1,197 @@
+# Implemented architecture
+
+## Status
+
+This document describes the implemented Commit CI Preflight 0.1.0 source
+candidate. Future signing, package distribution, additional runtime adapters,
+and full GitHub Actions compatibility are not part of the architecture claimed
+here.
+
+## System purpose
+
+Commit CI Preflight moves deterministic, resource-intensive checks to
+developer-owned hardware while retaining a small remote control plane. The Rust
+core plans explicit checks, executes them through a bounded Docker-compatible
+adapter, emits a canonical commit-bound receipt, and independently verifies
+that receipt against repository policy.
+
+## Context
+
+```mermaid
+flowchart LR
+    DEV["Developer or local agent"] --> CLI["Rust CLI"]
+    CLI --> RUNTIME["Docker-compatible runtime"]
+    RUNTIME --> CHECKS["Pinned Linux check container"]
+    CHECKS --> RECEIPT["Canonical receipt"]
+    RECEIPT --> VERIFY["Independent verifier"]
+    VERIFY --> EVIDENCE["SHA-derived evidence branch"]
+    EVIDENCE --> GITHUB["Lightweight GitHub gate"]
+    GITHUB --> STATUS["Exact PR-head status"]
+```
+
+Remote review, repository permissions, protected-branch policy, trusted
+secrets, deployments, and uncovered native platforms remain outside the local
+receipt.
+
+## Rust module map
+
+| Module | Responsibility |
+|---|---|
+| `config` | Strict TOML schema, semantic validation, DAG normalization, and deterministic plan digest |
+| `runtime` | Bounded Docker-compatible capability probe and explicit container argv rendering |
+| `process` | Cross-platform timeout, cancellation, output bounds, Unix process groups, Windows Job Objects, and cleanup verification |
+| `workspace` | Clean commit binding, read-only source mount, and declared writable cache/artifact mounts |
+| `cache` | Persistent root resolution, ownership marker, content-addressed entries, inventory, locks, and preview-only cleanup |
+| `run` | End-to-end orchestration and fail-closed aggregation |
+| `receipt` | Versioned evidence types, canonical JSON, SHA-256 integrity ID, schema, and atomic publication |
+| `verify` | Independent integrity, commit, configuration, check, image, platform, and freshness policy |
+| `github_actions` | Bounded YAML parsing and inert translated/manual/unsupported migration report |
+| `benchmark` | Fixed cross-platform correctness workload and native receipt verification |
+| `main` | CLI parsing, stable exit codes, JSON/human output, and command dispatch |
+
+The production binary uses Rust 2024 edition. Runtime-specific details do not
+enter the receipt or policy domain model beyond explicit capability evidence.
+
+## Configuration and planning
+
+A version 1.0 TOML configuration declares:
+
+- project identity;
+- Docker-compatible runtime and OCI image digest;
+- CPU, memory, PID, network, and timeout bounds;
+- allowlisted environment variable names;
+- persistent caches and repository-relative mount paths;
+- explicit checks, argv, dependencies, and artifacts;
+- receipt output and freshness.
+
+Unknown fields, invalid names, path escapes, overlapping writable paths,
+dependency cycles, duplicate artifacts, mutable image references, and unsafe
+limits fail before execution. Normalized ordering produces a deterministic plan
+digest included in policy and receipts.
+
+## Execution sequence
+
+```mermaid
+sequenceDiagram
+    participant O as Operator
+    participant C as CLI
+    participant G as Git
+    participant D as Docker-compatible runtime
+    participant P as Project checks
+    participant R as Receipt writer
+
+    O->>C: ccp run
+    C->>G: verify clean checkout and exact commit
+    C->>D: bounded capability probe
+    C->>C: revalidate cache and workspace paths
+    C->>D: explicit argv with read-only source
+    D->>P: run checks in dependency order
+    P-->>C: bounded status, digest, and duration
+    C->>R: canonical create-new or atomic write
+    R-->>O: receipt ID and PASS/FAIL
+```
+
+Checks run without an implicit shell. Project code may explicitly invoke a
+shell as its declared argv, but that choice is visible in the plan and receipt.
+Required `FAIL`, `PENDING`, or `NOT_RUN` evidence prevents an overall
+`PASS`.
+
+## Workspace and cache
+
+The source repository is mounted read-only at `/workspace`. Only declared
+cache directories and artifact files receive narrowly scoped writable mounts.
+Path parsing rejects traversal, control characters, non-representable Docker
+mount syntax, and unsafe overlaps.
+
+The managed cache root is never inferred as a temporary directory or repository
+checkout. It has a versioned ownership marker, content-addressed entries,
+completion markers, and an active-run lock. Cache bytes improve speed but are
+not reproducibility or attestation evidence. Deletion is unavailable in 0.1.0;
+cleanup reports only a dry-run plan.
+
+## Process lifecycle
+
+The supervisor uses process groups on Unix and Job Objects on Windows. It
+provides:
+
+- bounded stdout/stderr capture and output digests;
+- deadline and cooperative cancellation;
+- graceful termination followed by bounded escalation;
+- post-cleanup existence checks;
+- stale-generation rejection;
+- stable result classification.
+
+Container execution adds the runtime's init process for descendant reaping.
+The architecture is containment for reviewed project checks, not a hostile-code
+sandbox.
+
+## Receipt and verification
+
+A receipt contains minimized, typed evidence for producer version, repository
+commit, run generation and timestamps, platform/runtime/image, configuration
+digest, each check, and overall status. Canonical JSON and SHA-256 detect byte
+or field modification.
+
+The verifier is independent of the execution orchestrator. Its caller supplies
+the expected commit and repository policy. Structural, integrity, policy, and
+identity assurance are distinct; identity assurance is not implemented.
+
+## GitHub control plane
+
+The evidence branch name is `ccp-evidence/<exact-source-sha>`. It contains
+only `.ccp/receipt.json` and is published without force-push. A receipt cannot
+be committed to its own source commit without changing that commit, so the
+separate SHA-derived branch preserves the binding.
+
+The GitHub workflow:
+
+- builds verifier code from the reviewed base revision;
+- treats evidence bytes as untrusted input;
+- caps input size;
+- verifies the exact pull-request head;
+- publishes `commit-ci-preflight/receipt`;
+- uses no project test execution, Docker, cache, secret, deployment credential,
+  or `pull_request_target`.
+
+## Migration assistant
+
+The migration assistant reads one bounded GitHub Actions YAML file as untrusted
+data. It recognizes a deliberately small subset and emits an inert report.
+Marketplace actions, expressions, permissions, secrets, services, matrices,
+reusable workflows, and unsupported syntax are never silently executed or
+translated into runnable configuration.
+
+## Supply-chain and candidate packaging
+
+`Cargo.lock`, the Rust toolchain, and the runtime image are pinned. The
+release-metadata example deterministically generates:
+
+- an SPDX 2.3 SBOM covering the complete locked Cargo graph;
+- third-party inventory, checksums, declared licenses, and deduplicated license
+  or notice texts.
+
+The local candidate builder verifies metadata parity, tests the release
+contract, builds with `--locked`, packages the binary and required legal and
+operator documents, and emits `SHA256SUMS`. It cannot tag, upload, sign, or
+publish.
+
+## Platform evidence
+
+The fixed benchmark is qualified on native macOS arm64, Linux x86_64, and
+Windows x86_64. The complete repository preflight is qualified on macOS arm64
+through OrbStack. Benchmark evidence is not promoted into full runtime
+qualification. Exact statuses are maintained in
+[`BETA_SUPPORT.md`](BETA_SUPPORT.md).
+
+## Architectural non-goals
+
+The 0.1.0 candidate does not implement:
+
+- arbitrary GitHub Actions execution;
+- a general pipeline SDK or build language;
+- a long-lived self-hosted runner;
+- remote log collection or telemetry;
+- hostile-code isolation;
+- receipt signing or identity attestation;
+- automatic cache deletion;
+- package or release publication.

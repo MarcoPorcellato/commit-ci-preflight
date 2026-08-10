@@ -2,8 +2,10 @@
 
 ## Supported versions
 
-Commit CI Preflight is pre-alpha. No release is currently supported for
-security-sensitive production use.
+Commit CI Preflight 0.1.0 is a source-built release candidate. No public
+package or signed release is currently supported for security-sensitive
+production use. Review the beta support matrix and threat model before treating
+a receipt as an enforcement signal.
 
 ## Reporting a vulnerability
 
@@ -26,4 +28,8 @@ details until a private channel has been established.
   commit-mismatched receipts.
 - Signing, key custody, and hosted attestations require a dedicated threat
   model and ADR before implementation.
+
+The complete implemented-control and residual-risk review is in
+[`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md). Platform claims and pending
+qualification are in [`docs/BETA_SUPPORT.md`](docs/BETA_SUPPORT.md).
 

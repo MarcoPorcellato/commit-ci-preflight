@@ -58,6 +58,13 @@ Live runs preserve that argv. They add a private, non-host-backed tmpfs at
 fixed container value `TMPDIR=/tmp`. This permits compiler temporary files
 without making the repository or container root writable.
 
+Before creating a managed run workspace, `run` checks the repository-side
+destination of every nested writable binding. Cache destinations must already
+be real directories and artifact destinations real files; missing paths,
+symlinks, wrong object types, and paths resolving outside the repository fail
+closed before Docker starts. The runner does not modify source merely to make
+a container mount possible.
+
 Absolute host paths are shown only in local dry-run output because an operator
 must be able to audit the exact mount. They must not be copied into receipts or
 telemetry. See [`CACHE_AND_WORKSPACE.md`](CACHE_AND_WORKSPACE.md).

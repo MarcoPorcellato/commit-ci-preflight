@@ -49,8 +49,15 @@ Semantic Versioning after its first public release.
 - Genuine macOS arm64 with OrbStack, Linux x86_64, and Windows x86_64 native
   benchmark receipts plus exact GitHub run, job, runner-label, and artifact
   provenance for the fixed PR09 qualification workload.
+- Beta-candidate hardening with a human-first README, SPDX 2.3 SBOM,
+  deduplicated third-party notices, deterministic release-metadata drift gate,
+  local candidate archive and checksums, installation and rollback runbooks,
+  closed threat-model review, support matrix, and end-to-end demo tutorial.
 
 ### Fixed
 
+- Fail before Docker with a precise error when a nested cache or artifact mount
+  destination is missing, symlinked, or has the wrong object type beneath the
+  read-only repository mount.
 - Made benchmark contract verification explicit about GitHub Actions metadata
   and kept versioned text contracts byte-identical across Windows checkouts.
