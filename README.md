@@ -36,15 +36,24 @@ control plane adds information or trust.
 
 ## How it works
 
+**Local execution and receipt**
+
 ```mermaid
 flowchart LR
-    A["Reviewed source commit"] --> B["ccp run on developer hardware"]
-    B --> C["Pinned Linux container checks"]
-    C --> D["Canonical receipt"]
-    D --> E["Independent ccp verify"]
-    E --> F["Append-only evidence branch"]
-    F --> G["Small GitHub receipt gate"]
-    G --> H["Status on exact PR head"]
+    A["1 · Reviewed<br/>source commit"] --> B["2 · Local<br/>ccp run"]
+    B --> C["3 · Pinned Linux<br/>checks"]
+    C --> D["4 · Canonical<br/>receipt"]
+```
+
+<div align="center"><strong>↓ Continues below ↓</strong></div>
+
+**Evidence and remote verification**
+
+```mermaid
+flowchart LR
+    E["5 · Independent<br/>verification"] --> F["6 · Append-only<br/>evidence"]
+    F --> G["7 · Small<br/>GitHub gate"]
+    G --> H["8 · Exact-head<br/>status"]
 ```
 
 The source checkout is read-only inside the container. Only declared cache and
