@@ -56,3 +56,34 @@ Secret scanning, push protection, private vulnerability reporting, issues,
 squash-only merging, and post-merge branch deletion were enabled. This is a
 dated repository-state receipt, not a permanent guarantee; release decisions
 must refresh the query.
+
+## Local candidate archive, rollback, and uninstall
+
+The local candidate builder was executed from clean source commit
+`8629813b45e98263837ea469b689602bfc5b5f1c`. It reran the deterministic release
+metadata check, all seven hardening contract tests, and a locked optimized
+build before creating an unpublished macOS arm64 archive.
+
+| Field | Evidence |
+|---|---|
+| Archive | `commit-ci-preflight-v0.1.0-aarch64-apple-darwin.tar.gz` |
+| Archive bytes | `1106537` |
+| Archive SHA-256 | `a858b6bd30f91843382401d01b8cba6fae317eda1f89ae7fba61cff352519da8` |
+| Checksum verification | `shasum -a 256 -c SHA256SUMS`: PASS |
+| Packaged binary SHA-256 | `34ca38802977f326e733f9d34cfdf3419514a545ea3282ca207a23634930f342` |
+| Packaged binary smoke test | `commit-ci-preflight 0.1.0` |
+
+The archive inventory contained exactly one top-level versioned directory, the
+executable, `LICENSE`, `NOTICE`, `README.md`, `SBOM.spdx.json`,
+`THIRD_PARTY_NOTICES.md`, and the five documented installation, rollback,
+threat-model, beta-support, and tutorial files. Byte comparisons proved the
+packaged license, notice, SBOM, and third-party notices matched the reviewed
+source files.
+
+The rollback runbook was exercised with two distinct executable hashes. The
+candidate replaced a preserved executable, matched the expected candidate
+hash, was moved to quarantine, and the preserved executable was restored
+byte-for-byte and returned version `0.1.0`. An isolated locked `cargo install`
+then returned version `0.1.0`; `cargo uninstall --root` removed that exact
+binary and left the isolated `bin/` directory empty. No receipt, cache, archive,
+tag, signature, package, release, or unrelated data was deleted or published.
