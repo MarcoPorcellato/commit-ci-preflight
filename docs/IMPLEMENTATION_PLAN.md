@@ -33,9 +33,9 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 09A — benchmark and parity contract | Merged | main `2305c1f46930069614b023bc6b8dcfb8a6ae27d5`; portability follow-up main `15f858403b19ade38373176879fb518ef167580d` |
 | PR 09B — native qualification evidence | Merged | main `aaaef7be67200d6f4f62bac5c77b4d0989329d92`; three native receipts and exact GitHub run metadata |
 | PR 10 — beta hardening and candidate | Merged | main `cd4f418d9083b6dbad3112d12374b7c53f900758`; human-first README, SPDX SBOM, third-party notices, installation/checksums, rollback, threat model, tutorial, support policy, local packaging proof, and trusted-base transition receipt |
-| PR 11 — bounded host-wide admission tranche | Draft/published in stack, not merged (PR #20 head) | Default-on single-slot queue for `run` and `benchmark` |
-| PR 12 — macOS resource guard tranche | Draft/published in stack, not merged (PR #21 head) | macOS-v1 pre-start memory admission, `run` watchdog, bounded resource status, and explicit unsupported Linux/Windows capability |
-| PR 13 — guarded external workflow tranche | Working tree | Shell-free `guard exec`, six-hour bounded queue/runtime defaults, live output, watchdog, and verified process-tree cleanup |
+| PR 11 — bounded host-wide admission tranche | Merged | PR #20; main `b628fbcb43c33ea1a8c7e3d5a48ddfe095f02317`; default-on single-slot queue for `run` and `benchmark` |
+| PR 12 — macOS resource guard tranche | Merged | PR #21; main `752e81df1e4dba2524f2116c2ed31d17026ee80e`; macOS-v1 pre-start memory admission, `run` watchdog, bounded resource status, and explicit unsupported Linux/Windows capability |
+| PR 13 — guarded external workflow tranche | Merged | PR #22; main `b9835d66414370b88273a338441f7ab9be528aad`; shell-free `guard exec`, six-hour bounded queue/runtime defaults, live output, watchdog, and verified process-tree cleanup |
 
 ## 2. Mission
 
