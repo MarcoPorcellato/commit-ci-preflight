@@ -421,7 +421,7 @@ fn collect_runtime_probe(
             &envelope,
             &supervisor,
             &current_dir,
-            &cancellation,
+            cancellation,
             &generation,
         )
         .map_err(CliError::Runtime)

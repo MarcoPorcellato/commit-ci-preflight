@@ -55,11 +55,14 @@ enter the receipt or policy domain model beyond explicit capability evidence.
 
 `run` and `benchmark` acquire the single host-wide admission slot immediately
 before heavy execution. The coordinator lives below the platform application
-cache, uses advisory file locks whose ownership is released by the operating
-system on normal exit, crash, or reboot, and never guesses stale state from a
-PID or wall clock. `plan`, `doctor`, `dry-run`, `verify`, migration, and cache
-inventory remain unqueued. Admission state is operational coordination only;
-the receipt schema does not yet record queue or resource evidence.
+cache in the dedicated `commit-ci-preflight-admission` sibling root. It never
+lives inside the independently managed `commit-ci-preflight` cache root. The
+coordinator uses advisory file locks whose ownership is released by the
+operating system on normal exit, crash, or reboot, and never guesses stale
+state from a PID or wall clock. `plan`, `doctor`, `dry-run`, `verify`, migration,
+and cache inventory remain unqueued. Admission state is operational
+coordination only; the receipt schema does not yet record queue or resource
+evidence.
 
 ## Configuration and planning
 

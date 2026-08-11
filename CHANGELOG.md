@@ -19,6 +19,12 @@ Semantic Versioning after its first public release.
 - Host resource sampling and admission evidence integration into receipts are
   explicitly deferred to the next tranche.
 
+### Fixed
+
+- Keep the host-wide admission coordinator in its own persistent platform-cache
+  root so starting guarded work cannot make the independently managed build
+  cache uninitializable or invalid.
+
 ## [0.1.0-rc.1] - 2026-08-10
 
 ### Added

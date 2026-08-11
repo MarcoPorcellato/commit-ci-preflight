@@ -29,6 +29,7 @@ pub const DEFAULT_QUEUE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const MAX_QUEUE_TICKETS: usize = 1024;
 
 const OWNER_FILE: &str = ".ccp-admission-root-v1.json";
+const PLATFORM_DIRECTORY: &str = "commit-ci-preflight-admission";
 const OWNER_BYTES: &[u8] =
     b"{\"owner\":\"commit-ci-preflight\",\"purpose\":\"host-admission-coordinator\",\"schema_version\":\"1.0\"}\n";
 const QUEUE_LOCK: &str = "queue.lock";
@@ -436,7 +437,7 @@ impl AdmissionCoordinator {
                     if reclaim_stale {
                         stale.push(StaleTicket { ticket, file });
                     } else {
-                        file.unlock().map_err(|source| AdmissionError::Lock {
+                        FileExt::unlock(&file).map_err(|source| AdmissionError::Lock {
                             path: ticket.path.clone(),
                             source,
                         })?;
@@ -462,7 +463,7 @@ impl AdmissionCoordinator {
                 path: stale.ticket.path.clone(),
                 source,
             })?;
-            stale.file.unlock().map_err(|source| AdmissionError::Lock {
+            FileExt::unlock(&stale.file).map_err(|source| AdmissionError::Lock {
                 path: stale.ticket.path,
                 source,
             })?;
@@ -487,8 +488,7 @@ impl AdmissionCoordinator {
         };
         match file.try_lock_exclusive() {
             Ok(()) => {
-                file.unlock()
-                    .map_err(|source| AdmissionError::Lock { path, source })?;
+                FileExt::unlock(&file).map_err(|source| AdmissionError::Lock { path, source })?;
                 Ok(false)
             }
             Err(source) if source.kind() == io::ErrorKind::WouldBlock => Ok(true),
@@ -501,7 +501,7 @@ impl AdmissionCoordinator {
         if create {
             open_lock_file(&path, true)
         } else {
-            open_existing_lock_file(&path)?.ok_or_else(|| AdmissionError::UnsafeLayout(path))
+            open_existing_lock_file(&path)?.ok_or(AdmissionError::UnsafeLayout(path))
         }
     }
 
@@ -525,13 +525,13 @@ impl AdmissionCoordinator {
         if !self.root_exists()? {
             return Ok(());
         }
-        let mut entries = fs::read_dir(&self.root).map_err(|source| AdmissionError::Io {
+        let entries = fs::read_dir(&self.root).map_err(|source| AdmissionError::Io {
             path: self.root.clone(),
             source,
         })?;
         let mut owner = false;
         let mut tickets = false;
-        while let Some(entry) = entries.next() {
+        for entry in entries {
             let entry = entry.map_err(AdmissionError::ReadDir)?;
             let name = entry.file_name();
             let path = entry.path();
@@ -593,13 +593,13 @@ impl AdmissionGuard {
                 source,
             })?;
         if let Some(slot) = self.slot.take() {
-            slot.unlock().map_err(|source| AdmissionError::Lock {
+            FileExt::unlock(&slot).map_err(|source| AdmissionError::Lock {
                 path: self.coordinator.root.join(SLOT_LOCK),
                 source,
             })?;
         }
         if let Some(ticket) = self.ticket.take() {
-            ticket.unlock().map_err(|source| AdmissionError::Lock {
+            FileExt::unlock(&ticket).map_err(|source| AdmissionError::Lock {
                 path: self.ticket_path.clone(),
                 source,
             })?;
@@ -639,7 +639,7 @@ impl TicketReservation {
                 path: coordinator.root.join(QUEUE_LOCK),
                 source,
             })?;
-        file.unlock().map_err(|source| AdmissionError::Lock {
+        FileExt::unlock(file).map_err(|source| AdmissionError::Lock {
             path: path.clone(),
             source,
         })?;
@@ -657,7 +657,7 @@ impl TicketReservation {
 impl Drop for TicketReservation {
     fn drop(&mut self) {
         if let Some(file) = &self.file {
-            let _ = file.unlock();
+            let _ = FileExt::unlock(file);
         }
         if let Some(path) = &self.path {
             let _ = fs::remove_file(path);
@@ -683,7 +683,7 @@ fn sleep_until(deadline: Instant, cancellation: &CancellationToken) {
 }
 
 fn unlock(file: &mut File) -> Result<(), AdmissionError> {
-    file.unlock().map_err(|source| AdmissionError::Lock {
+    FileExt::unlock(file).map_err(|source| AdmissionError::Lock {
         path: PathBuf::from("admission lock"),
         source,
     })
@@ -700,6 +700,7 @@ fn open_lock_file(path: &Path, create: bool) -> Result<File, AdmissionError> {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(path)
     } else {
         OpenOptions::new().read(true).write(true).open(path)
@@ -768,21 +769,18 @@ fn parse_ticket_name(path: &Path) -> Result<String, AdmissionError> {
 
 fn platform_root() -> Result<PathBuf, AdmissionError> {
     let platform = if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(PathBuf::from).map(|home| {
-            home.join("Library")
-                .join("Caches")
-                .join("commit-ci-preflight")
-                .join("admission")
-        })
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Library").join("Caches").join(PLATFORM_DIRECTORY))
     } else if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .map(|base| base.join("commit-ci-preflight").join("admission"))
+            .map(|base| base.join(PLATFORM_DIRECTORY))
     } else {
         std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-            .map(|base| base.join("commit-ci-preflight").join("admission"))
+            .map(|base| base.join(PLATFORM_DIRECTORY))
     };
     platform.ok_or(AdmissionError::NoPersistentDefault)
 }
@@ -1251,5 +1249,21 @@ mod tests {
         assert_eq!(value.as_object().expect("object").len(), 4);
         assert!(value.get("ticket_ids").expect("ticket ids").is_array());
         assert!(value.to_string().find("/").is_none());
+    }
+
+    #[test]
+    fn platform_coordinator_uses_a_dedicated_cache_sibling() {
+        let root = platform_root().expect("persistent platform cache");
+        assert_eq!(
+            root.file_name().and_then(|name| name.to_str()),
+            Some(PLATFORM_DIRECTORY)
+        );
+        assert_ne!(
+            root.parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str()),
+            Some("commit-ci-preflight"),
+            "the coordinator must not live inside the managed cache root"
+        );
     }
 }
