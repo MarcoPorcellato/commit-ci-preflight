@@ -98,8 +98,12 @@ fn output_is_create_new_and_never_overwrites_evidence() {
 
 #[test]
 fn cli_run_and_independent_verify_use_stable_exit_codes() {
+    let root = test_root("cli-verify");
+    fs::create_dir_all(&root).expect("create CLI root");
     let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
         .args(["benchmark", "--commit", COMMIT, "--json"])
+        .env("XDG_CACHE_HOME", &root)
+        .current_dir(std::env::temp_dir())
         .output()
         .expect("run benchmark CLI");
     assert!(output.status.success());
@@ -108,8 +112,6 @@ fn cli_run_and_independent_verify_use_stable_exit_codes() {
         serde_json::from_slice(&output.stdout).expect("benchmark CLI JSON");
     envelope.validate().expect("benchmark integrity");
 
-    let root = test_root("cli-verify");
-    fs::create_dir_all(&root).expect("create CLI root");
     let receipt = root.join("receipt.json");
     fs::write(
         &receipt,

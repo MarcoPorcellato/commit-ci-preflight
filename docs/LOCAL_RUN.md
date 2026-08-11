@@ -19,20 +19,31 @@ only their canonical digest, truncation state, exit status, and duration are
 recorded. Use `dry-run` to inspect the exact container argv and reproduce a
 failing command deliberately when deeper local diagnostics are required.
 
+Heavy commands use a default-on host-wide single-slot admission queue shared by
+independent repositories and cache roots. Override the bounded wait with
+`--admission-timeout-seconds <seconds>` on `run` or `benchmark`. Inspect the
+bounded operational state with `admission status --json`; it reports only the
+schema, busy state, queue count, and opaque ticket identifiers.
+
 ## Execution sequence
 
 1. Parse and normalize schema `1.0`.
-2. Require a valid 40-hex Git commit and a clean checkout. The configured
+2. Perform bounded non-heavy setup required by the command: `run` resolves and
+   initializes its selected cache, while `benchmark` may perform its optional
+   runtime probe.
+3. Acquire the host-wide admission slot for `run` or `benchmark`, immediately
+   before heavy execution, waiting cooperatively with cancellation until the
+   selected timeout.
+4. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
    receipt output itself is excluded from this dirty check.
-3. Probe the Docker-compatible runtime with bounded output and deadline.
-4. Resolve and validate the persistent owned cache root.
-5. Acquire the plan-generation workspace lock.
-6. Prepare only declared cache directories and artifact files.
-7. Render shell-free `docker run` argv with a pinned image and explicit limits.
-8. Execute checks in deterministic DAG order with timeout, cancellation, and
+5. For `run`, probe the Docker-compatible runtime with bounded output and deadline.
+6. For `run`, acquire the plan-generation workspace lock.
+7. For `run`, prepare only declared cache directories and artifact files.
+8. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
+9. Execute the `run` checks or benchmark workload with timeout, cancellation, and
    stale-generation guards.
-9. Mark cache entries complete only when every check passes.
-10. Seal and atomically write the canonical receipt.
+10. Mark cache entries complete only when every check passes.
+11. Seal and atomically write the canonical receipt.
 
 A command failure or timeout is `FAIL`. A dependency skip, cancellation before
 execution, or uncertain runtime execution is `NOT_RUN` and makes required
@@ -64,6 +75,12 @@ The workspace lock is `.run-lock-v1`. Normal drop removes it. If the process is
 forcibly killed, a later run reports the exact lock path and stops. Verify that
 no runner uses that cache root before manually removing only the reported lock
 file. There is intentionally no automatic stale-lock deletion.
+
+Admission tickets are different: each ticket is protected by its own advisory
+lock, so a crashed or rebooted waiter becomes reclaimable when that lock is
+released. Malformed, foreign, or uncertain coordinator state fails closed and
+is never deleted automatically. Admission is not included in receipts yet;
+host resource sampling and truthful admission evidence are the next tranche.
 
 ## Local evidence captured on 2026-08-09
 

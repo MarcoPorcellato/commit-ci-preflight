@@ -89,6 +89,13 @@ cargo build --locked
 `doctor` performs a bounded read-only runtime probe. `dry-run` prints the
 exact container argv and mounts but does not execute project code.
 
+`run` and `benchmark` are serialized through a default-on host-wide single-slot
+queue so independent local agents cannot start both heavy workloads at once.
+Use `--admission-timeout-seconds` to select the bounded wait and
+`admission status --json` to inspect only busy state, queue count, and opaque
+ticket identifiers. Admission evidence is not part of receipts yet; host
+resource telemetry is planned for the next tranche.
+
 ### 3. Run the clean-room demo
 
 Follow the [end-to-end tutorial](docs/TUTORIAL.md). It copies a tiny public Rust

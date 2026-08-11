@@ -10,6 +10,7 @@ features, minimum Rust version, and transitive impact.
 |---|---:|---|---|---|
 | `clap` | 4.6.6 | Typed CLI parsing and stable help/usage errors | `derive`, `error-context`, `help`, `std`, `usage`; default features disabled | MIT OR Apache-2.0 |
 | `ctrlc` | 3.5.2 | Convert Ctrl+C and termination signals into cooperative cancellation | `termination` | MIT OR Apache-2.0 |
+| `fs2` | 0.4.3 | Cross-process advisory file locks for the host-wide admission coordinator | default features | MIT OR Apache-2.0 |
 | `process-wrap` | 9.1.0 | Cross-platform process containment through Unix process groups and Windows Job Objects | `std`, `process-group`, `job-object`; default features disabled | MIT OR Apache-2.0 |
 | `nix` (Unix only) | 0.31.1 | Explicit group signals and post-cleanup existence checks | `process`, `signal`; default features disabled | MIT |
 | `serde` | 1.0.229 | Typed receipt serialization and strict deserialization | `derive` | MIT OR Apache-2.0 |
@@ -38,6 +39,10 @@ features, minimum Rust version, and transitive impact.
   containment primitive while CCP independently verifies Unix group cleanup.
 - `ctrlc` installs one process-global handler for cooperative CLI cancellation;
   it does not perform command execution.
+- `fs2` is pinned exactly at `0.4.3` and is used only for advisory file locks;
+  the offline local registry declares `MIT/Apache-2.0` and contains both
+  `LICENSE-MIT` and `LICENSE-APACHE`. It introduces no network or process
+  behavior.
 - The locked `cargo metadata` inventory found no missing license declarations
   and only permissive Apache-2.0, MIT, Unlicense, Unicode-3.0, and Zlib
   combinations.

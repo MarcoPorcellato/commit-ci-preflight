@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "development-tools::testing"]
 [dependencies]
 clap = { version = "4.6.6", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
 ctrlc = { version = "=3.5.2", features = ["termination"] }
+fs2 = "=0.4.3"
 process-wrap = { version = "=9.1.0", default-features = false, features = ["job-object", "process-group", "std"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
