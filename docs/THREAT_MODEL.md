@@ -104,6 +104,7 @@ Boundary rules:
 | T22 | Evidence parser denial of service | One MiB remote input cap, strict unknown-field rejection, bounded summaries | Base verifier compilation still consumes bounded remote time |
 | T23 | Release substitution | Local SHA-256 manifest, SBOM, notices, checksum verification instructions | Checksums are not signatures and must come through an independent channel |
 | T24 | Unsafe upgrade or rollback | Isolated install, version smoke test, preserved previous binary, versioned schemas and cache markers | Operator mistakes remain possible; no automatic updater exists |
+| T25 | Concurrent heavy local jobs exhaust host memory | Persistent host-wide single-slot admission, advisory lock release, bounded queue, cancellation, timeout, fail-closed ownership/layout validation | No host resource sampling or receipt admission evidence exists in this tranche |
 
 ## 7. GitHub gate review
 
@@ -147,6 +148,8 @@ before publication.
 - `SBOM.spdx.json` records the complete locked Cargo graph.
 - `THIRD_PARTY_NOTICES.md` records declared licenses, sources, checksums, and
   deduplicated license/notice texts found in packaged crates.
+- The host admission coordinator does not infer liveness from PIDs or wall
+  clocks; it reclaims only tickets whose advisory locks are demonstrably free.
 - The release-candidate builder includes `LICENSE`, `NOTICE`, SBOM, and
   third-party notices and emits a SHA-256 manifest.
 - No release signing or package publication occurs automatically.

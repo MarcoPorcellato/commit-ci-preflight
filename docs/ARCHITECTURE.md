@@ -42,6 +42,7 @@ receipt.
 | `process` | Cross-platform timeout, cancellation, output bounds, Unix process groups, Windows Job Objects, and cleanup verification |
 | `workspace` | Read-only source mount plan and declared writable cache/artifact mounts |
 | `cache` | Persistent root resolution, ownership marker, content-addressed entries, inventory, locks, and preview-only cleanup |
+| `admission` | Persistent platform-cache coordinator, FIFO/best-effort lock-backed tickets, one heavy-command slot, cancellation, timeout, and bounded status |
 | `run` | End-to-end orchestration and fail-closed aggregation |
 | `receipt` | Versioned evidence types, canonical JSON, SHA-256 integrity ID, schema, and atomic publication |
 | `verify` | Independent integrity, commit, configuration, check, image, platform, and freshness policy |
@@ -51,6 +52,14 @@ receipt.
 
 The production binary uses Rust 2024 edition. Runtime-specific details do not
 enter the receipt or policy domain model beyond explicit capability evidence.
+
+`run` and `benchmark` acquire the single host-wide admission slot immediately
+before heavy execution. The coordinator lives below the platform application
+cache, uses advisory file locks whose ownership is released by the operating
+system on normal exit, crash, or reboot, and never guesses stale state from a
+PID or wall clock. `plan`, `doctor`, `dry-run`, `verify`, migration, and cache
+inventory remain unqueued. Admission state is operational coordination only;
+the receipt schema does not yet record queue or resource evidence.
 
 ## Configuration and planning
 

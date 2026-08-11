@@ -7,6 +7,18 @@ Semantic Versioning after its first public release.
 
 ## [Unreleased]
 
+### Added
+
+- Default-on host-wide single-slot admission for heavy `run` and `benchmark`
+  commands with persistent advisory-lock tickets, cancellation, bounded
+  timeout, stale-ticket recovery, and read-only status reporting.
+- Pinned offline `fs2` 0.4.3 dependency for cross-process advisory locks.
+
+### Not Yet Included
+
+- Host resource sampling and admission evidence integration into receipts are
+  explicitly deferred to the next tranche.
+
 ## [0.1.0-rc.1] - 2026-08-10
 
 ### Added

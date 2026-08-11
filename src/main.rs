@@ -15,8 +15,12 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
+use commit_ci_preflight::admission::{
+    ADMISSION_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, DEFAULT_QUEUE_TIMEOUT,
+};
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
 };
@@ -46,6 +50,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Inspect the host-wide heavy-command admission queue.
+    Admission {
+        #[command(subcommand)]
+        action: AdmissionCommand,
+    },
     /// Validate configuration and print the normalized read-only execution plan.
     Plan {
         /// Configuration file to validate.
@@ -88,6 +97,9 @@ enum Command {
         /// Emit the canonical receipt as JSON.
         #[arg(long)]
         json: bool,
+        /// Maximum time to wait for the host-wide heavy-command slot.
+        #[arg(long, default_value_t = DEFAULT_QUEUE_TIMEOUT.as_secs())]
+        admission_timeout_seconds: u64,
     },
     /// Independently verify receipt integrity and repository policy.
     Verify {
@@ -130,6 +142,9 @@ enum Command {
         /// Emit the canonical benchmark receipt as JSON.
         #[arg(long)]
         json: bool,
+        /// Maximum time to wait for the host-wide heavy-command slot.
+        #[arg(long, default_value_t = DEFAULT_QUEUE_TIMEOUT.as_secs())]
+        admission_timeout_seconds: u64,
     },
     /// Independently verify a benchmark receipt and its expected native platform.
     VerifyBenchmark {
@@ -211,9 +226,20 @@ enum CacheCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum AdmissionCommand {
+    /// Report only bounded coordinator state and ticket identifiers.
+    Status {
+        /// Emit the versioned machine-readable status.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
+        Some(Command::Admission { action }) => run_admission_command(action),
         Some(Command::Plan { config, json }) => print_plan(&config, json),
         Some(Command::Doctor { config, json }) => print_doctor(&config, json),
         Some(Command::DryRun {
@@ -226,7 +252,14 @@ fn main() {
             location,
             generation,
             json,
-        }) => print_run(&config, &location, generation, json),
+            admission_timeout_seconds,
+        }) => print_run(
+            &config,
+            &location,
+            generation,
+            admission_timeout_seconds,
+            json,
+        ),
         Some(Command::Verify {
             receipt,
             policy,
@@ -248,7 +281,14 @@ fn main() {
             runtime_config,
             output,
             json,
-        }) => print_benchmark(&commit, runtime_config.as_deref(), output.as_deref(), json),
+            admission_timeout_seconds,
+        }) => print_benchmark(
+            &commit,
+            runtime_config.as_deref(),
+            output.as_deref(),
+            admission_timeout_seconds,
+            json,
+        ),
         Some(Command::VerifyBenchmark {
             receipt,
             expected_commit,
@@ -285,10 +325,24 @@ fn print_benchmark(
     commit: &str,
     runtime_config: Option<&Path>,
     output: Option<&Path>,
+    admission_timeout_seconds: u64,
     json: bool,
 ) -> Result<(), CliError> {
-    let runtime_probe = runtime_config.map(collect_runtime_probe).transpose()?;
-    let envelope = run_benchmark(commit, runtime_probe.as_ref()).map_err(CliError::Benchmark)?;
+    let cancellation = CancellationToken::default();
+    install_cancellation_handler(&cancellation)?;
+    let runtime_probe = runtime_config
+        .map(|path| collect_runtime_probe(path, &cancellation))
+        .transpose()?;
+    let admission = AdmissionCoordinator::platform().map_err(CliError::Admission)?;
+    let guard = admission
+        .acquire(
+            Duration::from_secs(admission_timeout_seconds),
+            &cancellation,
+        )
+        .map_err(CliError::Admission)?;
+    let envelope = run_benchmark(commit, runtime_probe.as_ref());
+    guard.release().map_err(CliError::Admission)?;
+    let envelope = envelope.map_err(CliError::Benchmark)?;
     if let Some(path) = output {
         write_new_receipt(path, &envelope).map_err(CliError::Benchmark)?;
     }
@@ -353,12 +407,13 @@ fn print_verify_benchmark(
     Ok(())
 }
 
-fn collect_runtime_probe(path: &Path) -> Result<RuntimeProbe, CliError> {
+fn collect_runtime_probe(
+    path: &Path,
+    cancellation: &CancellationToken,
+) -> Result<RuntimeProbe, CliError> {
     let envelope = load_plan(path)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
     let supervisor = ProcessSupervisor::standard();
-    let cancellation = CancellationToken::default();
-    install_cancellation_handler(&cancellation)?;
     let generation = doctor_guard(&envelope);
     let current_dir = std::env::current_dir().map_err(CliError::internal)?;
     runtime
@@ -440,6 +495,7 @@ fn print_run(
     path: &Path,
     location: &CacheLocationArgs,
     generation: u64,
+    admission_timeout_seconds: u64,
     json: bool,
 ) -> Result<(), CliError> {
     let envelope = load_plan(path)?;
@@ -449,6 +505,14 @@ fn print_run(
     let supervisor = ProcessSupervisor::standard();
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
+    let admission =
+        AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
+    let guard = admission
+        .acquire(
+            Duration::from_secs(admission_timeout_seconds),
+            &cancellation,
+        )
+        .map_err(CliError::Admission)?;
     let outcome = execute_local_run(
         &RunRequest {
             envelope: &envelope,
@@ -460,8 +524,9 @@ fn print_run(
         &supervisor,
         &cancellation,
         &SystemClock,
-    )
-    .map_err(CliError::Run)?;
+    );
+    guard.release().map_err(CliError::Admission)?;
+    let outcome = outcome.map_err(CliError::Run)?;
     if json {
         let bytes = outcome
             .receipt
@@ -618,6 +683,31 @@ fn run_cache_command(action: CacheCommand) -> Result<(), CliError> {
     }
 }
 
+fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
+    match action {
+        AdmissionCommand::Status { json } => {
+            let status = AdmissionCoordinator::platform()
+                .map_err(CliError::Admission)?
+                .status()
+                .map_err(CliError::Admission)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&status).map_err(CliError::internal)?
+                );
+            } else {
+                println!("Admission schema: {ADMISSION_SCHEMA_VERSION}");
+                println!("Active: {}", status.active);
+                println!("Queued: {}", status.queue_count);
+                for ticket in status.ticket_ids {
+                    println!("  - {ticket}");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 fn resolve_cache_root(location: &CacheLocationArgs) -> Result<ResolvedCacheRoot, CliError> {
     ResolvedCacheRoot::resolve(
         &location.repository,
@@ -697,6 +787,7 @@ enum CliError {
     Cache(CacheError),
     Workspace(WorkspaceError),
     Runtime(RuntimeError),
+    Admission(AdmissionError),
     Run(RunError),
     RunOutcome(EvidenceStatus),
     Verification(VerificationError),
@@ -723,6 +814,7 @@ impl CliError {
             Self::Cache(error) => error.exit_code(),
             Self::Workspace(_) => 2,
             Self::Runtime(error) => error.exit_code(),
+            Self::Admission(error) => error.exit_code(),
             Self::Run(error) => error.exit_code(),
             Self::RunOutcome(EvidenceStatus::Fail) => 1,
             Self::RunOutcome(EvidenceStatus::Pending | EvidenceStatus::NotRun) => 5,
@@ -748,6 +840,7 @@ impl fmt::Display for CliError {
             Self::Cache(error) => write!(formatter, "{error}"),
             Self::Workspace(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
+            Self::Admission(error) => write!(formatter, "{error}"),
             Self::Run(error) => write!(formatter, "{error}"),
             Self::RunOutcome(status) => write!(formatter, "run completed with {status:?}"),
             Self::Verification(error) => write!(formatter, "{error}"),
@@ -774,6 +867,7 @@ impl std::error::Error for CliError {
             Self::Cache(error) => Some(error),
             Self::Workspace(error) => Some(error),
             Self::Runtime(error) => Some(error),
+            Self::Admission(error) => Some(error),
             Self::Run(error) => Some(error),
             Self::RunOutcome(_) => None,
             Self::Verification(error) => Some(error),
