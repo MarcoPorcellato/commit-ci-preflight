@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -127,6 +127,12 @@ pub struct ProcessRequest {
     pub max_capture_bytes: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputMode {
+    Capture,
+    Tee,
+}
+
 impl ProcessRequest {
     pub fn validate(&self) -> Result<(), ProcessError> {
         if self.program.is_empty() {
@@ -209,6 +215,18 @@ pub trait SupervisorPort: Send + Sync {
 
 pub trait ProcessSpawner: Send + Sync {
     fn spawn(&self, request: &ProcessRequest) -> Result<Box<dyn ManagedProcess>, ProcessError>;
+
+    fn spawn_with_output(
+        &self,
+        request: &ProcessRequest,
+        output_mode: OutputMode,
+    ) -> Result<Box<dyn ManagedProcess>, ProcessError> {
+        if output_mode == OutputMode::Capture {
+            self.spawn(request)
+        } else {
+            Err(ProcessError::UnsupportedOutputMode)
+        }
+    }
 }
 
 pub trait ManagedProcess: Send {
@@ -231,6 +249,14 @@ pub struct StdProcessSpawner;
 
 impl ProcessSpawner for StdProcessSpawner {
     fn spawn(&self, request: &ProcessRequest) -> Result<Box<dyn ManagedProcess>, ProcessError> {
+        self.spawn_with_output(request, OutputMode::Capture)
+    }
+
+    fn spawn_with_output(
+        &self,
+        request: &ProcessRequest,
+        output_mode: OutputMode,
+    ) -> Result<Box<dyn ManagedProcess>, ProcessError> {
         let mut command = CommandWrap::with_new(&request.program, |command| {
             command
                 .args(&request.argv)
@@ -257,12 +283,16 @@ impl ProcessSpawner for StdProcessSpawner {
             .take()
             .ok_or(ProcessError::Invariant("stderr pipe was not created"))?;
         let limit = request.max_capture_bytes;
+        let stdout_writer = (output_mode == OutputMode::Tee)
+            .then(|| Box::new(io::stdout()) as Box<dyn Write + Send>);
+        let stderr_writer = (output_mode == OutputMode::Tee)
+            .then(|| Box::new(io::stderr()) as Box<dyn Write + Send>);
 
         Ok(Box::new(StdManagedProcess {
             child,
             pid,
-            stdout: Some(spawn_reader(stdout, limit)),
-            stderr: Some(spawn_reader(stderr, limit)),
+            stdout: Some(spawn_reader(stdout, limit, stdout_writer)),
+            stderr: Some(spawn_reader(stderr, limit, stderr_writer)),
             last_exit: None,
         }))
     }
@@ -304,6 +334,18 @@ impl<S: ProcessSpawner> SupervisorPort for ProcessSupervisor<S> {
         cancellation: &CancellationToken,
         generation: &GenerationGuard,
     ) -> Result<ProcessResult, ProcessError> {
+        self.execute_with_output(request, cancellation, generation, OutputMode::Capture)
+    }
+}
+
+impl<S: ProcessSpawner> ProcessSupervisor<S> {
+    pub fn execute_with_output(
+        &self,
+        request: &ProcessRequest,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+        output_mode: OutputMode,
+    ) -> Result<ProcessResult, ProcessError> {
         request.validate()?;
         generation.ensure_current(&request.identity)?;
         let started = Instant::now();
@@ -317,7 +359,7 @@ impl<S: ProcessSpawner> SupervisorPort for ProcessSupervisor<S> {
             ));
         }
 
-        let mut child = self.spawner.spawn(request)?;
+        let mut child = self.spawner.spawn_with_output(request, output_mode)?;
         loop {
             if generation.ensure_current(&request.identity).is_err() {
                 self.stop_and_collect(child, request, ProcessTermination::Cancelled, started)?;
@@ -361,9 +403,7 @@ impl<S: ProcessSpawner> SupervisorPort for ProcessSupervisor<S> {
             thread::sleep(self.poll_interval);
         }
     }
-}
 
-impl<S: ProcessSpawner> ProcessSupervisor<S> {
     fn stop_and_collect(
         &self,
         mut child: Box<dyn ManagedProcess>,
@@ -532,20 +572,35 @@ impl ManagedProcess for StdManagedProcess {
 fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
     limit: usize,
+    mut writer: Option<Box<dyn Write + Send>>,
 ) -> JoinHandle<io::Result<CapturedStream>> {
     thread::spawn(move || {
         let mut captured = Vec::with_capacity(limit.min(8192));
         let mut buffer = [0_u8; 8192];
         let mut truncated = false;
+        let mut write_error = None;
         loop {
             let read = reader.read(&mut buffer)?;
             if read == 0 {
                 break;
             }
+            if let Some(writer) = writer.as_mut() {
+                if let Err(error) = writer
+                    .write_all(&buffer[..read])
+                    .and_then(|_| writer.flush())
+                {
+                    if write_error.is_none() {
+                        write_error = Some(io::Error::new(error.kind(), error.to_string()));
+                    }
+                }
+            }
             let remaining = limit.saturating_sub(captured.len());
             let kept = remaining.min(read);
             captured.extend_from_slice(&buffer[..kept]);
             truncated |= kept < read;
+        }
+        if let Some(error) = write_error {
+            return Err(error);
         }
         Ok(CapturedStream {
             bytes: captured,
@@ -601,6 +656,7 @@ pub enum ProcessError {
     Spawn(io::Error),
     Monitor(io::Error),
     Output(io::Error),
+    UnsupportedOutputMode,
     CleanupUncertain {
         stage: &'static str,
         source: io::Error,
@@ -618,6 +674,9 @@ impl fmt::Display for ProcessError {
             Self::Spawn(_) => formatter.write_str("process could not be started"),
             Self::Monitor(_) => formatter.write_str("process state could not be monitored"),
             Self::Output(_) => formatter.write_str("process output could not be collected"),
+            Self::UnsupportedOutputMode => {
+                formatter.write_str("requested process output mode is unavailable")
+            }
             Self::CleanupUncertain { stage, .. } => {
                 write!(formatter, "process cleanup is uncertain at stage: {stage}")
             }
@@ -634,7 +693,10 @@ impl std::error::Error for ProcessError {
             | Self::Monitor(source)
             | Self::Output(source)
             | Self::CleanupUncertain { source, .. } => Some(source),
-            Self::InvalidRequest(_) | Self::StaleGeneration | Self::Invariant(_) => None,
+            Self::InvalidRequest(_)
+            | Self::UnsupportedOutputMode
+            | Self::StaleGeneration
+            | Self::Invariant(_) => None,
         }
     }
 }
@@ -642,6 +704,8 @@ impl std::error::Error for ProcessError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn identity(generation: &str) -> RunIdentity {
@@ -677,6 +741,7 @@ mod tests {
     struct FakeSpawner {
         state: Arc<Mutex<FakeState>>,
         behavior: FakeBehavior,
+        output_modes: Arc<StdMutex<Vec<OutputMode>>>,
     }
 
     #[derive(Clone)]
@@ -699,11 +764,43 @@ mod tests {
                 behavior: self.behavior.clone(),
             }))
         }
+
+        fn spawn_with_output(
+            &self,
+            request: &ProcessRequest,
+            output_mode: OutputMode,
+        ) -> Result<Box<dyn ManagedProcess>, ProcessError> {
+            self.output_modes
+                .lock()
+                .expect("output modes")
+                .push(output_mode);
+            self.spawn(request)
+        }
     }
 
     struct FakeProcess {
         state: Arc<Mutex<FakeState>>,
         behavior: FakeBehavior,
+    }
+
+    #[derive(Clone, Default)]
+    struct BufferWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl BufferWriter {
+        fn bytes(&self) -> Vec<u8> {
+            self.0.lock().expect("buffer").clone()
+        }
+    }
+
+    impl io::Write for BufferWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     impl ManagedProcess for FakeProcess {
@@ -759,23 +856,30 @@ mod tests {
         }
     }
 
-    fn supervisor(
-        behavior: FakeBehavior,
-    ) -> (ProcessSupervisor<FakeSpawner>, Arc<Mutex<FakeState>>) {
+    type SupervisorFixture = (
+        ProcessSupervisor<FakeSpawner>,
+        Arc<Mutex<FakeState>>,
+        Arc<StdMutex<Vec<OutputMode>>>,
+    );
+
+    fn supervisor(behavior: FakeBehavior) -> SupervisorFixture {
         let state = Arc::new(Mutex::new(FakeState::default()));
+        let output_modes = Arc::new(StdMutex::new(Vec::new()));
         (
             ProcessSupervisor::new(FakeSpawner {
                 state: Arc::clone(&state),
                 behavior,
+                output_modes: Arc::clone(&output_modes),
             })
             .with_timing(Duration::from_millis(1), Duration::from_millis(1)),
             state,
+            output_modes,
         )
     }
 
     #[test]
     fn completed_process_is_sealed_before_acceptance() {
-        let (supervisor, state) = supervisor(FakeBehavior::Complete);
+        let (supervisor, state, _) = supervisor(FakeBehavior::Complete);
         let request = request();
         let guard = GenerationGuard::new(request.identity.clone());
         let result = supervisor
@@ -790,7 +894,7 @@ mod tests {
 
     #[test]
     fn pre_cancelled_request_never_spawns() {
-        let (supervisor, state) = supervisor(FakeBehavior::NeverExit);
+        let (supervisor, state, _) = supervisor(FakeBehavior::NeverExit);
         let request = request();
         let guard = GenerationGuard::new(request.identity.clone());
         let cancellation = CancellationToken::default();
@@ -807,7 +911,7 @@ mod tests {
 
     #[test]
     fn timeout_forces_and_verifies_cleanup() {
-        let (supervisor, state) = supervisor(FakeBehavior::NeverExit);
+        let (supervisor, state, _) = supervisor(FakeBehavior::NeverExit);
         let mut request = request();
         request.timeout = Duration::from_millis(2);
         let guard = GenerationGuard::new(request.identity.clone());
@@ -825,7 +929,7 @@ mod tests {
     #[test]
     fn active_cancellation_forces_and_verifies_cleanup() {
         let cancellation = CancellationToken::default();
-        let (supervisor, state) = supervisor(FakeBehavior::Cancel(cancellation.clone()));
+        let (supervisor, state, _) = supervisor(FakeBehavior::Cancel(cancellation.clone()));
         let request = request();
         let guard = GenerationGuard::new(request.identity.clone());
 
@@ -843,7 +947,7 @@ mod tests {
     fn stale_generation_is_rejected_after_cleanup() {
         let request = request();
         let guard = GenerationGuard::new(request.identity.clone());
-        let (supervisor, state) = supervisor(FakeBehavior::Stale(guard.clone()));
+        let (supervisor, state, _) = supervisor(FakeBehavior::Stale(guard.clone()));
 
         let error = supervisor
             .execute(&request, &CancellationToken::default(), &guard)
@@ -857,7 +961,7 @@ mod tests {
 
     #[test]
     fn uncertain_cleanup_is_never_returned_as_result() {
-        let (supervisor, _) = supervisor(FakeBehavior::CleanupFailure);
+        let (supervisor, _, _) = supervisor(FakeBehavior::CleanupFailure);
         let mut request = request();
         request.timeout = Duration::from_millis(2);
         let guard = GenerationGuard::new(request.identity.clone());
@@ -871,7 +975,7 @@ mod tests {
 
     #[test]
     fn invalid_request_is_rejected_before_spawn() {
-        let (supervisor, state) = supervisor(FakeBehavior::Complete);
+        let (supervisor, state, _) = supervisor(FakeBehavior::Complete);
         let mut request = request();
         request.timeout = Duration::ZERO;
         let guard = GenerationGuard::new(request.identity.clone());
@@ -911,5 +1015,85 @@ mod tests {
         user.cancel();
         user.cancel_resource_pressure();
         assert_eq!(user.reason(), Some(CancellationReason::User));
+    }
+
+    #[test]
+    fn capture_mode_regression_keeps_bounded_output_and_uses_capture_mode() {
+        let (supervisor, _, output_modes) = supervisor(FakeBehavior::Complete);
+        let request = request();
+        let guard = GenerationGuard::new(request.identity.clone());
+
+        let result = supervisor
+            .execute_with_output(
+                &request,
+                &CancellationToken::default(),
+                &guard,
+                OutputMode::Capture,
+            )
+            .expect("capture mode");
+
+        assert_eq!(result.stdout.bytes, b"fixture".to_vec());
+        assert_eq!(result.stderr.bytes, b"fixture".to_vec());
+        assert_eq!(
+            output_modes.lock().expect("modes").as_slice(),
+            &[OutputMode::Capture]
+        );
+    }
+
+    #[test]
+    fn tee_write_failure_fails_closed() {
+        #[derive(Clone, Default)]
+        struct FailingWriter;
+
+        impl io::Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("tee failure"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let error = spawn_reader(
+            Cursor::new(b"stdout-bytes".to_vec()),
+            32,
+            Some(Box::new(FailingWriter)),
+        )
+        .join()
+        .expect("reader thread")
+        .expect_err("tee failure");
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn tee_reader_keeps_streams_separate_and_capture_bounded() {
+        let stdout_sink = BufferWriter::default();
+        let stderr_sink = BufferWriter::default();
+
+        let stdout = spawn_reader(
+            Cursor::new(b"stdout-bytes".to_vec()),
+            6,
+            Some(Box::new(stdout_sink.clone())),
+        )
+        .join()
+        .expect("stdout thread")
+        .expect("stdout reader");
+        let stderr = spawn_reader(
+            Cursor::new(b"stderr-bytes".to_vec()),
+            6,
+            Some(Box::new(stderr_sink.clone())),
+        )
+        .join()
+        .expect("stderr thread")
+        .expect("stderr reader");
+
+        assert_eq!(stdout.bytes, b"stdout".to_vec());
+        assert!(stdout.truncated);
+        assert_eq!(stderr.bytes, b"stderr".to_vec());
+        assert!(stderr.truncated);
+        assert_eq!(stdout_sink.bytes(), b"stdout-bytes".to_vec());
+        assert_eq!(stderr_sink.bytes(), b"stderr-bytes".to_vec());
     }
 }

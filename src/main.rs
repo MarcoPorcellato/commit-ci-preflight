@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,7 +33,10 @@ use commit_ci_preflight::config::{ConfigV1, ExecutionPlanEnvelopeV1};
 use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
 };
-use commit_ci_preflight::process::{CancellationToken, ProcessSupervisor, SupervisorPort};
+use commit_ci_preflight::process::{
+    CancellationToken, GenerationGuard, OutputMode, ProcessRequest, ProcessResult,
+    ProcessSupervisor, ProcessTermination, RunIdentity, SupervisorPort,
+};
 use commit_ci_preflight::receipt::{CheckEvidence, EvidenceStatus};
 use commit_ci_preflight::resource::{
     ResourceGuardError, ResourcePlatform, ResourceProbe, ResourceProbeError, ResourceWatchdog,
@@ -49,6 +54,10 @@ use commit_ci_preflight::verify::{
     system_evaluated_at_utc, verify_receipt_document,
 };
 use commit_ci_preflight::workspace::{WorkspaceError, WorkspacePlanV1};
+
+const GUARD_EXEC_DEFAULT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
+const GUARD_EXEC_MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const GUARD_EXEC_CAPTURE_BYTES: usize = 1_048_576;
 
 #[derive(Debug, Parser)]
 #[command(name = "commit-ci-preflight", version, about)]
@@ -68,6 +77,11 @@ enum Command {
     Resource {
         #[command(subcommand)]
         action: ResourceAction,
+    },
+    /// Serialize and supervise one explicit external program.
+    Guard {
+        #[command(subcommand)]
+        action: GuardCommand,
     },
     /// Validate configuration and print the normalized read-only execution plan.
     Plan {
@@ -201,6 +215,25 @@ enum ResourceAction {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum GuardCommand {
+    /// Run one explicit argv without invoking a shell.
+    Exec(GuardExecArgs),
+}
+
+#[derive(Debug, Args)]
+struct GuardExecArgs {
+    /// Maximum time to wait for the admission slot in seconds, capped at 24 hours.
+    #[arg(long, default_value_t = GUARD_EXEC_DEFAULT_TIMEOUT.as_secs())]
+    admission_timeout_seconds: u64,
+    /// Maximum child runtime in seconds, capped at 24 hours.
+    #[arg(long, default_value_t = GUARD_EXEC_DEFAULT_TIMEOUT.as_secs())]
+    timeout_seconds: u64,
+    /// Program and arguments. The `--` separator is required.
+    #[arg(last = true, required = true, allow_hyphen_values = true)]
+    argv: Vec<OsString>,
+}
+
 #[derive(Debug, Clone, Args)]
 struct CacheLocationArgs {
     /// Repository whose checkout must remain outside the cache root.
@@ -265,6 +298,7 @@ fn main() {
     let result = match cli.command {
         Some(Command::Admission { action }) => run_admission_command(action),
         Some(Command::Resource { action }) => run_resource_command(action),
+        Some(Command::Guard { action }) => run_guard_command(action),
         Some(Command::Plan { config, json }) => print_plan(&config, json),
         Some(Command::Doctor { config, json }) => print_doctor(&config, json),
         Some(Command::DryRun {
@@ -388,6 +422,106 @@ fn print_benchmark(
         }
     }
     Ok(())
+}
+
+fn run_guard_command(action: GuardCommand) -> Result<(), CliError> {
+    match action {
+        GuardCommand::Exec(args) => print_guard_exec(args),
+    }
+}
+
+fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
+    let admission_timeout = Duration::from_secs(args.admission_timeout_seconds);
+    if admission_timeout.is_zero() || admission_timeout > GUARD_EXEC_MAX_TIMEOUT {
+        return Err(CliError::Guard(GuardExecError::InvalidAdmissionTimeout));
+    }
+    let timeout = Duration::from_secs(args.timeout_seconds);
+    if timeout.is_zero() || timeout > GUARD_EXEC_MAX_TIMEOUT {
+        return Err(CliError::Guard(GuardExecError::InvalidTimeout));
+    }
+    if args.argv.is_empty() {
+        return Err(CliError::Guard(GuardExecError::MissingProgram));
+    }
+    let current_dir = fs::canonicalize(".")
+        .map_err(|_| CliError::Guard(GuardExecError::InvalidCurrentDirectory))?;
+    if !current_dir.is_dir() {
+        return Err(CliError::Guard(GuardExecError::InvalidCurrentDirectory));
+    }
+
+    let cancellation = CancellationToken::default();
+    install_cancellation_handler(&cancellation)?;
+    let supervisor = Arc::new(ProcessSupervisor::standard());
+    let mut session = GuardExecSession::acquire(&cancellation, admission_timeout)?;
+
+    if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
+        let result = session.finish(Err(GuardExecError::from_cli(error)), &cancellation);
+        return result.map(|_| ()).map_err(CliError::Guard);
+    }
+
+    session.start_watchdog(
+        Arc::clone(&supervisor),
+        current_dir.clone(),
+        cancellation.clone(),
+    );
+
+    let mut argv = args.argv;
+    let program = argv.remove(0);
+    let request = ProcessRequest {
+        identity: RunIdentity {
+            project: "commit-ci-preflight.guard-exec".to_owned(),
+            commit: None,
+            config_digest: "guard-exec-v1".to_owned(),
+            generation: "guard-exec-v1".to_owned(),
+        },
+        program,
+        argv,
+        current_dir,
+        environment: std::env::vars_os().collect::<BTreeMap<_, _>>(),
+        timeout,
+        max_capture_bytes: GUARD_EXEC_CAPTURE_BYTES,
+    };
+    let process = supervisor
+        .execute_with_output(
+            &request,
+            &cancellation,
+            &GenerationGuard::new(request.identity.clone()),
+            OutputMode::Tee,
+        )
+        .map_err(GuardExecError::Process);
+    let result = session
+        .finish(process, &cancellation)
+        .map_err(CliError::Guard)?;
+    classify_guard_result(result, &cancellation).map_err(CliError::Guard)
+}
+
+fn classify_guard_result(
+    result: ProcessResult,
+    cancellation: &CancellationToken,
+) -> Result<(), GuardExecError> {
+    match result.termination {
+        ProcessTermination::TimedOut => Err(GuardExecError::TimedOut),
+        ProcessTermination::Cancelled => match cancellation.reason() {
+            Some(commit_ci_preflight::process::CancellationReason::ResourcePressure) => {
+                Err(GuardExecError::ResourcePressure)
+            }
+            Some(commit_ci_preflight::process::CancellationReason::User) | None => {
+                Err(GuardExecError::UserCancelled)
+            }
+        },
+        ProcessTermination::Completed => {
+            if cancellation.reason() == Some(commit_ci_preflight::process::CancellationReason::User)
+            {
+                return Err(GuardExecError::UserCancelled);
+            }
+            match result.exit {
+                Some(exit) if exit.success && exit.code == Some(0) => Ok(()),
+                Some(exit) if exit.code.is_some_and(|code| (1..=255).contains(&code)) => Err(
+                    GuardExecError::ChildExit(exit.code.expect("checked child exit code")),
+                ),
+                Some(_) | None => Err(GuardExecError::InternalFailure),
+            }
+        }
+    }
 }
 
 fn print_verify_benchmark(
@@ -830,6 +964,101 @@ fn release_admission<T>(guard: AdmissionGuard, result: Result<T, CliError>) -> R
     }
 }
 
+struct GuardExecSession {
+    admission: Option<AdmissionGuard>,
+    watchdog: WatchdogCompletionBarrier,
+}
+
+impl GuardExecSession {
+    fn acquire(
+        cancellation: &CancellationToken,
+        admission_timeout: Duration,
+    ) -> Result<Self, CliError> {
+        let admission = AdmissionCoordinator::platform().map_err(CliError::Admission)?;
+        let guard = admission
+            .acquire(admission_timeout, cancellation)
+            .map_err(CliError::Admission)?;
+        Ok(Self {
+            admission: Some(guard),
+            watchdog: WatchdogCompletionBarrier::new(None),
+        })
+    }
+
+    fn start_watchdog(
+        &mut self,
+        supervisor: Arc<ProcessSupervisor>,
+        current_dir: PathBuf,
+        cancellation: CancellationToken,
+    ) {
+        if ResourcePlatform::current() == ResourcePlatform::MacOs {
+            self.watchdog = WatchdogCompletionBarrier::new(Some(ResourceWatchdog::start(
+                ResourceProbe::new(SupervisorResourceRunner::new(
+                    supervisor,
+                    current_dir,
+                    cancellation.clone(),
+                )),
+                cancellation,
+            )));
+        }
+    }
+
+    fn finish(
+        mut self,
+        result: Result<ProcessResult, GuardExecError>,
+        cancellation: &CancellationToken,
+    ) -> Result<ProcessResult, GuardExecError> {
+        self.watchdog.ensure_joined();
+        let guard = self
+            .admission
+            .take()
+            .ok_or(GuardExecError::InternalFailure)?;
+        finalize_guard_exec_result(
+            result,
+            cancellation,
+            self.watchdog.take_join_error(),
+            self.watchdog.trip(),
+            || guard.release().map_err(GuardExecError::Admission),
+        )
+    }
+}
+
+fn finalize_guard_exec_result(
+    result: Result<ProcessResult, GuardExecError>,
+    cancellation: &CancellationToken,
+    join_error: Option<ResourceProbeError>,
+    trip: Option<WatchdogTripReason>,
+    release: impl FnOnce() -> Result<(), GuardExecError>,
+) -> Result<ProcessResult, GuardExecError> {
+    let result = if let Some(error) = join_error {
+        Err(GuardExecError::Resource(ResourceGuardError::Watchdog(
+            error,
+        )))
+    } else if let Some(reason) = trip {
+        Err(GuardExecError::Resource(
+            ResourceGuardError::WatchdogTripped(reason),
+        ))
+    } else if cancellation.reason()
+        == Some(commit_ci_preflight::process::CancellationReason::ResourcePressure)
+    {
+        Err(GuardExecError::ResourcePressure)
+    } else {
+        result
+    };
+    match release() {
+        Ok(()) => result,
+        Err(error) => Err(error),
+    }
+}
+
+impl Drop for GuardExecSession {
+    fn drop(&mut self) {
+        self.watchdog.ensure_joined();
+        if let Some(guard) = self.admission.take() {
+            let _ = guard.release();
+        }
+    }
+}
+
 struct WatchdogCompletionBarrier {
     watchdog: Option<ResourceWatchdog>,
     trip: Option<WatchdogTripReason>,
@@ -1000,6 +1229,77 @@ fn print_human_probe(probe: &RuntimeProbe) {
 }
 
 #[derive(Debug)]
+enum GuardExecError {
+    InvalidAdmissionTimeout,
+    InvalidTimeout,
+    MissingProgram,
+    InvalidCurrentDirectory,
+    Admission(AdmissionError),
+    Resource(ResourceGuardError),
+    ResourcePressure,
+    Process(commit_ci_preflight::process::ProcessError),
+    ChildExit(i32),
+    TimedOut,
+    UserCancelled,
+    InternalFailure,
+}
+
+impl GuardExecError {
+    fn from_cli(error: CliError) -> Self {
+        match error {
+            CliError::Admission(error) => Self::Admission(error),
+            CliError::Resource(error) => Self::Resource(error),
+            _ => Self::InternalFailure,
+        }
+    }
+
+    fn exit_code(&self) -> i32 {
+        match self {
+            Self::InvalidAdmissionTimeout
+            | Self::InvalidTimeout
+            | Self::MissingProgram
+            | Self::InvalidCurrentDirectory => 2,
+            Self::Admission(error) => error.exit_code(),
+            Self::Resource(_) | Self::ResourcePressure => 6,
+            Self::Process(_) | Self::InternalFailure => 70,
+            Self::ChildExit(code) if (1..=255).contains(code) => *code,
+            Self::ChildExit(_) => 70,
+            Self::TimedOut => 124,
+            Self::UserCancelled => 130,
+        }
+    }
+}
+
+impl fmt::Display for GuardExecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidAdmissionTimeout => {
+                formatter.write_str("guard exec admission timeout is outside the allowed range")
+            }
+            Self::InvalidTimeout => {
+                formatter.write_str("guard exec timeout is outside the allowed range")
+            }
+            Self::MissingProgram => formatter.write_str("guard exec requires a program after --"),
+            Self::InvalidCurrentDirectory => {
+                formatter.write_str("guard exec current directory could not be canonicalized")
+            }
+            Self::Admission(error) => write!(formatter, "{error}"),
+            Self::Resource(error) => write!(formatter, "{error}"),
+            Self::ResourcePressure => {
+                formatter.write_str("guarded execution was cancelled by host resource pressure")
+            }
+            Self::Process(error) => write!(formatter, "guarded process failed: {error}"),
+            Self::ChildExit(code) => write!(formatter, "guarded child exited with code {code}"),
+            Self::TimedOut => formatter.write_str("guarded child timed out"),
+            Self::UserCancelled => formatter.write_str("guarded child cancelled by user"),
+            Self::InternalFailure => formatter.write_str("guarded execution cleanup was uncertain"),
+        }
+    }
+}
+
+impl std::error::Error for GuardExecError {}
+
+#[derive(Debug)]
 enum CliError {
     Usage(Box<dyn std::error::Error>),
     Cache(CacheError),
@@ -1015,6 +1315,7 @@ enum CliError {
     MigrationBlocked,
     Benchmark(BenchmarkError),
     BenchmarkVerification(BenchmarkError),
+    Guard(GuardExecError),
     Internal(Box<dyn std::error::Error>),
 }
 
@@ -1044,6 +1345,7 @@ impl CliError {
             Self::MigrationBlocked => 4,
             Self::Benchmark(_) => 2,
             Self::BenchmarkVerification(_) => 3,
+            Self::Guard(error) => error.exit_code(),
             Self::Verification(VerificationError::Policy(_))
             | Self::Verification(VerificationError::InvalidExpectedCommit)
             | Self::Verification(VerificationError::InvalidEvaluationTime) => 2,
@@ -1076,6 +1378,7 @@ impl fmt::Display for CliError {
             Self::BenchmarkVerification(error) => {
                 write!(formatter, "benchmark verification failed: {error}")
             }
+            Self::Guard(error) => write!(formatter, "{error}"),
             Self::Internal(_) => formatter.write_str("internal command failure"),
         }
     }
@@ -1097,6 +1400,7 @@ impl std::error::Error for CliError {
             Self::GithubActions(error) => Some(error),
             Self::MigrationBlocked => None,
             Self::Benchmark(error) | Self::BenchmarkVerification(error) => Some(error),
+            Self::Guard(error) => Some(error),
         }
     }
 }
@@ -1114,12 +1418,20 @@ impl std::error::Error for CliMessageError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, CliError, WatchdogCompletionBarrier, reconcile_watchdog_outcome};
-    use clap::CommandFactory;
+    use super::{
+        Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, WatchdogCompletionBarrier,
+        finalize_guard_exec_result, reconcile_watchdog_outcome,
+    };
+    use clap::{CommandFactory, Parser};
     use commit_ci_preflight::process::CancellationToken;
+    use commit_ci_preflight::process::{
+        CleanupStatus, ExitOutcome, ProcessResult, ProcessTermination, RunIdentity,
+    };
     use commit_ci_preflight::resource::{
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
+    use std::ffi::OsString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn cli_definition_is_valid() {
@@ -1132,6 +1444,192 @@ mod tests {
         let internal = CliError::internal(std::io::Error::other("internal"));
         assert_eq!(usage.exit_code(), 2);
         assert_eq!(internal.exit_code(), 70);
+    }
+
+    #[test]
+    fn guard_exec_requires_double_dash_and_program() {
+        let cli = Cli::try_parse_from([
+            "commit-ci-preflight",
+            "guard",
+            "exec",
+            "--timeout-seconds",
+            "1",
+            "--",
+            "echo",
+            "hello",
+        ])
+        .expect("guard exec parses");
+
+        match cli.command.expect("command is present") {
+            super::Command::Guard {
+                action: GuardCommand::Exec(args),
+            } => {
+                assert_eq!(
+                    args.admission_timeout_seconds,
+                    super::GUARD_EXEC_DEFAULT_TIMEOUT.as_secs()
+                );
+                assert_eq!(args.timeout_seconds, 1);
+                assert_eq!(
+                    args.argv,
+                    vec![OsString::from("echo"), OsString::from("hello")]
+                );
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        assert!(Cli::try_parse_from(["commit-ci-preflight", "guard", "exec", "echo"]).is_err());
+    }
+
+    #[test]
+    fn guard_exec_exit_codes_are_stable() {
+        assert_eq!(CliError::Guard(GuardExecError::TimedOut).exit_code(), 124);
+        assert_eq!(
+            CliError::Guard(GuardExecError::UserCancelled).exit_code(),
+            130
+        );
+        assert_eq!(
+            CliError::Guard(GuardExecError::Resource(
+                commit_ci_preflight::resource::ResourceGuardError::Probe(
+                    commit_ci_preflight::resource::ResourceProbeError::CommandFailed,
+                ),
+            ))
+            .exit_code(),
+            6
+        );
+        assert_eq!(
+            CliError::Guard(GuardExecError::InternalFailure).exit_code(),
+            70
+        );
+        assert_eq!(
+            CliError::Guard(GuardExecError::ChildExit(0)).exit_code(),
+            70
+        );
+        assert_eq!(CliError::Guard(GuardExecError::ChildExit(1)).exit_code(), 1);
+        assert_eq!(
+            CliError::Guard(GuardExecError::ChildExit(255)).exit_code(),
+            255
+        );
+        assert_eq!(
+            CliError::Guard(GuardExecError::Process(
+                commit_ci_preflight::process::ProcessError::UnsupportedOutputMode,
+            ))
+            .exit_code(),
+            70
+        );
+    }
+
+    fn completed_process_result() -> ProcessResult {
+        ProcessResult {
+            identity: RunIdentity {
+                project: "commit-ci-preflight.guard-exec".to_owned(),
+                commit: None,
+                config_digest: "guard-exec-v1".to_owned(),
+                generation: "guard-exec-v1".to_owned(),
+            },
+            termination: ProcessTermination::Completed,
+            cleanup: CleanupStatus::Verified,
+            exit: Some(ExitOutcome {
+                success: true,
+                code: Some(0),
+            }),
+            stdout: commit_ci_preflight::process::CapturedStream {
+                bytes: Vec::new(),
+                truncated: false,
+            },
+            stderr: commit_ci_preflight::process::CapturedStream {
+                bytes: Vec::new(),
+                truncated: false,
+            },
+            elapsed_millis: 0,
+        }
+    }
+
+    fn guard_exec_args() -> GuardExecArgs {
+        GuardExecArgs {
+            admission_timeout_seconds: 1,
+            timeout_seconds: 1,
+            argv: vec![OsString::from("fixture")],
+        }
+    }
+
+    #[test]
+    fn guard_exec_finalization_releases_once_for_success_error_and_resource_pressure() {
+        let release_count = AtomicUsize::new(0);
+        let cancellation = CancellationToken::default();
+
+        let success = finalize_guard_exec_result(
+            Ok(completed_process_result()),
+            &cancellation,
+            None,
+            None,
+            || {
+                release_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(success.is_ok());
+
+        let internal = finalize_guard_exec_result(
+            Err(GuardExecError::InternalFailure),
+            &cancellation,
+            None,
+            None,
+            || {
+                release_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(matches!(internal, Err(GuardExecError::InternalFailure)));
+
+        let resource = finalize_guard_exec_result(
+            Err(GuardExecError::ResourcePressure),
+            &cancellation,
+            None,
+            None,
+            || {
+                release_count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(matches!(resource, Err(GuardExecError::ResourcePressure)));
+        assert_eq!(release_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn guard_exec_rejects_invalid_timeouts() {
+        let zero_admission = GuardExecArgs {
+            admission_timeout_seconds: 0,
+            ..guard_exec_args()
+        };
+        let zero_child = GuardExecArgs {
+            timeout_seconds: 0,
+            ..guard_exec_args()
+        };
+        let over_cap = GuardExecArgs {
+            admission_timeout_seconds: super::GUARD_EXEC_MAX_TIMEOUT.as_secs() + 1,
+            ..guard_exec_args()
+        };
+        let over_cap_child = GuardExecArgs {
+            timeout_seconds: super::GUARD_EXEC_MAX_TIMEOUT.as_secs() + 1,
+            ..guard_exec_args()
+        };
+
+        assert!(matches!(
+            super::print_guard_exec(zero_admission),
+            Err(CliError::Guard(GuardExecError::InvalidAdmissionTimeout))
+        ));
+        assert!(matches!(
+            super::print_guard_exec(zero_child),
+            Err(CliError::Guard(GuardExecError::InvalidTimeout))
+        ));
+        assert!(matches!(
+            super::print_guard_exec(over_cap),
+            Err(CliError::Guard(GuardExecError::InvalidAdmissionTimeout))
+        ));
+        assert!(matches!(
+            super::print_guard_exec(over_cap_child),
+            Err(CliError::Guard(GuardExecError::InvalidTimeout))
+        ));
     }
 
     struct FailingResourceRunner;

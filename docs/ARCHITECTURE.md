@@ -64,6 +64,8 @@ state from a PID or wall clock. `plan`, `doctor`, `dry-run`, `verify`, migration
 and cache inventory remain unqueued. Admission state is operational
 coordination only; the receipt schema does not yet record queue or resource
 evidence.
+`guard exec` uses the same host-wide admission and macOS resource guard, but it
+executes exactly one explicit argv without a shell and does not write receipts.
 
 On macOS, a fresh strict sample from the absolute system tools is required
 after slot acquisition and before heavy work. `run` starts a two-second
