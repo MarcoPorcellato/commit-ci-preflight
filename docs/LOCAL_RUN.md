@@ -25,15 +25,23 @@ independent repositories and cache roots. Override the bounded wait with
 bounded operational state with `admission status --json`; it reports only the
 schema, busy state, queue count, and opaque ticket identifiers.
 
+For long-running local workflows that should not go through receipt creation,
+use `commit-ci-preflight guard exec -- <program> [args...]`. It is shell-free,
+inherits the caller environment, keeps stdout/stderr separate, waits for the
+same admission slot with a bounded queue timeout, and uses a separate bounded
+child runtime timeout. Both guard timeouts default to six hours, are capped at
+24 hours, and can be selected independently with
+`--admission-timeout-seconds` and `--timeout-seconds`.
+
 ## Execution sequence
 
 1. Parse and normalize schema `1.0`.
 2. Perform bounded non-heavy setup required by the command: `run` resolves and
    initializes its selected cache, while `benchmark` may perform its optional
    runtime probe.
-3. Acquire the host-wide admission slot for `run` or `benchmark`, immediately
-   before heavy execution, waiting cooperatively with cancellation until the
-   selected timeout.
+3. Acquire the host-wide admission slot for `run`, `benchmark`, or `guard exec`,
+   immediately before heavy execution, waiting cooperatively with cancellation
+   until the selected timeout.
 4. On macOS, take a fresh strict `macos-v1` host-memory sample after slot
    acquisition. Denied, malformed, contradictory, timed-out, or uncertain
    samples release the slot and stop without starting heavy work. Linux and

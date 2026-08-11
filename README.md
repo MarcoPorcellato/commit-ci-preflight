@@ -99,6 +99,20 @@ on sustained pressure. `resource status --json` reports bounded metrics and
 capability; Linux and Windows report `unsupported_not_enforced`. Resource and
 admission evidence are not part of receipts yet.
 
+Wrap any other long local workflow with the same protection by passing one
+explicit argv after `--`:
+
+```console
+commit-ci-preflight guard exec \
+  --admission-timeout-seconds 21600 \
+  --timeout-seconds 21600 \
+  -- make all
+```
+
+The wrapper never invokes a shell, never creates a receipt, and keeps the
+admission slot until the supervised process tree has stopped. Both waits
+default to six hours for `guard exec` and are capped at 24 hours.
+
 ### 3. Run the clean-room demo
 
 Follow the [end-to-end tutorial](docs/TUTORIAL.md). It copies a tiny public Rust
@@ -180,6 +194,8 @@ Key boundaries:
 - cache cleanup is preview-only in 0.1.0;
 - `migrate-github-actions` parses YAML as untrusted data and does not execute
   marketplace actions, expressions, commands, or secrets;
+- `guard exec` is a shell-free wrapper around one explicit program argv and
+  inherits the caller environment without serializing it;
 - benchmark timing is observational and never affects the pinned correctness
   digest.
 

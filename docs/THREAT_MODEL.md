@@ -153,6 +153,8 @@ before publication.
 - The macOS resource guard uses only bounded, strict output from absolute system
   tools and fails closed on unavailable or contradictory samples. Its status
   surface is bounded and excludes identity, path, command, and process data.
+- `guard exec` does not serialize environment names or values and does not
+  claim receipt evidence; the child program controls its own output.
 - The release-candidate builder includes `LICENSE`, `NOTICE`, SBOM, and
   third-party notices and emits a SHA-256 manifest.
 - No release signing or package publication occurs automatically.

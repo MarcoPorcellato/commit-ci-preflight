@@ -12,6 +12,8 @@ Semantic Versioning after its first public release.
 - Default-on host-wide single-slot admission for heavy `run` and `benchmark`
   commands with persistent advisory-lock tickets, cancellation, bounded
   timeout, stale-ticket recovery, and read-only status reporting.
+- New `guard exec` shell-free wrapper for one explicit argv, with separate
+  admission and child timeouts and live tee output for long local workflows.
 - Pinned offline `fs2` 0.4.3 dependency for cross-process advisory locks.
 - Default-on macOS-v1 host-memory pre-start admission and a two-second `run`
   watchdog with typed resource-pressure cancellation.

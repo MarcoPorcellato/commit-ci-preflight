@@ -86,7 +86,7 @@ Windows-native, GitHub-hosted, or identity evidence.
 The source checkout stays read-only, and Docker's integrated init process
 reaps terminated descendants so process-supervisor checks remain truthful in a
 container. The test command sets `CCP_TEST_ROOT` to a dedicated managed cache
-mount. A nested CLI fixture also derives its Linux `XDG_CACHE_HOME` from that
+mount. Nested CLI fixtures also derive their Linux `XDG_CACHE_HOME` from that
 test root so the read-only container never needs a writable root filesystem.
 These overrides exist only in test helpers and never weaken production
 cache-path validation. The four persistent managed cache locations live below
