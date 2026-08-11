@@ -33,7 +33,8 @@ inventing product, security, licensing, or release decisions along the way.
 | PR 09A — benchmark and parity contract | Merged | main `2305c1f46930069614b023bc6b8dcfb8a6ae27d5`; portability follow-up main `15f858403b19ade38373176879fb518ef167580d` |
 | PR 09B — native qualification evidence | Merged | main `aaaef7be67200d6f4f62bac5c77b4d0989329d92`; three native receipts and exact GitHub run metadata |
 | PR 10 — beta hardening and candidate | Merged | main `cd4f418d9083b6dbad3112d12374b7c53f900758`; human-first README, SPDX SBOM, third-party notices, installation/checksums, rollback, threat model, tutorial, support policy, local packaging proof, and trusted-base transition receipt |
-| PR 11 — bounded host-wide admission tranche | Working tree | Default-on single-slot queue for `run` and `benchmark`; receipt evidence and host resource telemetry remain future work |
+| PR 11 — bounded host-wide admission tranche | Draft/published in stack (PR #20) | Default-on single-slot queue for `run` and `benchmark` |
+| PR 12 — macOS resource guard tranche | Working tree | macOS-v1 pre-start memory admission, `run` watchdog, bounded resource status, and explicit unsupported Linux/Windows capability |
 
 ## 2. Mission
 
@@ -594,8 +595,20 @@ platform-application-cache coordinator. It adds lock-backed FIFO/best-effort
 tickets, cancellation, an operator-selected bounded timeout, stale-ticket
 recovery after released advisory locks, and read-only status reporting.
 
-It deliberately does not sample host memory or CPU, change receipt schemas, or
-claim that admission occurred in a receipt. Those are the next tranche.
+It deliberately does not sample host memory or CPU or change receipt schemas.
+
+### PR 12 — macOS resource guard tranche
+
+This tranche adds default-on macOS-v1 host-memory admission after the host-wide
+slot and before heavy work. It uses strict shell-free probes of the absolute
+system tools, bounded capture and timeouts, conservative thresholds, and a
+two-second `run` watchdog with typed resource-pressure cancellation. Probe
+uncertainty fails closed. Linux and Windows remain operational and serialized,
+but report `unsupported_not_enforced` rather than claiming protection.
+
+`benchmark` receives the pre-start sample but not a mid-workload watchdog.
+Receipt schemas and admission/resource evidence remain unchanged; evidence
+integration is a later tranche.
 
 ## 12. Test strategy
 

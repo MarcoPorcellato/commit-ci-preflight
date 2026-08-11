@@ -19,6 +19,7 @@ pub mod config;
 pub mod github_actions;
 pub mod process;
 pub mod receipt;
+pub mod resource;
 pub mod run;
 pub mod runtime;
 pub mod verify;

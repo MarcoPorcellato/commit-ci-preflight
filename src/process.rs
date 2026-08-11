@@ -18,7 +18,7 @@ use std::fmt;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -77,18 +77,42 @@ impl GenerationGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancellationReason {
+    User = 1,
+    ResourcePressure = 2,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
+    reason: Arc<AtomicU8>,
 }
 
 impl CancellationToken {
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.set_reason(CancellationReason::User);
+    }
+
+    pub fn cancel_resource_pressure(&self) {
+        self.set_reason(CancellationReason::ResourcePressure);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.reason.load(Ordering::Acquire) != 0
+    }
+
+    pub fn reason(&self) -> Option<CancellationReason> {
+        match self.reason.load(Ordering::Acquire) {
+            1 => Some(CancellationReason::User),
+            2 => Some(CancellationReason::ResourcePressure),
+            _ => None,
+        }
+    }
+
+    fn set_reason(&self, reason: CancellationReason) {
+        let _ = self
+            .reason
+            .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -874,5 +898,18 @@ mod tests {
 
         assert!(token.is_cancelled());
         assert_eq!(updates.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancellation_reason_preserves_first_decisive_reason() {
+        let token = CancellationToken::default();
+        token.cancel_resource_pressure();
+        token.cancel();
+        assert_eq!(token.reason(), Some(CancellationReason::ResourcePressure));
+
+        let user = CancellationToken::default();
+        user.cancel();
+        user.cancel_resource_pressure();
+        assert_eq!(user.reason(), Some(CancellationReason::User));
     }
 }

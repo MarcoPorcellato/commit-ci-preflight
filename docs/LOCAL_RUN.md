@@ -34,16 +34,24 @@ schema, busy state, queue count, and opaque ticket identifiers.
 3. Acquire the host-wide admission slot for `run` or `benchmark`, immediately
    before heavy execution, waiting cooperatively with cancellation until the
    selected timeout.
-4. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
+4. On macOS, take a fresh strict `macos-v1` host-memory sample after slot
+   acquisition. Denied, malformed, contradictory, timed-out, or uncertain
+   samples release the slot and stop without starting heavy work. Linux and
+   Windows report resource protection as unsupported and not enforced.
+5. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
    receipt output itself is excluded from this dirty check.
-5. For `run`, probe the Docker-compatible runtime with bounded output and deadline.
-6. For `run`, acquire the plan-generation workspace lock.
-7. For `run`, prepare only declared cache directories and artifact files.
-8. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
-9. Execute the `run` checks or benchmark workload with timeout, cancellation, and
-   stale-generation guards.
-10. Mark cache entries complete only when every check passes.
-11. Seal and atomically write the canonical receipt.
+6. For `run`, probe the Docker-compatible runtime with bounded output and deadline.
+7. For `run`, acquire the plan-generation workspace lock.
+8. For `run`, prepare only declared cache directories and artifact files.
+9. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
+10. For `run`, start the macOS watchdog before local check execution. It samples
+    every two seconds, cancels through the existing process supervisor on a
+    hard trip or three consecutive soft trips, and joins before slot release.
+    `benchmark` has no mid-workload watchdog in this tranche.
+11. Execute the `run` checks or benchmark workload with timeout, cancellation, and
+    stale-generation guards.
+12. Mark cache entries complete only when every check passes.
+13. Seal and atomically write the canonical receipt.
 
 A command failure or timeout is `FAIL`. A dependency skip, cancellation before
 execution, or uncertain runtime execution is `NOT_RUN` and makes required
@@ -79,8 +87,12 @@ file. There is intentionally no automatic stale-lock deletion.
 Admission tickets are different: each ticket is protected by its own advisory
 lock, so a crashed or rebooted waiter becomes reclaimable when that lock is
 released. Malformed, foreign, or uncertain coordinator state fails closed and
-is never deleted automatically. Admission is not included in receipts yet;
-host resource sampling and truthful admission evidence are the next tranche.
+is never deleted automatically. Admission and resource evidence are not
+included in receipts yet. The next tranche must integrate truthful evidence and
+host telemetry without changing this tranche's receipt contract.
+
+`resource status --json` is read-only. It never reports usernames, absolute
+paths, commands, repository names, process inventory, or secrets.
 
 ## Local evidence captured on 2026-08-09
 

@@ -15,11 +15,13 @@
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use commit_ci_preflight::admission::{
-    ADMISSION_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, DEFAULT_QUEUE_TIMEOUT,
+    ADMISSION_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
+    DEFAULT_QUEUE_TIMEOUT,
 };
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
@@ -29,9 +31,16 @@ use commit_ci_preflight::config::{ConfigV1, ExecutionPlanEnvelopeV1};
 use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
 };
-use commit_ci_preflight::process::{CancellationToken, ProcessSupervisor};
-use commit_ci_preflight::receipt::EvidenceStatus;
-use commit_ci_preflight::run::{RunError, RunRequest, SystemClock, execute_local_run};
+use commit_ci_preflight::process::{CancellationToken, ProcessSupervisor, SupervisorPort};
+use commit_ci_preflight::receipt::{CheckEvidence, EvidenceStatus};
+use commit_ci_preflight::resource::{
+    ResourceGuardError, ResourcePlatform, ResourceProbe, ResourceProbeError, ResourceWatchdog,
+    SupervisorResourceRunner, WatchdogTripReason, evaluate_pre_start, status_from_snapshot,
+    unknown_status, unsupported_status,
+};
+use commit_ci_preflight::run::{
+    CompletionBarrier, RunError, RunRequest, SystemClock, execute_local_run_with_barrier,
+};
 use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
 };
@@ -54,6 +63,11 @@ enum Command {
     Admission {
         #[command(subcommand)]
         action: AdmissionCommand,
+    },
+    /// Inspect the host-memory resource guard without changing host state.
+    Resource {
+        #[command(subcommand)]
+        action: ResourceAction,
     },
     /// Validate configuration and print the normalized read-only execution plan.
     Plan {
@@ -177,6 +191,16 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ResourceAction {
+    /// Report the bounded resource-guard capability and current decision.
+    Status {
+        /// Emit the versioned machine-readable status.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Clone, Args)]
 struct CacheLocationArgs {
     /// Repository whose checkout must remain outside the cache root.
@@ -240,6 +264,7 @@ fn main() {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Admission { action }) => run_admission_command(action),
+        Some(Command::Resource { action }) => run_resource_command(action),
         Some(Command::Plan { config, json }) => print_plan(&config, json),
         Some(Command::Doctor { config, json }) => print_doctor(&config, json),
         Some(Command::DryRun {
@@ -330,8 +355,9 @@ fn print_benchmark(
 ) -> Result<(), CliError> {
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
+    let supervisor = Arc::new(ProcessSupervisor::standard());
     let runtime_probe = runtime_config
-        .map(|path| collect_runtime_probe(path, &cancellation))
+        .map(|path| collect_runtime_probe(path, &cancellation, supervisor.as_ref()))
         .transpose()?;
     let admission = AdmissionCoordinator::platform().map_err(CliError::Admission)?;
     let guard = admission
@@ -340,9 +366,9 @@ fn print_benchmark(
             &cancellation,
         )
         .map_err(CliError::Admission)?;
-    let envelope = run_benchmark(commit, runtime_probe.as_ref());
-    guard.release().map_err(CliError::Admission)?;
-    let envelope = envelope.map_err(CliError::Benchmark)?;
+    let result = resource_pre_start(supervisor.clone(), &cancellation)
+        .and_then(|()| run_benchmark(commit, runtime_probe.as_ref()).map_err(CliError::Benchmark));
+    let envelope = release_admission(guard, result)?;
     if let Some(path) = output {
         write_new_receipt(path, &envelope).map_err(CliError::Benchmark)?;
     }
@@ -410,16 +436,16 @@ fn print_verify_benchmark(
 fn collect_runtime_probe(
     path: &Path,
     cancellation: &CancellationToken,
+    supervisor: &dyn SupervisorPort,
 ) -> Result<RuntimeProbe, CliError> {
     let envelope = load_plan(path)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
-    let supervisor = ProcessSupervisor::standard();
     let generation = doctor_guard(&envelope);
     let current_dir = std::env::current_dir().map_err(CliError::internal)?;
     runtime
         .probe(
             &envelope,
-            &supervisor,
+            supervisor,
             &current_dir,
             cancellation,
             &generation,
@@ -502,7 +528,7 @@ fn print_run(
     let root = resolve_cache_root(location)?;
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
-    let supervisor = ProcessSupervisor::standard();
+    let supervisor = Arc::new(ProcessSupervisor::standard());
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
     let admission =
@@ -513,7 +539,35 @@ fn print_run(
             &cancellation,
         )
         .map_err(CliError::Admission)?;
-    let outcome = execute_local_run(
+    if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
+        return match guard.release() {
+            Ok(()) => Err(error),
+            Err(release_error) => Err(CliError::Admission(release_error)),
+        };
+    }
+    let watchdog = if ResourcePlatform::current() == ResourcePlatform::MacOs {
+        let current_dir = match std::env::current_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                return match guard.release() {
+                    Ok(()) => Err(CliError::internal(error)),
+                    Err(release_error) => Err(CliError::Admission(release_error)),
+                };
+            }
+        };
+        Some(ResourceWatchdog::start(
+            ResourceProbe::new(SupervisorResourceRunner::new(
+                supervisor.clone(),
+                current_dir,
+                cancellation.clone(),
+            )),
+            cancellation.clone(),
+        ))
+    } else {
+        None
+    };
+    let mut completion_barrier = WatchdogCompletionBarrier::new(watchdog);
+    let outcome = execute_local_run_with_barrier(
         &RunRequest {
             envelope: &envelope,
             repository: &location.repository,
@@ -521,12 +575,15 @@ fn print_run(
             generation,
         },
         runtime.as_ref(),
-        &supervisor,
+        supervisor.as_ref(),
         &cancellation,
         &SystemClock,
-    );
-    guard.release().map_err(CliError::Admission)?;
-    let outcome = outcome.map_err(CliError::Run)?;
+        &mut completion_barrier,
+    )
+    .map_err(CliError::Run);
+    completion_barrier.ensure_joined();
+    let outcome = reconcile_watchdog_outcome(outcome, &mut completion_barrier);
+    let outcome = release_admission(guard, outcome)?;
     if json {
         let bytes = outcome
             .receipt
@@ -708,6 +765,167 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
     }
 }
 
+fn run_resource_command(action: ResourceAction) -> Result<(), CliError> {
+    match action {
+        ResourceAction::Status { json } => print_resource_status(json),
+    }
+}
+
+fn print_resource_status(json: bool) -> Result<(), CliError> {
+    let status = if ResourcePlatform::current() != ResourcePlatform::MacOs {
+        unsupported_status()
+    } else {
+        let cancellation = CancellationToken::default();
+        let supervisor = Arc::new(ProcessSupervisor::standard());
+        let current_dir = std::env::current_dir().map_err(CliError::internal)?;
+        let runner = SupervisorResourceRunner::new(supervisor, current_dir, cancellation);
+        match ResourceProbe::new(runner).sample() {
+            Ok(snapshot) => status_from_snapshot(&snapshot)
+                .map_err(|error| CliError::Resource(ResourceGuardError::Probe(error)))?,
+            Err(_) => unknown_status(),
+        }
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&status).map_err(CliError::internal)?
+        );
+    } else {
+        println!("Resource schema: {}", status.schema_version);
+        println!("Policy: {}", status.policy_version);
+        println!("Platform: {}", status.platform);
+        println!("Capability: {:?}", status.capability);
+        println!("Decision: {:?}", status.decision);
+    }
+    Ok(())
+}
+
+fn resource_pre_start(
+    supervisor: Arc<ProcessSupervisor>,
+    cancellation: &CancellationToken,
+) -> Result<(), CliError> {
+    if ResourcePlatform::current() != ResourcePlatform::MacOs {
+        return Ok(());
+    }
+    let current_dir = std::env::current_dir().map_err(CliError::internal)?;
+    let runner = SupervisorResourceRunner::new(supervisor, current_dir, cancellation.clone());
+    let snapshot = ResourceProbe::new(runner)
+        .sample()
+        .map_err(|error| CliError::Resource(ResourceGuardError::Probe(error)))?;
+    match evaluate_pre_start(&snapshot)
+        .map_err(|error| CliError::Resource(ResourceGuardError::Probe(error)))?
+    {
+        commit_ci_preflight::resource::PreStartDecision::Admit => Ok(()),
+        commit_ci_preflight::resource::PreStartDecision::Deny => {
+            Err(CliError::Resource(ResourceGuardError::PreStartDenied))
+        }
+    }
+}
+
+fn release_admission<T>(guard: AdmissionGuard, result: Result<T, CliError>) -> Result<T, CliError> {
+    let release = guard.release().map_err(CliError::Admission);
+    match release {
+        Ok(()) => result,
+        Err(error) => Err(error),
+    }
+}
+
+struct WatchdogCompletionBarrier {
+    watchdog: Option<ResourceWatchdog>,
+    trip: Option<WatchdogTripReason>,
+    join_error: Option<ResourceProbeError>,
+}
+
+impl WatchdogCompletionBarrier {
+    fn new(watchdog: Option<ResourceWatchdog>) -> Self {
+        Self {
+            watchdog,
+            trip: None,
+            join_error: None,
+        }
+    }
+
+    fn join_once(&mut self) {
+        let Some(watchdog) = self.watchdog.take() else {
+            return;
+        };
+        match watchdog.stop_and_join() {
+            Ok(trip) => self.trip = trip,
+            Err(error) => self.join_error = Some(error),
+        }
+    }
+
+    fn ensure_joined(&mut self) {
+        self.join_once();
+    }
+
+    fn trip(&self) -> Option<WatchdogTripReason> {
+        self.trip
+    }
+
+    fn take_join_error(&mut self) -> Option<ResourceProbeError> {
+        self.join_error.take()
+    }
+}
+
+impl CompletionBarrier for WatchdogCompletionBarrier {
+    fn finalize(&mut self, checks: &[CheckEvidence]) -> Result<(), RunError> {
+        self.join_once();
+        if self.join_error.is_some() {
+            return Err(RunError::ResourcePressure);
+        }
+        match self.trip {
+            None => Ok(()),
+            Some(WatchdogTripReason::HardPressure | WatchdogTripReason::SoftPressure)
+                if checks_have_resource_not_run(checks) =>
+            {
+                Ok(())
+            }
+            Some(_) => Err(RunError::ResourcePressure),
+        }
+    }
+}
+
+impl Drop for WatchdogCompletionBarrier {
+    fn drop(&mut self) {
+        self.join_once();
+    }
+}
+
+fn reconcile_watchdog_outcome(
+    outcome: Result<commit_ci_preflight::run::RunOutcome, CliError>,
+    barrier: &mut WatchdogCompletionBarrier,
+) -> Result<commit_ci_preflight::run::RunOutcome, CliError> {
+    if let Some(error) = barrier.take_join_error() {
+        return Err(CliError::Resource(ResourceGuardError::Watchdog(error)));
+    }
+    match barrier.trip() {
+        Some(reason)
+            if matches!(
+                reason,
+                WatchdogTripReason::HardPressure | WatchdogTripReason::SoftPressure
+            ) && matches!(&outcome, Ok(value) if outcome_has_resource_not_run(value)) =>
+        {
+            outcome
+        }
+        Some(reason) => Err(CliError::Resource(ResourceGuardError::WatchdogTripped(
+            reason,
+        ))),
+        None => outcome,
+    }
+}
+
+fn checks_have_resource_not_run(checks: &[CheckEvidence]) -> bool {
+    checks.iter().any(|check| {
+        check.status == EvidenceStatus::NotRun
+            && check.incomplete_reason.as_deref() == Some("host resource pressure watchdog tripped")
+    })
+}
+
+fn outcome_has_resource_not_run(outcome: &commit_ci_preflight::run::RunOutcome) -> bool {
+    checks_have_resource_not_run(&outcome.receipt.receipt.checks)
+}
+
 fn resolve_cache_root(location: &CacheLocationArgs) -> Result<ResolvedCacheRoot, CliError> {
     ResolvedCacheRoot::resolve(
         &location.repository,
@@ -788,6 +1006,7 @@ enum CliError {
     Workspace(WorkspaceError),
     Runtime(RuntimeError),
     Admission(AdmissionError),
+    Resource(ResourceGuardError),
     Run(RunError),
     RunOutcome(EvidenceStatus),
     Verification(VerificationError),
@@ -815,6 +1034,7 @@ impl CliError {
             Self::Workspace(_) => 2,
             Self::Runtime(error) => error.exit_code(),
             Self::Admission(error) => error.exit_code(),
+            Self::Resource(error) => error.exit_code(),
             Self::Run(error) => error.exit_code(),
             Self::RunOutcome(EvidenceStatus::Fail) => 1,
             Self::RunOutcome(EvidenceStatus::Pending | EvidenceStatus::NotRun) => 5,
@@ -841,6 +1061,7 @@ impl fmt::Display for CliError {
             Self::Workspace(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Admission(error) => write!(formatter, "{error}"),
+            Self::Resource(error) => write!(formatter, "{error}"),
             Self::Run(error) => write!(formatter, "{error}"),
             Self::RunOutcome(status) => write!(formatter, "run completed with {status:?}"),
             Self::Verification(error) => write!(formatter, "{error}"),
@@ -868,6 +1089,7 @@ impl std::error::Error for CliError {
             Self::Workspace(error) => Some(error),
             Self::Runtime(error) => Some(error),
             Self::Admission(error) => Some(error),
+            Self::Resource(error) => Some(error),
             Self::Run(error) => Some(error),
             Self::RunOutcome(_) => None,
             Self::Verification(error) => Some(error),
@@ -892,8 +1114,12 @@ impl std::error::Error for CliMessageError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, CliError};
+    use super::{Cli, CliError, WatchdogCompletionBarrier, reconcile_watchdog_outcome};
     use clap::CommandFactory;
+    use commit_ci_preflight::process::CancellationToken;
+    use commit_ci_preflight::resource::{
+        ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
+    };
 
     #[test]
     fn cli_definition_is_valid() {
@@ -906,5 +1132,30 @@ mod tests {
         let internal = CliError::internal(std::io::Error::other("internal"));
         assert_eq!(usage.exit_code(), 2);
         assert_eq!(internal.exit_code(), 70);
+    }
+
+    struct FailingResourceRunner;
+
+    impl ResourceCommandRunner for FailingResourceRunner {
+        fn run(&self, _command: ResourceCommand) -> Result<Vec<u8>, ResourceProbeError> {
+            Err(ResourceProbeError::CommandFailed)
+        }
+    }
+
+    #[test]
+    fn watchdog_barrier_joins_once_after_early_run_error() {
+        let watchdog = ResourceWatchdog::start_with_interval(
+            ResourceProbe::new(FailingResourceRunner),
+            CancellationToken::default(),
+            std::time::Duration::from_millis(1),
+        );
+        let mut barrier = WatchdogCompletionBarrier::new(Some(watchdog));
+        barrier.ensure_joined();
+        let early_error = Err(CliError::Run(
+            commit_ci_preflight::run::RunError::RepositoryNotDirectory,
+        ));
+        let _ = reconcile_watchdog_outcome(early_error, &mut barrier);
+        assert!(barrier.take_join_error().is_none());
+        assert!(barrier.watchdog.is_none());
     }
 }
