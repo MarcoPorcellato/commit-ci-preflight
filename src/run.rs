@@ -26,8 +26,8 @@ use serde::Serialize;
 use crate::cache::{CacheError, ManagedCache};
 use crate::config::{ExecutionPlanEnvelopeV1, NormalizedCheck, RuntimeKind};
 use crate::process::{
-    CancellationToken, CleanupStatus, GenerationGuard, ProcessError, ProcessRequest, ProcessResult,
-    ProcessTermination, RunIdentity, SupervisorPort,
+    CancellationReason, CancellationToken, CleanupStatus, GenerationGuard, ProcessError,
+    ProcessRequest, ProcessResult, ProcessTermination, RunIdentity, SupervisorPort,
 };
 use crate::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, ReceiptEnvelopeV1,
@@ -53,6 +53,19 @@ pub struct RunRequest<'a> {
 pub struct RunOutcome {
     pub receipt: ReceiptEnvelopeV1,
     pub receipt_path: PathBuf,
+}
+
+pub trait CompletionBarrier {
+    fn finalize(&mut self, checks: &[CheckEvidence]) -> Result<(), RunError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopCompletionBarrier;
+
+impl CompletionBarrier for NoopCompletionBarrier {
+    fn finalize(&mut self, _checks: &[CheckEvidence]) -> Result<(), RunError> {
+        Ok(())
+    }
 }
 
 impl RunOutcome {
@@ -89,6 +102,28 @@ pub fn execute_local_run(
     cancellation: &CancellationToken,
     clock: &dyn Clock,
 ) -> Result<RunOutcome, RunError> {
+    let mut barrier = NoopCompletionBarrier;
+    execute_local_run_with_barrier(
+        request,
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        &mut barrier,
+    )
+}
+
+pub fn execute_local_run_with_barrier(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    barrier: &mut dyn CompletionBarrier,
+) -> Result<RunOutcome, RunError> {
+    if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+        return Err(RunError::ResourcePressure);
+    }
     let repository = fs::canonicalize(request.repository).map_err(RunError::Io)?;
     if !repository.is_dir() {
         return Err(RunError::RepositoryNotDirectory);
@@ -107,7 +142,14 @@ pub fn execute_local_run(
         cancellation,
         &generation,
         &identity,
-    )?;
+    )
+    .map_err(|error| {
+        if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+            RunError::ResourcePressure
+        } else {
+            error
+        }
+    })?;
     let identity = RunIdentity {
         commit: Some(commit.clone()),
         ..identity
@@ -124,7 +166,16 @@ pub fn execute_local_run(
             cancellation,
             &doctor_guard(request.envelope),
         )
-        .map_err(RunError::Runtime)?;
+        .map_err(|error| {
+            if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+                RunError::ResourcePressure
+            } else {
+                RunError::Runtime(error)
+            }
+        })?;
+    if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+        return Err(RunError::ResourcePressure);
+    }
     let prepared = PreparedWorkspace::prepare(request.envelope, &repository, request.cache)
         .map_err(RunError::Workspace)?;
     let dry_run = runtime
@@ -148,8 +199,9 @@ pub fn execute_local_run(
 
     for (declared, rendered) in request.envelope.plan.checks.iter().zip(&dry_run.checks) {
         let evidence = if cancellation.is_cancelled() {
-            terminal_reason = Some("run cancelled before check execution");
-            not_run(declared, "run cancelled before check execution")
+            let reason = cancellation_reason_text(cancellation);
+            terminal_reason = Some(reason);
+            not_run(declared, reason)
         } else if let Some(reason) = terminal_reason {
             not_run(declared, reason)
         } else if declared
@@ -169,18 +221,34 @@ pub fn execute_local_run(
                 max_capture_bytes: CHECK_CAPTURE_BYTES,
             };
             match supervisor.execute(&process_request, cancellation, &generation) {
+                Ok(result)
+                    if result.termination == ProcessTermination::Cancelled
+                        && cancellation.reason() == Some(CancellationReason::ResourcePressure) =>
+                {
+                    terminal_reason = Some("host resource pressure watchdog tripped");
+                    not_run(declared, "host resource pressure watchdog tripped")
+                }
                 Ok(result) => evidence_from_result(declared, result)?,
                 Err(_) => {
-                    terminal_reason = Some("runtime execution became unavailable or uncertain");
-                    not_run(
-                        declared,
-                        "runtime execution became unavailable or uncertain",
-                    )
+                    let reason =
+                        if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+                            "host resource pressure watchdog tripped"
+                        } else {
+                            "runtime execution became unavailable or uncertain"
+                        };
+                    terminal_reason = Some(reason);
+                    not_run(declared, reason)
                 }
             }
         };
         statuses.insert(declared.id.clone(), evidence.status);
         checks.push(evidence);
+    }
+
+    if cancellation.reason() == Some(CancellationReason::ResourcePressure)
+        && !has_resource_pressure_not_run(&checks)
+    {
+        return Err(RunError::ResourcePressure);
     }
 
     let post_run_cancellation = CancellationToken::default();
@@ -195,6 +263,13 @@ pub fn execute_local_run(
     if completed_commit != commit {
         return Err(RunError::StaleCommit);
     }
+    if cancellation.reason() == Some(CancellationReason::ResourcePressure)
+        && !has_resource_pressure_not_run(&checks)
+    {
+        return Err(RunError::ResourcePressure);
+    }
+
+    barrier.finalize(&checks)?;
 
     let all_checks_passed = checks
         .iter()
@@ -327,7 +402,16 @@ fn execute_git(
     };
     let result = supervisor
         .execute(&request, cancellation, generation)
-        .map_err(RunError::Process)?;
+        .map_err(|error| {
+            if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+                RunError::ResourcePressure
+            } else {
+                RunError::Process(error)
+            }
+        })?;
+    if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+        return Err(RunError::ResourcePressure);
+    }
     if result.termination != ProcessTermination::Completed
         || result.cleanup != CleanupStatus::Verified
         || result.exit.map(|exit| exit.success) != Some(true)
@@ -420,6 +504,20 @@ fn not_run(check: &NormalizedCheck, reason: &'static str) -> CheckEvidence {
         output_digest: None,
         incomplete_reason: Some(reason.to_owned()),
     }
+}
+
+fn cancellation_reason_text(cancellation: &CancellationToken) -> &'static str {
+    match cancellation.reason() {
+        Some(CancellationReason::ResourcePressure) => "host resource pressure watchdog tripped",
+        Some(CancellationReason::User) | None => "run cancelled before check execution",
+    }
+}
+
+fn has_resource_pressure_not_run(checks: &[CheckEvidence]) -> bool {
+    checks.iter().any(|check| {
+        check.status == EvidenceStatus::NotRun
+            && check.incomplete_reason.as_deref() == Some("host resource pressure watchdog tripped")
+    })
 }
 
 fn derive_overall_status(
@@ -569,6 +667,7 @@ pub enum RunError {
     DirtyRepository,
     InvalidCommit,
     StaleCommit,
+    ResourcePressure,
     GitInspection,
     UnsafeReceiptPath,
     Clock,
@@ -589,6 +688,7 @@ impl RunError {
             | Self::InvalidCommit
             | Self::UnsafeReceiptPath => 2,
             Self::StaleCommit => 5,
+            Self::ResourcePressure => 6,
             Self::Runtime(error) => error.exit_code(),
             Self::Process(ProcessError::StaleGeneration) => 5,
             Self::Process(_) | Self::GitInspection => 4,
@@ -610,6 +710,9 @@ impl fmt::Display for RunError {
             Self::InvalidCommit => formatter.write_str("Git returned an invalid commit identifier"),
             Self::StaleCommit => {
                 formatter.write_str("repository commit changed while checks were running")
+            }
+            Self::ResourcePressure => {
+                formatter.write_str("host resource pressure watchdog tripped")
             }
             Self::GitInspection => formatter.write_str("Git repository inspection failed"),
             Self::UnsafeReceiptPath => formatter.write_str("receipt output path is unsafe"),
@@ -672,7 +775,9 @@ mod tests {
         Dirty,
         InvalidCommit,
         StaleCommit,
-        CancelBeforeChecks,
+        CancelDuringFirstCheck,
+        CancelDuringGitInspection,
+        CancelDuringRuntimeProbe,
     }
 
     struct FakeSupervisor {
@@ -710,6 +815,11 @@ mod tests {
                     .argv
                     .first()
                     .is_some_and(|argument| argument == "status");
+                if matches!(self.mode, ExecutionMode::CancelDuringGitInspection)
+                    && self.git_revisions.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    cancellation.cancel_resource_pressure();
+                }
                 let stdout = if is_status {
                     if matches!(self.mode, ExecutionMode::Dirty) {
                         b" M source.rs\n".to_vec()
@@ -743,8 +853,8 @@ mod tests {
                         "fixture runtime absent",
                     )));
                 }
-                if matches!(self.mode, ExecutionMode::CancelBeforeChecks) {
-                    cancellation.cancel();
+                if matches!(self.mode, ExecutionMode::CancelDuringRuntimeProbe) {
+                    cancellation.cancel_resource_pressure();
                 }
                 return Ok(process_result(
                     request,
@@ -754,6 +864,15 @@ mod tests {
                 ));
             }
             let index = self.docker_runs.fetch_add(1, Ordering::SeqCst);
+            if matches!(self.mode, ExecutionMode::CancelDuringFirstCheck) && index == 0 {
+                cancellation.cancel_resource_pressure();
+                return Ok(process_result(
+                    request,
+                    b"resource-pressure".to_vec(),
+                    false,
+                    ProcessTermination::Cancelled,
+                ));
+            }
             let (success, termination) = match (self.mode, index) {
                 (ExecutionMode::FailFirst, 0) => (false, ProcessTermination::Completed),
                 (ExecutionMode::TimeoutFirst, 0) => (false, ProcessTermination::TimedOut),
@@ -816,6 +935,22 @@ mod tests {
                 .map_err(|_| RunError::Clock)?
                 .pop_front()
                 .ok_or(RunError::Clock)
+        }
+    }
+
+    struct CountingBarrier {
+        calls: usize,
+        deny: bool,
+    }
+
+    impl CompletionBarrier for CountingBarrier {
+        fn finalize(&mut self, _checks: &[CheckEvidence]) -> Result<(), RunError> {
+            self.calls += 1;
+            if self.deny {
+                Err(RunError::ResourcePressure)
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -903,7 +1038,34 @@ depends_on = ["first"]
         }
 
         fn execute(&self, mode: ExecutionMode) -> Result<RunOutcome, RunError> {
+            self.execute_with_cancellation(mode, &CancellationToken::default())
+        }
+
+        fn execute_with_cancellation(
+            &self,
+            mode: ExecutionMode,
+            cancellation: &CancellationToken,
+        ) -> Result<RunOutcome, RunError> {
             execute_local_run(
+                &RunRequest {
+                    envelope: &self.envelope,
+                    repository: &self.repository,
+                    cache: &self.cache,
+                    generation: 7,
+                },
+                &DockerCompatibleRuntime,
+                &FakeSupervisor::new(mode),
+                cancellation,
+                &FixedClock::new(),
+            )
+        }
+
+        fn execute_with_barrier(
+            &self,
+            mode: ExecutionMode,
+            barrier: &mut dyn CompletionBarrier,
+        ) -> Result<RunOutcome, RunError> {
+            execute_local_run_with_barrier(
                 &RunRequest {
                     envelope: &self.envelope,
                     repository: &self.repository,
@@ -914,6 +1076,7 @@ depends_on = ["first"]
                 &FakeSupervisor::new(mode),
                 &CancellationToken::default(),
                 &FixedClock::new(),
+                barrier,
             )
         }
     }
@@ -948,6 +1111,69 @@ depends_on = ["first"]
                 .iter()
                 .all(|entry| entry.status == crate::cache::CacheEntryStatus::Complete)
         );
+    }
+
+    #[test]
+    fn completion_barrier_trip_prevents_receipt_and_cache_completion() {
+        let fixture = RunFixture::new("barrier-trip");
+        let mut barrier = CountingBarrier {
+            calls: 0,
+            deny: true,
+        };
+        let error = fixture
+            .execute_with_barrier(ExecutionMode::Pass, &mut barrier)
+            .expect_err("barrier trip");
+
+        assert!(matches!(error, RunError::ResourcePressure));
+        assert_eq!(barrier.calls, 1);
+        assert!(!fixture.repository.join(".ccp/receipt.json").exists());
+        assert!(
+            fixture
+                .cache
+                .inventory()
+                .expect("inventory")
+                .entries
+                .iter()
+                .all(|entry| entry.status == crate::cache::CacheEntryStatus::Incomplete)
+        );
+    }
+
+    #[test]
+    fn completion_barrier_allows_only_pending_resource_evidence() {
+        let fixture = RunFixture::new("barrier-pending");
+        let mut barrier = CountingBarrier {
+            calls: 0,
+            deny: false,
+        };
+        let outcome = fixture
+            .execute_with_barrier(ExecutionMode::CancelDuringFirstCheck, &mut barrier)
+            .expect("pending receipt");
+
+        assert_eq!(barrier.calls, 1);
+        assert_eq!(
+            outcome.receipt.receipt.overall_status,
+            EvidenceStatus::Pending
+        );
+        assert!(outcome.receipt.receipt.checks.iter().all(|check| {
+            check.status == EvidenceStatus::NotRun
+                && check.incomplete_reason.as_deref()
+                    == Some("host resource pressure watchdog tripped")
+        }));
+    }
+
+    #[test]
+    fn completion_barrier_no_trip_preserves_pass() {
+        let fixture = RunFixture::new("barrier-pass");
+        let mut barrier = CountingBarrier {
+            calls: 0,
+            deny: false,
+        };
+        let outcome = fixture
+            .execute_with_barrier(ExecutionMode::Pass, &mut barrier)
+            .expect("pass receipt");
+
+        assert_eq!(barrier.calls, 1);
+        assert_eq!(outcome.receipt.receipt.overall_status, EvidenceStatus::Pass);
     }
 
     #[test]
@@ -986,36 +1212,58 @@ depends_on = ["first"]
     }
 
     #[test]
-    fn cancellation_before_checks_writes_pending_not_run_evidence() {
-        let fixture = RunFixture::new("cancelled");
-        let cancellation = CancellationToken::default();
-        let outcome = execute_local_run(
-            &RunRequest {
-                envelope: &fixture.envelope,
-                repository: &fixture.repository,
-                cache: &fixture.cache,
-                generation: 7,
-            },
-            &DockerCompatibleRuntime,
-            &FakeSupervisor::new(ExecutionMode::CancelBeforeChecks),
-            &cancellation,
-            &FixedClock::new(),
-        )
-        .expect("cancelled receipt");
+    fn resource_pressure_during_first_check_writes_not_run_evidence() {
+        let fixture = RunFixture::new("resource-pressure-check");
+        let outcome = fixture
+            .execute(ExecutionMode::CancelDuringFirstCheck)
+            .expect("resource-pressure receipt");
 
         assert_eq!(outcome.exit_code(), 5);
         assert_eq!(
             outcome.receipt.receipt.overall_status,
             EvidenceStatus::Pending
         );
-        assert!(
-            outcome
-                .receipt
-                .receipt
-                .checks
-                .iter()
-                .all(|check| check.status == EvidenceStatus::NotRun)
-        );
+        assert!(outcome.receipt.receipt.checks.iter().all(|check| {
+            check.status == EvidenceStatus::NotRun
+                && !check.cancelled
+                && check.incomplete_reason.as_deref()
+                    == Some("host resource pressure watchdog tripped")
+        }));
+    }
+
+    #[test]
+    fn resource_pressure_at_entry_returns_without_a_receipt() {
+        let fixture = RunFixture::new("resource-pressure-entry");
+        let cancellation = CancellationToken::default();
+        cancellation.cancel_resource_pressure();
+        let error = fixture
+            .execute_with_cancellation(ExecutionMode::Pass, &cancellation)
+            .expect_err("entry pressure must stop before Git");
+
+        assert!(matches!(error, RunError::ResourcePressure));
+        assert!(!fixture.repository.join(".ccp/receipt.json").exists());
+    }
+
+    #[test]
+    fn resource_pressure_during_git_inspection_maps_to_resource_error() {
+        let fixture = RunFixture::new("resource-pressure-git");
+        let error = fixture
+            .execute(ExecutionMode::CancelDuringGitInspection)
+            .expect_err("Git pressure must fail closed");
+
+        assert!(matches!(error, RunError::ResourcePressure));
+        assert!(!fixture.repository.join(".ccp/receipt.json").exists());
+    }
+
+    #[test]
+    fn resource_pressure_during_runtime_probe_maps_to_resource_error() {
+        let fixture = RunFixture::new("resource-pressure-runtime");
+        let error = fixture
+            .execute(ExecutionMode::CancelDuringRuntimeProbe)
+            .expect_err("runtime pressure must fail closed");
+
+        assert!(matches!(error, RunError::ResourcePressure));
+        assert!(!fixture.repository.join(".ccp/receipt.json").exists());
     }
 
     #[test]

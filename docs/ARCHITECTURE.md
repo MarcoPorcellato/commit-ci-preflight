@@ -43,6 +43,7 @@ receipt.
 | `workspace` | Read-only source mount plan and declared writable cache/artifact mounts |
 | `cache` | Persistent root resolution, ownership marker, content-addressed entries, inventory, locks, and preview-only cleanup |
 | `admission` | Persistent platform-cache coordinator, FIFO/best-effort lock-backed tickets, one heavy-command slot, cancellation, timeout, and bounded status |
+| `resource` | Strict macOS-v1 host-memory probes, pre-start policy, in-run watchdog, typed capability/status, and deterministic probe seams |
 | `run` | End-to-end orchestration and fail-closed aggregation |
 | `receipt` | Versioned evidence types, canonical JSON, SHA-256 integrity ID, schema, and atomic publication |
 | `verify` | Independent integrity, commit, configuration, check, image, platform, and freshness policy |
@@ -63,6 +64,14 @@ state from a PID or wall clock. `plan`, `doctor`, `dry-run`, `verify`, migration
 and cache inventory remain unqueued. Admission state is operational
 coordination only; the receipt schema does not yet record queue or resource
 evidence.
+
+On macOS, a fresh strict sample from the absolute system tools is required
+after slot acquisition and before heavy work. `run` starts a two-second
+resource watchdog before local execution; `benchmark` has pre-start admission
+only in this tranche. Linux and Windows retain serialized execution but report
+resource capability as `unsupported_not_enforced`; no protection is claimed on
+those platforms. Resource status is read-only and bounded, and receipt schema
+changes are deferred.
 
 ## Configuration and planning
 

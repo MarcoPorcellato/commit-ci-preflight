@@ -93,8 +93,11 @@ exact container argv and mounts but does not execute project code.
 queue so independent local agents cannot start both heavy workloads at once.
 Use `--admission-timeout-seconds` to select the bounded wait and
 `admission status --json` to inspect only busy state, queue count, and opaque
-ticket identifiers. Admission evidence is not part of receipts yet; host
-resource telemetry is planned for the next tranche.
+ticket identifiers. On macOS, the queue is followed by a strict `macos-v1`
+host-memory admission sample, and `run` has a two-second watchdog that cancels
+on sustained pressure. `resource status --json` reports bounded metrics and
+capability; Linux and Windows report `unsupported_not_enforced`. Resource and
+admission evidence are not part of receipts yet.
 
 ### 3. Run the clean-room demo
 
