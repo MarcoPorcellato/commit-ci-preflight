@@ -99,6 +99,13 @@ not removed during rollback. Versioned ownership and completion markers make
 unsupported or incomplete entries fail closed. If a prior binary cannot read a
 newer marker, choose a new explicit cache root instead of editing marker bytes.
 
+The default build-cache namespace is `commit-ci-preflight-build-v1`. Earlier
+pre-release layouts may have left admission coordination files under the old
+`commit-ci-preflight` cache directory. Upgrades do not adopt, move or delete
+that legacy state. Use an explicitly selected old root only after confirming
+that it carries a valid CCP ownership marker; otherwise keep it untouched and
+use the versioned default.
+
 Cleanup remains preview-only in 0.1.0:
 
 ```console

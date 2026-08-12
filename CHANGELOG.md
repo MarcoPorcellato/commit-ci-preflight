@@ -30,6 +30,9 @@ Semantic Versioning after its first public release.
 - Keep the host-wide admission coordinator in its own persistent platform-cache
   root so starting guarded work cannot make the independently managed build
   cache uninitializable or invalid.
+- Move the default build cache to the versioned
+  `commit-ci-preflight-build-v1` namespace so legacy pre-release admission
+  files cannot block initialization; legacy state is left untouched.
 - Reconcile the implementation plan with the merged admission, macOS resource
   guard, and guarded external workflow tranches.
 

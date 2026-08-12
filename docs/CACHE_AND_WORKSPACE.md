@@ -28,15 +28,22 @@ Platform defaults are:
 
 | Platform | Default |
 |---|---|
-| macOS | `$HOME/Library/Caches/commit-ci-preflight` |
-| Windows | `%LOCALAPPDATA%/commit-ci-preflight/cache` |
-| Linux/Unix | `$XDG_CACHE_HOME/commit-ci-preflight`, otherwise `$HOME/.cache/commit-ci-preflight` |
+| macOS | `$HOME/Library/Caches/commit-ci-preflight-build-v1` |
+| Windows | `%LOCALAPPDATA%/commit-ci-preflight-build-v1` |
+| Linux/Unix | `$XDG_CACHE_HOME/commit-ci-preflight-build-v1`, otherwise `$HOME/.cache/commit-ci-preflight-build-v1` |
 
 The default therefore survives ordinary reboots. The resolver rejects system
 temporary directories, filesystem roots, the repository and its descendants,
 relative paths, unresolved variables or `~`, dot/parent components, invalid
 UTF-8, and every existing symbolic-link component. It fails closed when no
 safe persistent default exists.
+
+Build-cache defaults use a versioned namespace separate from the host-wide
+admission coordinator. Pre-release builds that used
+`commit-ci-preflight/admission/` may leave that legacy directory in place. The
+resolver never adopts, moves or deletes it; the versioned build-cache root is
+initialized independently. An operator may still select a previously owned,
+valid cache root explicitly with `--cache-dir` or `CCP_CACHE_DIR`.
 
 Use a documented explicit root when operator policy requires a different disk:
 
