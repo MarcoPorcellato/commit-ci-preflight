@@ -9,6 +9,9 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Complete cross-repository adoption and safe-recovery documentation, including
+  a pinned-verifier GitHub gate template that keeps adopting-repository policy,
+  CCP source, and commit-bound evidence in separate trust domains.
 - Default-on host-wide single-slot admission for heavy `run` and `benchmark`
   commands with persistent advisory-lock tickets, cancellation, bounded
   timeout, stale-ticket recovery, and read-only status reporting.

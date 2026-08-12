@@ -57,6 +57,20 @@ end-to-end trial has proved that the status is attached to the latest PR head
 commit. Keep review, permission, secret-backed, deployment, and uncovered
 platform checks as separate GitHub rules or workflows.
 
+The active workflow is specific to this repository because its trusted base
+contains the CCP Rust verifier source. An adopting repository must use the
+[cross-repository template](../examples/github/receipt-gate.yml.example), pin
+an exact reviewed CCP source commit, and keep its own policy in the adopting
+repository's trusted base. Follow the [adoption guide](ADOPTION_GUIDE.md);
+copying this repository-native workflow unchanged will not work safely.
+
+This boundary follows GitHub's official guidance for
+[`pull_request_target`](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target):
+do not execute untrusted pull-request content, restrict token permissions, and
+pin reusable actions to full commit SHAs. The event is used here because the
+gate needs trusted base policy and permission to publish an exact-head status;
+it is never used to test the pull-request checkout.
+
 ## Produce the repository receipt
 
 Start from a clean source commit and a working Docker-compatible runtime. The

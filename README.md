@@ -68,6 +68,12 @@ a signature, or proof that arbitrary local and hosted workflows are identical.
 
 ## Quick start
 
+Adopting CCP in another repository? Start with the
+[complete adoption guide](docs/ADOPTION_GUIDE.md). It covers what remains on
+GitHub, persistent cache setup, configuration and policy authoring, OrbStack or
+Docker-compatible execution, exact-commit receipts, the cross-repository gate,
+safe rollout, and rollback.
+
 ### 1. Build from reviewed source
 
 ```console
@@ -233,6 +239,8 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
+- [Complete adoption guide for another repository](docs/ADOPTION_GUIDE.md)
+- [Troubleshooting and safe recovery](docs/TROUBLESHOOTING.md)
 - [Implemented architecture](docs/ARCHITECTURE.md)
 - [Installation and checksums](docs/INSTALLATION.md)
 - [End-to-end tutorial](docs/TUTORIAL.md)

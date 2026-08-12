@@ -102,6 +102,10 @@ is never deleted automatically. Admission and resource evidence are not
 included in receipts yet. The next tranche must integrate truthful evidence and
 host telemetry without changing this tranche's receipt contract.
 
+See [troubleshooting and safe recovery](TROUBLESHOOTING.md) before interpreting
+an `active: true` status, diagnosing an absent receipt, or touching any exact
+workspace lock reported after a forced stop.
+
 `resource status --json` is read-only. It never reports usernames, absolute
 paths, commands, repository names, process inventory, or secrets.
 
