@@ -64,11 +64,12 @@ It creates:
 - one `commit-ci-preflight-v0.1.0-<target>.tar.gz` archive;
 - `SHA256SUMS` for that exact archive.
 
-The archive contains the host binary, `LICENSE`, `NOTICE`, `README.md`,
-the SPDX SBOM, third-party notices, and the installation, rollback, threat
-model, support, and tutorial documents. The script refuses a relative output
-path, checks that release metadata is current, builds with `--locked`, and
-does not tag, push, upload, sign, or publish.
+The archive contains the host binary, `LICENSE`, `NOTICE`, `README.md`, the SPDX
+SBOM, third-party notices, adoption, installation, troubleshooting, rollback,
+threat-model, support, and tutorial documents, plus the inactive
+cross-repository GitHub gate template. The script refuses a relative output
+path, checks that release metadata is current, builds with `--locked`, and does
+not tag, push, upload, sign, or publish.
 
 ## Verify checksums
 

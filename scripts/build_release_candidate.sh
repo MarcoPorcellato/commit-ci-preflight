@@ -62,10 +62,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-mkdir -p "$stage_dir/docs"
+mkdir -p "$stage_dir/docs" "$stage_dir/examples/github"
 install -m 0755 target/release/commit-ci-preflight "$stage_dir/commit-ci-preflight"
 install -m 0644 LICENSE NOTICE README.md SBOM.spdx.json THIRD_PARTY_NOTICES.md "$stage_dir/"
-install -m 0644   docs/INSTALLATION.md   docs/UPGRADE_AND_ROLLBACK.md   docs/THREAT_MODEL.md   docs/BETA_SUPPORT.md   docs/TUTORIAL.md   "$stage_dir/docs/"
+install -m 0644 \
+  docs/ADOPTION_GUIDE.md \
+  docs/INSTALLATION.md \
+  docs/TROUBLESHOOTING.md \
+  docs/UPGRADE_AND_ROLLBACK.md \
+  docs/THREAT_MODEL.md \
+  docs/BETA_SUPPORT.md \
+  docs/TUTORIAL.md \
+  "$stage_dir/docs/"
+install -m 0644 examples/github/receipt-gate.yml.example "$stage_dir/examples/github/"
 
 COPYFILE_DISABLE=1 tar -czf "$archive_path" -C "$stage_root" "$archive_base"
 

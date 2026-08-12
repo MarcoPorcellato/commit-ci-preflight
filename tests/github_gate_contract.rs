@@ -18,8 +18,10 @@ use std::process::Command;
 
 use commit_ci_preflight::config::ConfigV1;
 use commit_ci_preflight::verify::VerificationPolicyV1;
+use saphyr::LoadableYamlNode;
 
 const WORKFLOW: &str = include_str!("../.github/workflows/receipt-gate.yml");
+const CROSS_REPOSITORY_TEMPLATE: &str = include_str!("../examples/github/receipt-gate.yml.example");
 const GATE_SCRIPT: &str = include_str!("../scripts/github-receipt-gate.sh");
 const CHECKOUT_SHA: &str = "de0fac2e4500dabe0009e67214ff5f5447ce83dd";
 const FIXTURE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -53,6 +55,52 @@ fn workflow_uses_a_trusted_minimal_fail_closed_boundary() {
         assert!(
             !WORKFLOW.contains(forbidden),
             "forbidden workflow surface: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn cross_repository_template_separates_and_pins_all_trust_inputs() {
+    let documents = saphyr::YamlOwned::load_from_str(CROSS_REPOSITORY_TEMPLATE)
+        .expect("cross-repository workflow template YAML");
+    assert_eq!(documents.len(), 1);
+
+    for required in [
+        "pull_request_target:",
+        "contents: read",
+        "statuses: write",
+        "github.event.pull_request.head.sha",
+        "github.event.pull_request.base.sha",
+        "CCP_SOURCE_COMMIT: REPLACE_WITH_REVIEWED_CCP_COMMIT",
+        "repository: MarcoPorcellato/commit-ci-preflight",
+        "ref: ${{ env.CCP_SOURCE_COMMIT }}",
+        "path: trusted-repository",
+        "path: verifier",
+        "path: evidence",
+        "ccp-evidence/",
+        "trusted-repository/.commit-ci-policy.toml",
+        "cargo build --locked --release --bin commit-ci-preflight",
+        "commit-ci-preflight/receipt",
+        &format!("actions/checkout@{CHECKOUT_SHA}"),
+    ] {
+        assert!(
+            CROSS_REPOSITORY_TEMPLATE.contains(required),
+            "missing cross-repository trust boundary: {required}"
+        );
+    }
+
+    for forbidden in [
+        "pull_request:\n",
+        "pull_request.head.ref",
+        "actions/cache",
+        "cargo test",
+        "docker run",
+        "secrets.",
+        "permissions: write-all",
+    ] {
+        assert!(
+            !CROSS_REPOSITORY_TEMPLATE.contains(forbidden),
+            "forbidden cross-repository workflow surface: {forbidden}"
         );
     }
 }
