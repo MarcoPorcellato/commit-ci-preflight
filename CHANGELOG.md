@@ -20,6 +20,12 @@ Semantic Versioning after its first public release.
 - Read-only `resource status --json`; Linux and Windows explicitly report
   `unsupported_not_enforced` for resource protection.
 
+### Changed
+
+- Relax macOS pre-start swap admission to the smaller of 10 GiB and 30% of
+  physical RAM, while retaining all independent memory, compressor and in-run
+  watchdog protections (`macos-v2`).
+
 ### Not Yet Included
 
 - Admission and resource evidence integration into receipts remains deferred;

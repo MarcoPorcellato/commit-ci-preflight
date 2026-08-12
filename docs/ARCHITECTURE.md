@@ -75,6 +75,11 @@ resource capability as `unsupported_not_enforced`; no protection is claimed on
 those platforms. Resource status is read-only and bounded, and receipt schema
 changes are deferred.
 
+Policy `macos-v2` admits swap usage through the smaller of 10 GiB and 30% of
+physical RAM. This is only one conjunct of admission: available memory,
+reclaimable uncompressed memory and compressor headroom must also pass. The
+in-run soft and hard watchdog thresholds remain unchanged.
+
 ## Configuration and planning
 
 A version 1.0 TOML configuration declares:
