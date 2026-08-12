@@ -29,6 +29,7 @@ use crate::receipt::{ReceiptError, canonical_json};
 
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const OWNER_FILE: &str = ".ccp-cache-root-v1.json";
+const DEFAULT_CACHE_ROOT_NAME: &str = "commit-ci-preflight-build-v1";
 const OWNER_BYTES: &[u8] =
     b"{\"owner\":\"commit-ci-preflight\",\"purpose\":\"managed-cache-root\",\"schema_version\":\"1.0\"}\n";
 const ENTRIES_DIR: &str = "entries";
@@ -133,7 +134,7 @@ impl ResolvedCacheRoot {
 }
 
 fn platform_default(options: &CacheRootOptions) -> Result<PathBuf, CacheError> {
-    let suffix = Path::new("commit-ci-preflight");
+    let suffix = Path::new(DEFAULT_CACHE_ROOT_NAME);
     match options.platform {
         PlatformFamily::MacOs => options
             .home
@@ -142,7 +143,7 @@ fn platform_default(options: &CacheRootOptions) -> Result<PathBuf, CacheError> {
         PlatformFamily::Windows => options
             .local_app_data
             .as_ref()
-            .map(|base| base.join(suffix).join("cache")),
+            .map(|base| base.join(suffix)),
         PlatformFamily::Unix => options
             .xdg_cache_home
             .as_ref()
@@ -978,6 +979,85 @@ timeout_seconds = 60
 
         assert_eq!(resolved.path, explicit);
         assert_eq!(resolved.source, CacheRootSource::Explicit);
+        clean(&repo);
+    }
+
+    #[test]
+    fn platform_defaults_use_the_versioned_build_cache_namespace() {
+        let base = PathBuf::from("/persistent/operator");
+        let mut options = CacheRootOptions {
+            explicit: None,
+            environment: None,
+            home: Some(base.clone()),
+            xdg_cache_home: Some(base.join("xdg")),
+            local_app_data: Some(base.join("local-app-data")),
+            platform: PlatformFamily::MacOs,
+        };
+
+        assert_eq!(
+            platform_default(&options).expect("macOS default"),
+            base.join("Library")
+                .join("Caches")
+                .join(DEFAULT_CACHE_ROOT_NAME)
+        );
+        options.platform = PlatformFamily::Windows;
+        assert_eq!(
+            platform_default(&options).expect("Windows default"),
+            base.join("local-app-data").join(DEFAULT_CACHE_ROOT_NAME)
+        );
+        options.platform = PlatformFamily::Unix;
+        assert_eq!(
+            platform_default(&options).expect("Unix default"),
+            base.join("xdg").join(DEFAULT_CACHE_ROOT_NAME)
+        );
+    }
+
+    #[test]
+    fn versioned_default_leaves_the_legacy_admission_tree_untouched() {
+        let repo = repository("legacy-admission-default");
+        let parent = repo.parent().expect("test parent");
+        let home = parent.join("legacy-admission-home");
+        let legacy = home
+            .join("Library")
+            .join("Caches")
+            .join("commit-ci-preflight");
+        let admission = legacy.join("admission");
+        clean(&home);
+        fs::create_dir_all(&admission).expect("legacy admission fixture");
+        fs::write(admission.join("next-ticket-v1"), b"1\n").expect("legacy counter");
+        fs::write(admission.join("queue.lock"), b"").expect("legacy queue lock");
+        fs::write(admission.join("slot.lock"), b"").expect("legacy slot lock");
+
+        let resolved = ResolvedCacheRoot::resolve(
+            &repo,
+            &CacheRootOptions {
+                explicit: None,
+                environment: None,
+                home: Some(home.clone()),
+                xdg_cache_home: None,
+                local_app_data: None,
+                platform: PlatformFamily::MacOs,
+            },
+        )
+        .expect("resolve versioned default");
+        assert_eq!(
+            resolved.path,
+            home.join("Library")
+                .join("Caches")
+                .join(DEFAULT_CACHE_ROOT_NAME)
+        );
+
+        ManagedCache::initialize(resolved.clone()).expect("initialize versioned default");
+        assert!(resolved.path.join(OWNER_FILE).is_file());
+        assert!(!legacy.join(OWNER_FILE).exists());
+        assert_eq!(
+            fs::read(admission.join("next-ticket-v1")).expect("legacy counter remains"),
+            b"1\n"
+        );
+        assert!(admission.join("queue.lock").is_file());
+        assert!(admission.join("slot.lock").is_file());
+
+        clean(&home);
         clean(&repo);
     }
 
