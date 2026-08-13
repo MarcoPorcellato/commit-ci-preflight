@@ -104,7 +104,8 @@ Boundary rules:
 | T22 | Evidence parser denial of service | One MiB remote input cap, strict unknown-field rejection, bounded summaries | Base verifier compilation still consumes bounded remote time |
 | T23 | Release substitution | Local SHA-256 manifest, SBOM, notices, checksum verification instructions | Checksums are not signatures and must come through an independent channel |
 | T24 | Unsafe upgrade or rollback | Isolated install, version smoke test, preserved previous binary, versioned schemas and cache markers | Operator mistakes remain possible; no automatic updater exists |
-| T25 | Concurrent heavy local jobs exhaust host memory | Persistent host-wide single-slot admission plus macOS-v1 pre-start memory thresholds and run watchdog; Linux/Windows capability is explicitly unsupported_not_enforced | macOS tools and pressure signals can be unavailable; benchmark has no mid-workload watchdog and receipts do not yet contain resource evidence |
+| T25 | Concurrent heavy local jobs exhaust host memory | Persistent host-wide single-slot admission plus macOS-v2 pre-start memory thresholds and run watchdog; Linux/Windows capability is explicitly unsupported_not_enforced | macOS tools and pressure signals can be unavailable; benchmark has no mid-workload watchdog and receipts do not yet contain resource evidence |
+| T26 | Local observation history leaks identity, grows without bound, or influences safety before qualification | Strict profile grammar; no command, path, repository, SHA, output or environment fields; 100-record/one-MiB bounds; private atomic file; observation has no admission authority | Unix timestamps and resource shapes remain local operational metadata; operators control local retention |
 
 ## 7. GitHub gate review
 
@@ -155,6 +156,10 @@ before publication.
   surface is bounded and excludes identity, path, command, and process data.
 - `guard exec` does not serialize environment names or values and does not
   claim receipt evidence; the child program controls its own output.
+- Local resource history stores only a bounded profile, timing, outcome and
+  memory extrema. It never stores commands, paths, repository or host identity,
+  never enters a receipt, never changes the resource policy, and never leaves
+  the machine through CCP.
 - The release-candidate builder includes `LICENSE`, `NOTICE`, SBOM, and
   third-party notices and emits a SHA-256 manifest.
 - No release signing or package publication occurs automatically.

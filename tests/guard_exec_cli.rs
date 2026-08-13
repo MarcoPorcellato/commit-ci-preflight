@@ -60,9 +60,11 @@ fn guard_command(fixture: &Path, role: &str, sentinel: &str, timeout: &str) -> C
         .env("CCP_GUARD_EXEC_CHILD_ROLE", role)
         .env("CCP_GUARD_EXEC_SENTINEL", sentinel)
         .current_dir(std::env::temp_dir());
-    if let Some(root) = std::env::var_os("CCP_TEST_ROOT") {
-        command.env("XDG_CACHE_HOME", root);
-    }
+    let isolation_root = fixture.parent().expect("fixture has an owned parent");
+    command.env("XDG_CACHE_HOME", isolation_root).env(
+        "CCP_RESOURCE_HISTORY_DIR",
+        isolation_root.join("resource-history"),
+    );
     command
 }
 

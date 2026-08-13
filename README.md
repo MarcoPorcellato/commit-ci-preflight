@@ -123,12 +123,17 @@ explicit argv after `--`:
 commit-ci-preflight guard exec \
   --admission-timeout-seconds 21600 \
   --timeout-seconds 21600 \
+  --resource-profile ready \
   -- make all
 ```
 
 The wrapper never invokes a shell, never creates a receipt, and keeps the
 admission slot until the supervised process tree has stopped. Both waits
-default to six hours for `guard exec` and are capped at 24 hours.
+default to six hours for `guard exec` and are capped at 24 hours. On macOS it
+also retains at most 100 local, privacy-bounded resource summaries for the
+declared profile. The history changes no policy decision and can be disabled
+with `--no-resource-history`; see the
+[resource observation history contract](docs/RESOURCE_OBSERVATION_HISTORY.md).
 
 ### 3. Run the clean-room demo
 
@@ -307,6 +312,7 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 - [End-to-end tutorial](docs/TUTORIAL.md)
 - [Configuration contract](docs/CONFIGURATION.md)
 - [Local run contract](docs/LOCAL_RUN.md)
+- [Local resource observation history](docs/RESOURCE_OBSERVATION_HISTORY.md)
 - [Receipt specification](docs/RECEIPT_SPEC.md)
 - [Verification policy](docs/VERIFICATION_POLICY.md)
 - [GitHub gate](docs/GITHUB_GATE.md)

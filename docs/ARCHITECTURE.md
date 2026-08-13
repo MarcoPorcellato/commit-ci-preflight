@@ -43,7 +43,8 @@ receipt.
 | `workspace` | Read-only source mount plan and declared writable cache/artifact mounts |
 | `cache` | Persistent root resolution, ownership marker, content-addressed entries, inventory, locks, and preview-only cleanup |
 | `admission` | Persistent platform-cache coordinator, FIFO/best-effort lock-backed tickets, one heavy-command slot, cancellation, timeout, and bounded status |
-| `resource` | Strict macOS-v1 host-memory probes, pre-start policy, in-run watchdog, typed capability/status, and deterministic probe seams |
+| `resource` | Strict macOS-v2 host-memory probes, pre-start policy, in-run watchdog, bounded extrema observation, typed capability/status, and deterministic probe seams |
+| `resource_history` | Privacy-minimized local JSONL summaries, strict profile validation, bounded rotation, symbolic-path rejection, and atomic persistence |
 | `run` | End-to-end orchestration and fail-closed aggregation |
 | `receipt` | Versioned evidence types, canonical JSON, SHA-256 integrity ID, schema, and atomic publication |
 | `verify` | Independent integrity, commit, configuration, check, image, platform, and freshness policy |
@@ -66,6 +67,11 @@ coordination only; the receipt schema does not yet record queue or resource
 evidence.
 `guard exec` uses the same host-wide admission and macOS resource guard, but it
 executes exactly one explicit argv without a shell and does not write receipts.
+After admission, it can attach a bounded observation accumulator to the
+existing watchdog. The accumulator retains only the baseline and extrema, and
+the CLI writes at most 100 strict local records while still holding the
+host-wide slot. Persistence is advisory: failures produce a generic warning
+without changing process, admission, cancellation or receipt semantics.
 
 On macOS, a fresh strict sample from the absolute system tools is required
 after slot acquisition and before heavy work. `run` starts a two-second
@@ -79,6 +85,11 @@ Policy `macos-v2` admits swap usage through the smaller of 10 GiB and 30% of
 physical RAM. This is only one conjunct of admission: available memory,
 reclaimable uncompressed memory and compressor headroom must also pass. The
 in-run soft and hard watchdog thresholds remain unchanged.
+
+Observation history v1 is not a forecast and has no authority over admission.
+It excludes repository and command identity, remains outside receipts, and is
+never transmitted. The qualification and privacy contract is specified in
+[RESOURCE_OBSERVATION_HISTORY.md](RESOURCE_OBSERVATION_HISTORY.md).
 
 ## Configuration and planning
 
