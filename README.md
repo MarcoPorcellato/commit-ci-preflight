@@ -1,27 +1,26 @@
 # Commit CI Preflight
 
-Run reproducible Linux checks on developer-owned hardware, produce a
-commit-bound receipt, and let GitHub verify the evidence instead of repeating
-the heavy workload.
+Proof-carrying CI for developer-owned execution. Commit CI Preflight runs a
+reviewed, pinned execution contract on your hardware, writes a commit-bound
+receipt, and lets GitHub verify that evidence instead of rerunning heavy work.
 
 Commit CI Preflight is an independent, vendor-neutral Apache-2.0 project with a
 Rust core. It is designed for teams whose remote CI cost or queue time is
-growing, but who do not want savings to weaken review, security, or platform
-coverage.
+growing, but who do not want cost control to weaken review, security, or
+platform coverage.
 
 > Status: **v0.1.0-rc.1 prerelease**. The source implementation and native
 > benchmark evidence are complete. The
 > [GitHub prerelease](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.1)
 > distributes an unsigned macOS arm64 archive and checksum. No crate, Homebrew
-> formula, Winget package, container image, or signed artifact is published.
+> formula, Winget/Scoop package, container image, or signed artifact is published.
 
 ## The problem
 
 Running the same formatter, compiler, test suite, and documentation build on a
 powerful developer machine and again on paid hosted runners can be expensive and
-slow. Moving everything to a self-hosted runner changes where jobs execute, but
-still leaves a long-lived machine attached to GitHub and does not by itself
-produce portable, independently checkable evidence.
+slow. Moving execution to a self-hosted runner removes one deployment model, but
+does not by itself give portable, independently checkable evidence.
 
 Commit CI Preflight splits the work:
 
@@ -74,15 +73,25 @@ GitHub, persistent cache setup, configuration and policy authoring, OrbStack or
 Docker-compatible execution, exact-commit receipts, the cross-repository gate,
 safe rollout, and rollback.
 
-### 1. Build from reviewed source
+### 1. Five-minute first inspection (no unpublished package install)
 
 ```console
 git clone https://github.com/MarcoPorcellato/commit-ci-preflight.git
 cd commit-ci-preflight
-cargo test --locked --workspace --all-targets --all-features
 cargo build --locked
-./target/debug/commit-ci-preflight --version
+./target/debug/commit-ci-preflight plan --config examples/projects/rust/.commit-ci-preflight.toml
+./target/debug/commit-ci-preflight doctor  --config examples/projects/rust/.commit-ci-preflight.toml
+./target/debug/commit-ci-preflight dry-run   --config examples/projects/rust/.commit-ci-preflight.toml
 ```
+
+The first build can take longer when Rust dependencies are not cached. `plan`
+normalizes the contract, `doctor` performs a bounded runtime probe, and
+`dry-run` renders the exact container command and mounts. None of these three
+commands executes project code or emits an attestable receipt.
+
+For a real PASS and receipt, use the [clean-room tutorial](docs/TUTORIAL.md).
+It first creates a separate Git repository for the fixture; running the example
+configuration against this source checkout would validate the wrong repository.
 
 ### 2. Inspect a configuration without running checks
 
@@ -145,12 +154,39 @@ For installation, checksum verification, and local candidate archives, see
 Official project descriptions used for this comparison:
 
 - [GitHub self-hosted runners](https://docs.github.com/en/actions/concepts/runners/self-hosted-runners)
+- [GitHub-hosted runners](https://docs.github.com/en/actions/concepts/runners/overview)
 - [nektos/act](https://github.com/nektos/act)
 - [Dagger documentation](https://docs.dagger.io/)
 - [Earthly documentation](https://docs.earthly.dev/)
+- [GitHub Actions pricing](https://docs.github.com/en/billing/managing-billing-on-github/about-billing-for-github-actions)
 
 These projects solve overlapping but different problems. Commit CI Preflight
 does not claim feature superiority or full GitHub Actions parity.
+
+## Cost example (assumptions only)
+
+Assumption (example only): pricing and quotas vary by account and date, so treat
+the formula below as a planning aid.
+
+Remote bill estimate (assumption):
+
+`cost_remote = Σ(job_rounded_minutes × job_runner_rate) - applicable_included_credit`
+
+Local split estimate (assumption):
+
+`cost_local = local_runtime_minutes × chosen_local_cost_per_minute + remote_gate_cost`
+
+Estimated savings (assumption):
+
+`savings = previous_remote_cost - new_local_and_remote_cost`
+
+Positive `savings` favors the split under those assumptions; zero or negative
+`savings` does not. Included quota, per-job rounding, retained remote jobs,
+electricity, hardware amortization, and operator time can materially change the
+result.
+
+Use your current GitHub billing inputs and measured local runtime to replace the
+assumptions before deciding.
 
 ## When to use it
 
@@ -163,8 +199,21 @@ Use the beta candidate when:
 - maintainers can review a small explicit TOML plan;
 - GitHub should retain the control-plane checks that only GitHub can know.
 
+### Ideal users
+
+- Teams that can tolerate local compute for deterministic heavy checks.
+- Repositories with stable Linux-based test/lint pipelines and clean host
+  runtime.
+- Maintainers who prefer explicit trust boundaries in reviews and policies.
+
 A strong initial fit is a private repository with large Rust, Python, Node, or
 documentation checks that already run consistently in Linux containers.
+
+### Non-ideal users
+
+- Workflow design that depends on unreviewed code from hostile contributors.
+- Windows/macOS/GPU-specific execution without native project receipt evidence.
+- Teams requiring organization-wide identity attestation for every green signal.
 
 ## When not to use it
 
@@ -180,6 +229,16 @@ Do not use the beta as the sole gate when:
 
 In those cases, retain the relevant remote or native jobs. Cost reduction never
 overrides a missing trust fact.
+
+## A0 trust and non-claims (compact)
+
+Current evidence guarantees are:
+
+- A0 integrity and repository-policy assertion for receipts are published.
+- A0 does not claim who ran the command, truthful remote-equivalent execution,
+  or complete host trust.
+- A1 and higher assurance levels are separate work items and are not inferred by
+  current status.
 
 ## Core commands
 
@@ -241,6 +300,7 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 - [Complete adoption guide for another repository](docs/ADOPTION_GUIDE.md)
 - [Proof-carrying CI product roadmap](docs/PRODUCT_ROADMAP.md)
+- [Repository presentation and social preview](docs/REPOSITORY_PRESENTATION.md)
 - [Troubleshooting and safe recovery](docs/TROUBLESHOOTING.md)
 - [Implemented architecture](docs/ARCHITECTURE.md)
 - [Installation and checksums](docs/INSTALLATION.md)

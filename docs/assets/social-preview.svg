@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title description">
+  <title id="title">Commit CI Preflight</title>
+  <desc id="description">Proof-carrying CI: run locally, create a receipt, verify policy, and publish exact-head status.</desc>
+  <rect width="1280" height="640" fill="#09111f"/>
+  <rect x="48" y="48" width="1184" height="544" rx="32" fill="#101d32" stroke="#2d466d" stroke-width="2"/>
+  <text x="96" y="138" fill="#f6f8ff" font-family="system-ui, -apple-system, sans-serif" font-size="58" font-weight="700">Commit CI Preflight</text>
+  <text x="96" y="198" fill="#9eb8e5" font-family="system-ui, -apple-system, sans-serif" font-size="30">Proof-carrying CI for exact Git commits</text>
+
+  <g font-family="system-ui, -apple-system, sans-serif" text-anchor="middle">
+    <g transform="translate(96 270)">
+      <rect width="238" height="176" rx="24" fill="#172944" stroke="#4e79b7" stroke-width="3"/>
+      <text x="119" y="70" fill="#7dd3fc" font-size="24" font-weight="700">1 · RUN LOCAL</text>
+      <text x="119" y="112" fill="#f6f8ff" font-size="22">Pinned checks</text>
+    </g>
+    <path d="M350 358h46" stroke="#7dd3fc" stroke-width="6" stroke-linecap="round"/>
+    <path d="m386 345 16 13-16 13" fill="none" stroke="#7dd3fc" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="translate(412 270)">
+      <rect width="238" height="176" rx="24" fill="#172944" stroke="#4e79b7" stroke-width="3"/>
+      <text x="119" y="70" fill="#7dd3fc" font-size="24" font-weight="700">2 · RECEIPT</text>
+      <text x="119" y="112" fill="#f6f8ff" font-size="22">Bound to SHA</text>
+    </g>
+    <path d="M666 358h46" stroke="#7dd3fc" stroke-width="6" stroke-linecap="round"/>
+    <path d="m702 345 16 13-16 13" fill="none" stroke="#7dd3fc" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="translate(728 270)">
+      <rect width="238" height="176" rx="24" fill="#172944" stroke="#4e79b7" stroke-width="3"/>
+      <text x="119" y="70" fill="#7dd3fc" font-size="24" font-weight="700">3 · VERIFY</text>
+      <text x="119" y="112" fill="#f6f8ff" font-size="22">Repository policy</text>
+    </g>
+    <path d="M982 358h46" stroke="#7dd3fc" stroke-width="6" stroke-linecap="round"/>
+    <path d="m1018 345 16 13-16 13" fill="none" stroke="#7dd3fc" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="translate(1044 270)">
+      <rect width="140" height="176" rx="24" fill="#173a35" stroke="#44c2a8" stroke-width="3"/>
+      <text x="70" y="66" fill="#6ee7c7" font-size="22" font-weight="700">4 · STATUS</text>
+      <text x="70" y="108" fill="#f6f8ff" font-size="20">Exact</text>
+      <text x="70" y="136" fill="#f6f8ff" font-size="20">PR head</text>
+    </g>
+  </g>
+
+  <text x="96" y="528" fill="#c7d5ee" font-family="system-ui, -apple-system, sans-serif" font-size="25">GitHub verifies the evidence instead of repeating covered heavy work.</text>
+</svg>
