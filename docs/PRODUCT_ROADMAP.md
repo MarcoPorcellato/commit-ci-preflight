@@ -23,12 +23,12 @@ record remains in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 Commit CI Preflight runs deterministic heavy checks on trusted local hardware,
 emits a canonical receipt bound to the exact Git commit, and leaves GitHub a
 small control-plane gate that validates the receipt and publishes status on the
-exact pull-request head.
+exact pull-request head for the exact repository state.
 
 The durable value proposition is avoiding duplicate remote computation. It is
 not based on a claim that GitHub charges for self-hosted runners. GitHub
 postponed the announced self-hosted platform charge; current hosted-runner
-prices and included quotas may change independently.
+prices and included quotas are policy variables and may change independently.
 
 ## Product boundaries
 
@@ -122,24 +122,39 @@ independently reviewable and reversible.
 
 Deliverables:
 
-- benefit-led README hero and category definition;
-- explicit ideal/non-ideal user segmentation;
-- accurate comparison with local runners, pipeline engines, caches, and
-  self-hosted runners;
-- current, assumption-labelled cost illustration;
-- compact trust/non-claim summary before architecture details;
-- public roadmap, expanded contributor onboarding, issue templates, and PR template;
-- close completed historical issues with exact implementation evidence;
-- milestone and labels for the stable-release programme;
+- publish a benefit-led proof-carrying CI hero and category definition in
+  `README.md` that can be understood without architectural context;
+- add explicit ideal/non-ideal user segmentation to the README onboarding path;
+- keep competitive comparison bounded to official sources for:
+  local runners, pipeline engines, caches, and self-hosted runners;
+- add a compact, assumption-labeled cost illustration (with formulas and no
+  universal savings claim);
+- add a concise A0 trust/non-claim summary before deep architecture and
+  component details; 
+- add a five-minute onboarding path using only documented, existing commands and
+  existing examples;
+- expand `CONTRIBUTING.md` with setup + component/test guidance for reviewable
+  onboarding.
+
+Expanded onboarding and PR 1 delivery criteria:
+
+- publish updated repository roadmap and contributor guidance for exact issue
+  triage, PR scope, review evidence, and component-level test discipline;
+- close completed historical issues with exact implementation evidence linked;
+- define `0.1.0 stable` milestone and keep current labels:
+  `adoption`, `security`, `cost-model`, `platform`, `good first issue`;
 - repository description aligned to proof-carrying CI;
 - social-preview source asset and instructions for setting it on GitHub.
 
 Exit gate:
 
 - a new visitor can answer problem, differentiation, first trial, and limits
-  from the README without reading architecture documents;
+  from the README in one pass, including the five-minute path and explicit
+  non-claims;
 - all public links and repository templates validate;
-- no installation command claims an unavailable package.
+- no installation command claims an unavailable package or platform qualification;
+- README claims are scoped to current facts and are marked when they are
+  assumptions.
 
 ### PR 2 — Physically independent verifier
 
@@ -413,4 +428,3 @@ This roadmap is complete only when:
   removes that requirement through a reviewed roadmap amendment;
 - `v0.1.0` stable artifacts are published and independently verified;
 - the final requirement-by-requirement audit has no missing evidence.
-

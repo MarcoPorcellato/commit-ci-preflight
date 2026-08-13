@@ -13,6 +13,10 @@ Semantic Versioning after its first public release.
   positioning, verifier separation, slim remote verification, distribution,
   one-command adoption, cost intelligence, Linux qualification, signed
   identity assurance, and evidence-backed case studies.
+- Expanded PR 1 onboarding documentation: README proof-first 5-minute path,
+  explicit users/non-users, assumption-labelled cost guidance, official
+  comparison links, and contributor onboarding/tests guidance in
+  `CONTRIBUTING.md`.
 - Complete cross-repository adoption and safe-recovery documentation, including
   a pinned-verifier GitHub gate template that keeps adopting-repository policy,
   CCP source, and commit-bound evidence in separate trust domains.
