@@ -29,12 +29,12 @@ decisions require an ADR under `docs/adr/`.
 ```console
 git clone https://github.com/MarcoPorcellato/commit-ci-preflight.git
 cd commit-ci-preflight
-rustup toolchain install 1.87
+rustup toolchain install 1.96.0
 rustup component add clippy rustfmt
 cargo build --locked
 ```
 
-- Use one of the existing 5-minute README commands before opening a PR for
+- Use the README first-inspection path before opening a PR for
   documentation-facing changes.
 - Use `git status --short` before tests and keep the worktree clean for release
   candidate operations.

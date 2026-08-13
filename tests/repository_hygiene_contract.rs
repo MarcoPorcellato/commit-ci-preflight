@@ -22,6 +22,7 @@ const ADOPTION_FORM: &str = include_str!("../.github/ISSUE_TEMPLATE/adoption_rep
 const ISSUE_CONFIG: &str = include_str!("../.github/ISSUE_TEMPLATE/config.yml");
 const PR_TEMPLATE: &str = include_str!("../.github/PULL_REQUEST_TEMPLATE.md");
 const ROADMAP: &str = include_str!("../ROADMAP.md");
+const SOCIAL_PREVIEW: &str = include_str!("../docs/assets/social-preview.svg");
 
 #[test]
 fn issue_template_yaml_is_present_and_safe() {
@@ -83,9 +84,12 @@ fn templates_do_not_include_unsafe_claim_phrases() {
 #[test]
 fn pr_template_contains_trust_claim_and_evidence_sections() {
     assert!(PR_TEMPLATE.contains("## Trust claim checklist"));
+    assert!(PR_TEMPLATE.contains("## Impact and rollback"));
     assert!(PR_TEMPLATE.contains("## Evidence checklist"));
     assert!(PR_TEMPLATE.contains("A0"));
-    assert!(PR_TEMPLATE.contains("docs/PRODUCT_ROADMAP.md"));
+    assert!(PR_TEMPLATE.contains("Roadmap text is presented as planned work"));
+    assert!(PR_TEMPLATE.contains("PENDING"));
+    assert!(PR_TEMPLATE.contains("NOT-RUN"));
 }
 
 #[test]
@@ -102,6 +106,8 @@ fn roadmap_and_templates_reference_existing_local_docs() {
         "docs/ADOPTION_GUIDE.md",
         "docs/RECEIPT_SPEC.md",
         "docs/PRODUCT_ROADMAP.md",
+        "docs/REPOSITORY_PRESENTATION.md",
+        "docs/assets/social-preview.svg",
     ] {
         assert!(
             root.join(path).exists(),
@@ -110,12 +116,27 @@ fn roadmap_and_templates_reference_existing_local_docs() {
     }
 }
 
+#[test]
+fn social_preview_is_bounded_self_contained_and_readable() {
+    assert!(SOCIAL_PREVIEW.contains("width=\"1280\" height=\"640\""));
+    assert!(SOCIAL_PREVIEW.contains("Commit CI Preflight"));
+    assert!(SOCIAL_PREVIEW.contains("1 · RUN LOCAL"));
+    assert!(SOCIAL_PREVIEW.contains("4 · STATUS"));
+    assert!(!SOCIAL_PREVIEW.contains("<script"));
+    assert!(!SOCIAL_PREVIEW.contains("href="));
+    assert!(!SOCIAL_PREVIEW.contains("url("));
+}
+
 fn assert_yaml_mapping(name: &str, raw_yaml: &str, check_reject_unsafe: bool) {
     let documents = YamlOwned::load_from_str(raw_yaml).unwrap_or_else(|error| {
         panic!("failed to parse {name} as yaml: {error}");
     });
 
-    assert_eq!(documents.len(), 1, "{name} should contain a single yaml document");
+    assert_eq!(
+        documents.len(),
+        1,
+        "{name} should contain a single yaml document"
+    );
     assert!(documents[0].is_mapping(), "{name} should be a yaml mapping");
 
     if check_reject_unsafe {

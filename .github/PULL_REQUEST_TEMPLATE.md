@@ -4,26 +4,31 @@ Briefly explain what changed and why.
 
 ## Trust claim checklist
 
-- [ ] This pull request does **not** claim:
+- [ ] Public claims in this pull request do **not** imply:
   - native execution where only contract-level qualification is available,
   - signed identity or full execution attestation when only A0 evidence is present,
   - zero-cost operation or equivalent absolute cost reductions.
-- [ ] This pull request does not alter source, runtime, workflow, secrets, or policy behavior.
-- [ ] If the proposal references `docs/PRODUCT_ROADMAP.md`, it does so for implementation details and not as a final customer statement.
+- [ ] I described any source, runtime, workflow, permission, secret, policy, schema, or dependency impact below; write `none` only after checking the diff.
+- [ ] Roadmap text is presented as planned work, not as implemented or qualified behavior.
+
+## Impact and rollback
+
+- Runtime or trust-boundary impact:
+- Dependency or supply-chain impact:
+- Data, secret, permission, or network impact:
+- Rollback path:
 
 ## Evidence checklist
 
-- [ ] Changed files are present and deterministic:
-  - `.github/ISSUE_TEMPLATE/bug_report.yml`
-  - `.github/ISSUE_TEMPLATE/feature_request.yml`
-  - `.github/ISSUE_TEMPLATE/adoption_report.yml`
-  - `.github/ISSUE_TEMPLATE/config.yml`
-  - `.github/PULL_REQUEST_TEMPLATE.md`
-  - `ROADMAP.md`
-- [ ] `cargo test --test repository_hygiene_contract` passes.
-- [ ] `git diff --check` has no whitespace or whitespace-related issues.
-- [ ] The templates include links only to repository docs or implementation-neutral claims.
+- [ ] I listed the exact focused checks run for this diff.
+- [ ] I ran `cargo fmt --all -- --check` when Rust files changed.
+- [ ] I ran the relevant contract tests and recorded any intentionally not-run gate.
+- [ ] `git diff --check` passes.
+- [ ] User-visible changes update `CHANGELOG.md`.
+- [ ] New or changed links point to an existing, authoritative target.
 
 ## Validation notes
 
-Mention exact output, if any.
+List commands, result counts, receipts, platform evidence, and explicit
+`PENDING` or `NOT-RUN` items. Do not convert contract tests into native,
+signed, billing, or deployment evidence.

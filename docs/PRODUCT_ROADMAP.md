@@ -131,8 +131,9 @@ Deliverables:
   universal savings claim);
 - add a concise A0 trust/non-claim summary before deep architecture and
   component details; 
-- add a five-minute onboarding path using only documented, existing commands and
-  existing examples;
+- add a five-minute read-only first-inspection path using only documented,
+  existing commands and examples; keep real execution in the isolated
+  clean-room tutorial until one-command adoption exists;
 - expand `CONTRIBUTING.md` with setup + component/test guidance for reviewable
   onboarding.
 
@@ -144,12 +145,13 @@ Expanded onboarding and PR 1 delivery criteria:
 - define `0.1.0 stable` milestone and keep current labels:
   `adoption`, `security`, `cost-model`, `platform`, `good first issue`;
 - repository description aligned to proof-carrying CI;
-- social-preview source asset and instructions for setting it on GitHub.
+- social-preview source asset and truthful owner instructions for setting it on
+  GitHub without claiming the remote setting is already applied.
 
 Exit gate:
 
 - a new visitor can answer problem, differentiation, first trial, and limits
-  from the README in one pass, including the five-minute path and explicit
+  from the README in one pass, including the first-inspection path and explicit
   non-claims;
 - all public links and repository templates validate;
 - no installation command claims an unavailable package or platform qualification;
