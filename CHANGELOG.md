@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Product roadmap for evolving the beta into proof-carrying CI with staged
+  positioning, verifier separation, slim remote verification, distribution,
+  one-command adoption, cost intelligence, Linux qualification, signed
+  identity assurance, and evidence-backed case studies.
 - Complete cross-repository adoption and safe-recovery documentation, including
   a pinned-verifier GitHub gate template that keeps adopting-repository policy,
   CCP source, and commit-bound evidence in separate trust domains.
