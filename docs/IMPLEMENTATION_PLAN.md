@@ -41,7 +41,7 @@ qualification, identity assurance, and evidence-backed stable-release gates.
 | PR 11 — bounded host-wide admission tranche | Merged | PR #20; main `b628fbcb43c33ea1a8c7e3d5a48ddfe095f02317`; default-on single-slot queue for `run` and `benchmark` |
 | PR 12 — macOS resource guard tranche | Merged | PR #21; main `752e81df1e4dba2524f2116c2ed31d17026ee80e`; macOS-v1 pre-start memory admission, `run` watchdog, bounded resource status, and explicit unsupported Linux/Windows capability |
 | PR 13 — guarded external workflow tranche | Merged | PR #22; main `b9835d66414370b88273a338441f7ab9be528aad`; shell-free `guard exec`, six-hour bounded queue/runtime defaults, live output, watchdog, and verified process-tree cleanup |
-| Post-beta resource observation tranche | In progress | Observation-only macOS `guard exec` history; no threshold, watchdog, receipt or remote-policy change; predictive admission remains a later owner gate |
+| Post-beta resource observation tranche | In progress | Privacy-minimized v2 macOS `guard exec` history with cross-repository execution context; no threshold, watchdog, receipt or remote-policy change; launcher adoption and predictive admission remain separate gates |
 
 ## 2. Mission
 

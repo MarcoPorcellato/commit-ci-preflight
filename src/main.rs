@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
     ADMISSION_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
     DEFAULT_QUEUE_TIMEOUT,
@@ -44,8 +44,9 @@ use commit_ci_preflight::resource::{
     evaluate_pre_start, status_from_snapshot, unknown_status, unsupported_status,
 };
 use commit_ci_preflight::resource_history::{
-    DEFAULT_RESOURCE_PROFILE, ResourceHistoryRecordV1, ResourceHistoryStore, ResourceRunOutcome,
-    validate_profile,
+    DEFAULT_RESOURCE_PROFILE, DEFAULT_WORKLOAD_FAMILY, ResourceCacheStateV2,
+    ResourceExecutionContextV2, ResourceExecutionModeV2, ResourceExecutorV2,
+    ResourceHistoryRecordV2, ResourceHistoryStore, ResourceRunOutcome, validate_profile,
 };
 use commit_ci_preflight::run::{
     CompletionBarrier, RunError, RunRequest, SystemClock, execute_local_run_with_barrier,
@@ -217,6 +218,12 @@ enum ResourceAction {
         #[arg(long)]
         json: bool,
     },
+    /// Read the bounded privacy-minimized local v2 observation history.
+    History {
+        /// Emit the versioned machine-readable history report.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -236,12 +243,92 @@ struct GuardExecArgs {
     /// Stable, non-sensitive workload class used only by local resource history.
     #[arg(long, default_value = DEFAULT_RESOURCE_PROFILE)]
     resource_profile: String,
+    /// Stable, non-sensitive pipeline/cohort identifier used only by local resource history.
+    #[arg(long, default_value = DEFAULT_WORKLOAD_FAMILY)]
+    resource_workload_family: String,
+    /// Execution substrate; direct `docker --context orbstack` argv is detected automatically.
+    #[arg(long, value_enum)]
+    resource_executor: Option<ResourceExecutorArg>,
+    /// Cache classification supplied by the caller; it never affects admission.
+    #[arg(long, value_enum, default_value_t = ResourceCacheStateArg::Unknown)]
+    resource_cache_state: ResourceCacheStateArg,
+    /// Native or emulated target execution supplied by the caller.
+    #[arg(long, value_enum, default_value_t = ResourceExecutionModeArg::Unknown)]
+    resource_execution_mode: ResourceExecutionModeArg,
+    /// Bounded non-sensitive target label such as `linux-amd64`.
+    #[arg(long)]
+    resource_target_platform: Option<String>,
+    /// Requested CPU ceiling in millicores, when the runner has one.
+    #[arg(long)]
+    resource_cpu_limit_millis: Option<u32>,
+    /// Requested memory ceiling in bytes, when the runner has one.
+    #[arg(long)]
+    resource_memory_limit_bytes: Option<u64>,
     /// Disable local observation history without changing admission or watchdog behavior.
     #[arg(long)]
     no_resource_history: bool,
     /// Program and arguments. The `--` separator is required.
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     argv: Vec<OsString>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ResourceExecutorArg {
+    Native,
+    Orbstack,
+    Docker,
+    Vm,
+    Unknown,
+}
+
+impl From<ResourceExecutorArg> for ResourceExecutorV2 {
+    fn from(value: ResourceExecutorArg) -> Self {
+        match value {
+            ResourceExecutorArg::Native => Self::Native,
+            ResourceExecutorArg::Orbstack => Self::Orbstack,
+            ResourceExecutorArg::Docker => Self::Docker,
+            ResourceExecutorArg::Vm => Self::Vm,
+            ResourceExecutorArg::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum ResourceCacheStateArg {
+    Cold,
+    Warm,
+    Mixed,
+    #[default]
+    Unknown,
+}
+
+impl From<ResourceCacheStateArg> for ResourceCacheStateV2 {
+    fn from(value: ResourceCacheStateArg) -> Self {
+        match value {
+            ResourceCacheStateArg::Cold => Self::Cold,
+            ResourceCacheStateArg::Warm => Self::Warm,
+            ResourceCacheStateArg::Mixed => Self::Mixed,
+            ResourceCacheStateArg::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+enum ResourceExecutionModeArg {
+    Native,
+    Emulated,
+    #[default]
+    Unknown,
+}
+
+impl From<ResourceExecutionModeArg> for ResourceExecutionModeV2 {
+    fn from(value: ResourceExecutionModeArg) -> Self {
+        match value {
+            ResourceExecutionModeArg::Native => Self::Native,
+            ResourceExecutionModeArg::Emulated => Self::Emulated,
+            ResourceExecutionModeArg::Unknown => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -454,6 +541,22 @@ fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
     }
     validate_profile(&args.resource_profile)
         .map_err(|_| CliError::Guard(GuardExecError::InvalidResourceProfile))?;
+    let context = ResourceExecutionContextV2 {
+        profile: args.resource_profile,
+        workload_family: args.resource_workload_family,
+        executor: args
+            .resource_executor
+            .map(Into::into)
+            .unwrap_or_else(|| detect_resource_executor(&args.argv)),
+        cache_state: args.resource_cache_state.into(),
+        execution_mode: args.resource_execution_mode.into(),
+        target_platform: args.resource_target_platform,
+        requested_cpu_millis: args.resource_cpu_limit_millis,
+        requested_memory_bytes: args.resource_memory_limit_bytes,
+    };
+    context
+        .validate()
+        .map_err(|_| CliError::Guard(GuardExecError::InvalidResourceContext))?;
     let current_dir = fs::canonicalize(".")
         .map_err(|_| CliError::Guard(GuardExecError::InvalidCurrentDirectory))?;
     if !current_dir.is_dir() {
@@ -478,7 +581,7 @@ fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
         current_dir.clone(),
         cancellation.clone(),
         baseline,
-        args.resource_profile,
+        context,
         !args.no_resource_history,
     );
 
@@ -510,6 +613,26 @@ fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
         .finish(process, &cancellation)
         .map_err(CliError::Guard)?;
     classify_guard_result(result, &cancellation).map_err(CliError::Guard)
+}
+
+fn detect_resource_executor(argv: &[OsString]) -> ResourceExecutorV2 {
+    let Some(program) = argv.first().and_then(|value| Path::new(value).file_name()) else {
+        return ResourceExecutorV2::Unknown;
+    };
+    if program != "docker" {
+        return ResourceExecutorV2::Unknown;
+    }
+    let mut arguments = argv.iter().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--context" {
+            if arguments.next().is_some_and(|value| value == "orbstack") {
+                return ResourceExecutorV2::Orbstack;
+            }
+        } else if argument == "--context=orbstack" {
+            return ResourceExecutorV2::Orbstack;
+        }
+    }
+    ResourceExecutorV2::Docker
 }
 
 fn classify_guard_result(
@@ -920,7 +1043,36 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
 fn run_resource_command(action: ResourceAction) -> Result<(), CliError> {
     match action {
         ResourceAction::Status { json } => print_resource_status(json),
+        ResourceAction::History { json } => print_resource_history(json),
     }
+}
+
+fn print_resource_history(json: bool) -> Result<(), CliError> {
+    let report = ResourceHistoryStore::platform()
+        .and_then(|store| store.report_v2())
+        .map_err(CliError::internal)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(CliError::internal)?
+        );
+    } else {
+        println!("Resource history schema: {}", report.schema_version);
+        println!("Records: {}", report.record_count);
+        for record in report.records {
+            println!(
+                "{} {} {} {:?} {:?} {}ms {:?}",
+                record.started_at_unix_seconds,
+                record.context.profile,
+                record.context.workload_family,
+                record.context.executor,
+                record.context.execution_mode,
+                record.duration_milliseconds,
+                record.outcome
+            );
+        }
+    }
+    Ok(())
 }
 
 fn print_resource_status(json: bool) -> Result<(), CliError> {
@@ -991,7 +1143,7 @@ struct GuardExecSession {
 struct GuardResourceObservation {
     observation: ResourceObservation,
     store: ResourceHistoryStore,
-    profile: String,
+    context: ResourceExecutionContextV2,
     started_at_unix_seconds: u64,
     started_at: Instant,
 }
@@ -1008,8 +1160,8 @@ impl GuardResourceObservation {
         };
         let duration_milliseconds =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let record = ResourceHistoryRecordV1::from_summary(
-            &self.profile,
+        let record = ResourceHistoryRecordV2::from_summary(
+            self.context,
             self.started_at_unix_seconds,
             duration_milliseconds,
             outcome,
@@ -1017,7 +1169,7 @@ impl GuardResourceObservation {
             &summary,
         );
         if record
-            .and_then(|record| self.store.append(&record))
+            .and_then(|record| self.store.append_v2(&record))
             .is_err()
         {
             eprintln!("warning: local resource history could not be updated");
@@ -1047,7 +1199,7 @@ impl GuardExecSession {
         current_dir: PathBuf,
         cancellation: CancellationToken,
         baseline: Option<ResourceSnapshot>,
-        profile: String,
+        context: ResourceExecutionContextV2,
         history_enabled: bool,
     ) {
         if ResourcePlatform::current() == ResourcePlatform::MacOs {
@@ -1066,7 +1218,7 @@ impl GuardExecSession {
                         self.resource_observation = Some(GuardResourceObservation {
                             observation,
                             store,
-                            profile,
+                            context,
                             started_at_unix_seconds: SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -1365,6 +1517,7 @@ enum GuardExecError {
     InvalidTimeout,
     MissingProgram,
     InvalidResourceProfile,
+    InvalidResourceContext,
     InvalidCurrentDirectory,
     Admission(AdmissionError),
     Resource(ResourceGuardError),
@@ -1391,6 +1544,7 @@ impl GuardExecError {
             | Self::InvalidTimeout
             | Self::MissingProgram
             | Self::InvalidResourceProfile
+            | Self::InvalidResourceContext
             | Self::InvalidCurrentDirectory => 2,
             Self::Admission(error) => error.exit_code(),
             Self::Resource(_) | Self::ResourcePressure => 6,
@@ -1415,6 +1569,9 @@ impl fmt::Display for GuardExecError {
             Self::MissingProgram => formatter.write_str("guard exec requires a program after --"),
             Self::InvalidResourceProfile => formatter.write_str(
                 "guard exec resource profile must be 1-64 ASCII letters, digits, hyphens or underscores",
+            ),
+            Self::InvalidResourceContext => formatter.write_str(
+                "guard exec resource context labels must be bounded ASCII tokens and numeric limits must be positive",
             ),
             Self::InvalidCurrentDirectory => {
                 formatter.write_str("guard exec current directory could not be canonicalized")
@@ -1555,8 +1712,10 @@ impl std::error::Error for CliMessageError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, WatchdogCompletionBarrier,
-        finalize_guard_exec_result, reconcile_watchdog_outcome, resource_run_outcome,
+        Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
+        ResourceExecutionModeArg, ResourceExecutorArg, WatchdogCompletionBarrier,
+        detect_resource_executor, finalize_guard_exec_result, reconcile_watchdog_outcome,
+        resource_run_outcome,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::process::CancellationToken;
@@ -1566,12 +1725,25 @@ mod tests {
     use commit_ci_preflight::resource::{
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
+    use commit_ci_preflight::resource_history::ResourceExecutorV2;
     use std::ffi::OsString;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn resource_history_read_command_parses() {
+        let cli = Cli::try_parse_from(["commit-ci-preflight", "resource", "history", "--json"])
+            .expect("resource history parses");
+        assert!(matches!(
+            cli.command,
+            Some(super::Command::Resource {
+                action: super::ResourceAction::History { json: true }
+            })
+        ));
     }
 
     #[test]
@@ -1606,6 +1778,22 @@ mod tests {
                 );
                 assert_eq!(args.timeout_seconds, 1);
                 assert_eq!(args.resource_profile, super::DEFAULT_RESOURCE_PROFILE);
+                assert_eq!(
+                    args.resource_workload_family,
+                    super::DEFAULT_WORKLOAD_FAMILY
+                );
+                assert!(args.resource_executor.is_none());
+                assert!(matches!(
+                    args.resource_cache_state,
+                    ResourceCacheStateArg::Unknown
+                ));
+                assert!(matches!(
+                    args.resource_execution_mode,
+                    ResourceExecutionModeArg::Unknown
+                ));
+                assert!(args.resource_target_platform.is_none());
+                assert!(args.resource_cpu_limit_millis.is_none());
+                assert!(args.resource_memory_limit_bytes.is_none());
                 assert!(!args.no_resource_history);
                 assert_eq!(
                     args.argv,
@@ -1616,6 +1804,62 @@ mod tests {
         }
 
         assert!(Cli::try_parse_from(["commit-ci-preflight", "guard", "exec", "echo"]).is_err());
+    }
+
+    #[test]
+    fn guard_exec_parses_explicit_resource_context() {
+        let cli = Cli::try_parse_from([
+            "commit-ci-preflight",
+            "guard",
+            "exec",
+            "--resource-profile",
+            "ready",
+            "--resource-workload-family",
+            "brain-linux-ci-v1",
+            "--resource-executor",
+            "orbstack",
+            "--resource-cache-state",
+            "warm",
+            "--resource-execution-mode",
+            "emulated",
+            "--resource-target-platform",
+            "linux-amd64",
+            "--resource-cpu-limit-millis",
+            "2000",
+            "--resource-memory-limit-bytes",
+            "8589934592",
+            "--",
+            "make",
+            "ci-linux-orbstack",
+        ])
+        .expect("resource context parses");
+
+        let super::Command::Guard {
+            action: GuardCommand::Exec(args),
+        } = cli.command.expect("command is present")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.resource_profile, "ready");
+        assert_eq!(args.resource_workload_family, "brain-linux-ci-v1");
+        assert!(matches!(
+            args.resource_executor,
+            Some(ResourceExecutorArg::Orbstack)
+        ));
+        assert!(matches!(
+            args.resource_cache_state,
+            ResourceCacheStateArg::Warm
+        ));
+        assert!(matches!(
+            args.resource_execution_mode,
+            ResourceExecutionModeArg::Emulated
+        ));
+        assert_eq!(
+            args.resource_target_platform.as_deref(),
+            Some("linux-amd64")
+        );
+        assert_eq!(args.resource_cpu_limit_millis, Some(2_000));
+        assert_eq!(args.resource_memory_limit_bytes, Some(8_589_934_592));
     }
 
     #[test]
@@ -1687,6 +1931,13 @@ mod tests {
             admission_timeout_seconds: 1,
             timeout_seconds: 1,
             resource_profile: super::DEFAULT_RESOURCE_PROFILE.to_owned(),
+            resource_workload_family: super::DEFAULT_WORKLOAD_FAMILY.to_owned(),
+            resource_executor: None,
+            resource_cache_state: ResourceCacheStateArg::Unknown,
+            resource_execution_mode: ResourceExecutionModeArg::Unknown,
+            resource_target_platform: None,
+            resource_cpu_limit_millis: None,
+            resource_memory_limit_bytes: None,
             no_resource_history: false,
             argv: vec![OsString::from("fixture")],
         }
@@ -1782,6 +2033,62 @@ mod tests {
             super::print_guard_exec(invalid),
             Err(CliError::Guard(GuardExecError::InvalidResourceProfile))
         ));
+    }
+
+    #[test]
+    fn guard_exec_rejects_invalid_resource_context_before_admission() {
+        for invalid in [
+            GuardExecArgs {
+                resource_workload_family: "repository/path".to_owned(),
+                ..guard_exec_args()
+            },
+            GuardExecArgs {
+                resource_target_platform: Some("linux/amd64".to_owned()),
+                ..guard_exec_args()
+            },
+            GuardExecArgs {
+                resource_cpu_limit_millis: Some(0),
+                ..guard_exec_args()
+            },
+            GuardExecArgs {
+                resource_memory_limit_bytes: Some(0),
+                ..guard_exec_args()
+            },
+        ] {
+            assert!(matches!(
+                super::print_guard_exec(invalid),
+                Err(CliError::Guard(GuardExecError::InvalidResourceContext))
+            ));
+        }
+    }
+
+    #[test]
+    fn direct_docker_executor_detection_is_deterministic() {
+        assert_eq!(
+            detect_resource_executor(&[
+                OsString::from("docker"),
+                OsString::from("--context"),
+                OsString::from("orbstack"),
+                OsString::from("run"),
+            ]),
+            ResourceExecutorV2::Orbstack
+        );
+        assert_eq!(
+            detect_resource_executor(&[
+                OsString::from("/usr/local/bin/docker"),
+                OsString::from("--context=orbstack"),
+                OsString::from("run"),
+            ]),
+            ResourceExecutorV2::Orbstack
+        );
+        assert_eq!(
+            detect_resource_executor(&[OsString::from("docker"), OsString::from("run")]),
+            ResourceExecutorV2::Docker
+        );
+        assert_eq!(
+            detect_resource_executor(&[OsString::from("make"), OsString::from("all")]),
+            ResourceExecutorV2::Unknown
+        );
     }
 
     #[test]

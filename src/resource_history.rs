@@ -18,18 +18,24 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::resource::{MACOS_POLICY_VERSION, ResourceObservationSummary, WatchdogTripReason};
 
 pub const RESOURCE_HISTORY_SCHEMA_VERSION: &str = "1.0";
+pub const RESOURCE_HISTORY_V2_SCHEMA_VERSION: &str = "2.0";
 pub const DEFAULT_RESOURCE_HISTORY_RECORDS: usize = 100;
+pub const DEFAULT_RESOURCE_HISTORY_V2_RECORDS: usize = 500;
 pub const DEFAULT_RESOURCE_PROFILE: &str = "guard-exec";
+pub const DEFAULT_WORKLOAD_FAMILY: &str = "generic-v1";
 pub const RESOURCE_HISTORY_DIR_ENV: &str = "CCP_RESOURCE_HISTORY_DIR";
 
 const PLATFORM_DIRECTORY: &str = "commit-ci-preflight";
 const HISTORY_FILE: &str = "resource-history-v1.jsonl";
+const HISTORY_V2_FILE: &str = "resource-history-v2.jsonl";
 const MAX_HISTORY_BYTES: u64 = 1024 * 1024;
+const MAX_HISTORY_V2_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PROFILE_BYTES: usize = 64;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -49,6 +55,60 @@ pub enum ResourceTripReasonV1 {
     HardPressure,
     SoftPressure,
     ProbeFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceExecutorV2 {
+    Native,
+    Orbstack,
+    Docker,
+    Vm,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceCacheStateV2 {
+    Cold,
+    Warm,
+    Mixed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceExecutionModeV2 {
+    Native,
+    Emulated,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceExecutionContextV2 {
+    pub profile: String,
+    pub workload_family: String,
+    pub executor: ResourceExecutorV2,
+    pub cache_state: ResourceCacheStateV2,
+    pub execution_mode: ResourceExecutionModeV2,
+    pub target_platform: Option<String>,
+    pub requested_cpu_millis: Option<u32>,
+    pub requested_memory_bytes: Option<u64>,
+}
+
+impl ResourceExecutionContextV2 {
+    pub fn validate(&self) -> Result<(), ResourceHistoryError> {
+        validate_profile(&self.profile)?;
+        validate_label(&self.workload_family)?;
+        if let Some(target) = &self.target_platform {
+            validate_label(target)?;
+        }
+        if self.requested_cpu_millis == Some(0) || self.requested_memory_bytes == Some(0) {
+            return Err(ResourceHistoryError::InvalidContext);
+        }
+        Ok(())
+    }
 }
 
 impl From<WatchdogTripReason> for ResourceTripReasonV1 {
@@ -84,6 +144,37 @@ pub struct ResourceHistoryRecordV1 {
     pub total_memory_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceHistoryRecordV2 {
+    pub schema_version: String,
+    pub policy_version: String,
+    pub platform: String,
+    pub context: ResourceExecutionContextV2,
+    pub started_at_unix_seconds: u64,
+    pub duration_milliseconds: u64,
+    pub outcome: ResourceRunOutcome,
+    pub watchdog_trip_reason: Option<ResourceTripReasonV1>,
+    pub sample_count: u64,
+    pub baseline_available_percent: u8,
+    pub minimum_available_percent: u8,
+    pub baseline_reclaimable_uncompressed_bytes: u64,
+    pub minimum_reclaimable_uncompressed_bytes: u64,
+    pub baseline_compressor_occupied_bytes: u64,
+    pub maximum_compressor_occupied_bytes: u64,
+    pub baseline_swap_used_bytes: u64,
+    pub maximum_swap_used_bytes: u64,
+    pub total_memory_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceHistoryReportV2 {
+    pub schema_version: String,
+    pub record_count: usize,
+    pub records: Vec<ResourceHistoryRecordV2>,
+}
+
 impl ResourceHistoryRecordV1 {
     pub fn from_summary(
         profile: &str,
@@ -99,6 +190,41 @@ impl ResourceHistoryRecordV1 {
             policy_version: MACOS_POLICY_VERSION.to_owned(),
             platform: "macos".to_owned(),
             profile: profile.to_owned(),
+            started_at_unix_seconds,
+            duration_milliseconds,
+            outcome,
+            watchdog_trip_reason: watchdog_trip_reason.map(Into::into),
+            sample_count: summary.sample_count,
+            baseline_available_percent: summary.baseline.available_percent,
+            minimum_available_percent: summary.minimum_available_percent,
+            baseline_reclaimable_uncompressed_bytes: summary
+                .baseline
+                .reclaimable_uncompressed_bytes,
+            minimum_reclaimable_uncompressed_bytes: summary.minimum_reclaimable_uncompressed_bytes,
+            baseline_compressor_occupied_bytes: summary.baseline.compressor_occupied_bytes,
+            maximum_compressor_occupied_bytes: summary.maximum_compressor_occupied_bytes,
+            baseline_swap_used_bytes: summary.baseline.swap_used_bytes,
+            maximum_swap_used_bytes: summary.maximum_swap_used_bytes,
+            total_memory_bytes: summary.baseline.total_memory_bytes,
+        })
+    }
+}
+
+impl ResourceHistoryRecordV2 {
+    pub fn from_summary(
+        context: ResourceExecutionContextV2,
+        started_at_unix_seconds: u64,
+        duration_milliseconds: u64,
+        outcome: ResourceRunOutcome,
+        watchdog_trip_reason: Option<WatchdogTripReason>,
+        summary: &ResourceObservationSummary,
+    ) -> Result<Self, ResourceHistoryError> {
+        context.validate()?;
+        Ok(Self {
+            schema_version: RESOURCE_HISTORY_V2_SCHEMA_VERSION.to_owned(),
+            policy_version: MACOS_POLICY_VERSION.to_owned(),
+            platform: "macos".to_owned(),
+            context,
             started_at_unix_seconds,
             duration_milliseconds,
             outcome,
@@ -142,6 +268,33 @@ impl ResourceHistoryStore {
         self.append_with_limit(record, DEFAULT_RESOURCE_HISTORY_RECORDS)
     }
 
+    pub fn append_v2(&self, record: &ResourceHistoryRecordV2) -> Result<(), ResourceHistoryError> {
+        self.append_v2_with_limit(record, DEFAULT_RESOURCE_HISTORY_V2_RECORDS)
+    }
+
+    pub fn report_v2(&self) -> Result<ResourceHistoryReportV2, ResourceHistoryError> {
+        let target = self.root.join(HISTORY_V2_FILE);
+        reject_symlink_file(&target, MAX_HISTORY_V2_BYTES)?;
+        let records: Vec<ResourceHistoryRecordV2> = read_records(&target)?;
+        if records.len() > DEFAULT_RESOURCE_HISTORY_V2_RECORDS {
+            return Err(ResourceHistoryError::InvalidHistory);
+        }
+        for record in &records {
+            if record.schema_version != RESOURCE_HISTORY_V2_SCHEMA_VERSION {
+                return Err(ResourceHistoryError::InvalidHistory);
+            }
+            record
+                .context
+                .validate()
+                .map_err(|_| ResourceHistoryError::InvalidHistory)?;
+        }
+        Ok(ResourceHistoryReportV2 {
+            schema_version: RESOURCE_HISTORY_V2_SCHEMA_VERSION.to_owned(),
+            record_count: records.len(),
+            records,
+        })
+    }
+
     fn append_with_limit(
         &self,
         record: &ResourceHistoryRecordV1,
@@ -152,19 +305,50 @@ impl ResourceHistoryStore {
         }
         ensure_directory(&self.root)?;
         let target = self.root.join(HISTORY_FILE);
-        reject_symlink_file(&target)?;
+        reject_symlink_file(&target, MAX_HISTORY_BYTES)?;
         let mut records = read_records(&target)?;
         let keep = limit.saturating_sub(1);
         if records.len() > keep {
             records.drain(..records.len() - keep);
         }
         records.push(record.clone());
-        write_records_atomic(&target, &records)
+        write_records_atomic(&target, &records, HISTORY_FILE)
+    }
+
+    fn append_v2_with_limit(
+        &self,
+        record: &ResourceHistoryRecordV2,
+        limit: usize,
+    ) -> Result<(), ResourceHistoryError> {
+        if limit == 0 {
+            return Err(ResourceHistoryError::InvalidLimit);
+        }
+        if record.schema_version != RESOURCE_HISTORY_V2_SCHEMA_VERSION {
+            return Err(ResourceHistoryError::InvalidContext);
+        }
+        record.context.validate()?;
+        ensure_directory(&self.root)?;
+        let target = self.root.join(HISTORY_V2_FILE);
+        reject_symlink_file(&target, MAX_HISTORY_V2_BYTES)?;
+        let mut records = read_records(&target)?;
+        if records.len() > DEFAULT_RESOURCE_HISTORY_V2_RECORDS {
+            return Err(ResourceHistoryError::InvalidHistory);
+        }
+        let keep = limit.saturating_sub(1);
+        if records.len() > keep {
+            records.drain(..records.len() - keep);
+        }
+        records.push(record.clone());
+        write_records_atomic(&target, &records, HISTORY_V2_FILE)
     }
 }
 
 pub fn validate_profile(profile: &str) -> Result<(), ResourceHistoryError> {
-    let bytes = profile.as_bytes();
+    validate_label(profile).map_err(|_| ResourceHistoryError::InvalidProfile)
+}
+
+pub fn validate_label(label: &str) -> Result<(), ResourceHistoryError> {
+    let bytes = label.as_bytes();
     if bytes.is_empty()
         || bytes.len() > MAX_PROFILE_BYTES
         || !bytes[0].is_ascii_alphanumeric()
@@ -172,7 +356,7 @@ pub fn validate_profile(profile: &str) -> Result<(), ResourceHistoryError> {
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err(ResourceHistoryError::InvalidProfile);
+        return Err(ResourceHistoryError::InvalidContext);
     }
     Ok(())
 }
@@ -241,21 +425,19 @@ fn reject_symlink_components(path: &Path) -> Result<(), ResourceHistoryError> {
     Ok(())
 }
 
-fn reject_symlink_file(path: &Path) -> Result<(), ResourceHistoryError> {
+fn reject_symlink_file(path: &Path, max_bytes: u64) -> Result<(), ResourceHistoryError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             Err(ResourceHistoryError::UnsafePath)
         }
-        Ok(metadata) if metadata.len() > MAX_HISTORY_BYTES => {
-            Err(ResourceHistoryError::HistoryTooLarge)
-        }
+        Ok(metadata) if metadata.len() > max_bytes => Err(ResourceHistoryError::HistoryTooLarge),
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(ResourceHistoryError::Io(error)),
     }
 }
 
-fn read_records(path: &Path) -> Result<Vec<ResourceHistoryRecordV1>, ResourceHistoryError> {
+fn read_records<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, ResourceHistoryError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -268,16 +450,17 @@ fn read_records(path: &Path) -> Result<Vec<ResourceHistoryRecordV1>, ResourceHis
         .collect()
 }
 
-fn write_records_atomic(
+fn write_records_atomic<T: Serialize>(
     target: &Path,
-    records: &[ResourceHistoryRecordV1],
+    records: &[T],
+    history_file: &str,
 ) -> Result<(), ResourceHistoryError> {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = target.with_file_name(format!(
-        ".{HISTORY_FILE}.tmp-{}-{sequence}",
+        ".{history_file}.tmp-{}-{sequence}",
         std::process::id()
     ));
-    reject_symlink_file(&temporary)?;
+    reject_symlink_file(&temporary, MAX_HISTORY_V2_BYTES)?;
     let result = (|| {
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -305,6 +488,7 @@ pub enum ResourceHistoryError {
     NoPersistentDefault,
     UnsafePath,
     InvalidProfile,
+    InvalidContext,
     InvalidLimit,
     InvalidHistory,
     HistoryTooLarge,
@@ -320,6 +504,7 @@ impl fmt::Display for ResourceHistoryError {
             }
             Self::UnsafePath => formatter.write_str("resource history path is unsafe"),
             Self::InvalidProfile => formatter.write_str("resource profile is invalid"),
+            Self::InvalidContext => formatter.write_str("resource execution context is invalid"),
             Self::InvalidLimit => formatter.write_str("resource history limit is invalid"),
             Self::InvalidHistory => formatter.write_str("resource history is invalid"),
             Self::HistoryTooLarge => formatter.write_str("resource history exceeds its size limit"),
@@ -383,6 +568,33 @@ mod tests {
         .expect("record")
     }
 
+    fn context(profile: &str) -> ResourceExecutionContextV2 {
+        ResourceExecutionContextV2 {
+            profile: profile.to_owned(),
+            workload_family: "pipeline-a-v1".to_owned(),
+            executor: ResourceExecutorV2::Orbstack,
+            cache_state: ResourceCacheStateV2::Warm,
+            execution_mode: ResourceExecutionModeV2::Emulated,
+            target_platform: Some("linux-amd64".to_owned()),
+            requested_cpu_millis: Some(2_000),
+            requested_memory_bytes: Some(8 * 1024 * 1024 * 1024),
+        }
+    }
+
+    fn record_v2(profile: &str, started: u64) -> ResourceHistoryRecordV2 {
+        let observation = ResourceObservation::new(snapshot(10_000));
+        observation.record(&snapshot(11_000));
+        ResourceHistoryRecordV2::from_summary(
+            context(profile),
+            started,
+            500,
+            ResourceRunOutcome::Completed,
+            None,
+            &observation.summary().expect("summary"),
+        )
+        .expect("record")
+    }
+
     #[test]
     fn profile_is_bounded_and_machine_safe() {
         for valid in ["guard-exec", "matryca_ready", "A1"] {
@@ -395,6 +607,34 @@ mod tests {
             ));
         }
         assert!(validate_profile(&"a".repeat(MAX_PROFILE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn v2_context_is_bounded_and_rejects_zero_limits() {
+        context("ready").validate().expect("valid context");
+        for invalid in [
+            ResourceExecutionContextV2 {
+                workload_family: "repository/path".to_owned(),
+                ..context("ready")
+            },
+            ResourceExecutionContextV2 {
+                target_platform: Some("linux/amd64".to_owned()),
+                ..context("ready")
+            },
+            ResourceExecutionContextV2 {
+                requested_cpu_millis: Some(0),
+                ..context("ready")
+            },
+            ResourceExecutionContextV2 {
+                requested_memory_bytes: Some(0),
+                ..context("ready")
+            },
+        ] {
+            assert!(matches!(
+                invalid.validate(),
+                Err(ResourceHistoryError::InvalidContext)
+            ));
+        }
     }
 
     #[test]
@@ -418,6 +658,96 @@ mod tests {
         assert!(!text.contains("command"));
         assert!(!text.contains("repository"));
         assert!(!text.contains("path"));
+        fs::remove_dir_all(root).expect("cleanup owned fixture");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn append_v2_is_separate_bounded_and_privacy_minimized() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fixture_root("rotation-v2");
+        let store = ResourceHistoryStore::at(root.clone()).expect("store");
+        for started in 1..=4 {
+            store
+                .append_v2_with_limit(&record_v2("ready", started), 3)
+                .expect("append");
+        }
+        let text = fs::read_to_string(root.join(HISTORY_V2_FILE)).expect("history");
+        let records = text
+            .lines()
+            .map(|line| serde_json::from_str::<ResourceHistoryRecordV2>(line).expect("json"))
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].started_at_unix_seconds, 2);
+        assert_eq!(records[2].started_at_unix_seconds, 4);
+        assert_eq!(records[0].schema_version, "2.0");
+        assert_eq!(records[0].context.executor, ResourceExecutorV2::Orbstack);
+        assert_eq!(records[0].context.requested_cpu_millis, Some(2_000));
+        assert_eq!(
+            fs::metadata(root.join(HISTORY_V2_FILE))
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(!root.join(HISTORY_FILE).exists());
+        for excluded in ["command", "repository", "commit", "hostname", "username"] {
+            assert!(!text.contains(excluded));
+        }
+        fs::remove_dir_all(root).expect("cleanup owned fixture");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn append_v2_revalidates_caller_constructed_records() {
+        let root = fixture_root("invalid-v2");
+        let store = ResourceHistoryStore::at(root.clone()).expect("store");
+        let mut invalid_schema = record_v2("ready", 1);
+        invalid_schema.schema_version = "future".to_owned();
+        assert!(matches!(
+            store.append_v2(&invalid_schema),
+            Err(ResourceHistoryError::InvalidContext)
+        ));
+        let mut invalid_context = record_v2("ready", 2);
+        invalid_context.context.workload_family = "repo/path".to_owned();
+        assert!(matches!(
+            store.append_v2(&invalid_context),
+            Err(ResourceHistoryError::InvalidContext)
+        ));
+        assert!(!root.join(HISTORY_V2_FILE).exists());
+        if root.exists() {
+            fs::remove_dir_all(root).expect("cleanup owned fixture");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn report_v2_is_read_only_bounded_and_strict() {
+        let root = fixture_root("report-v2");
+        let store = ResourceHistoryStore::at(root.clone()).expect("store");
+        let empty = store.report_v2().expect("empty report");
+        assert_eq!(empty.schema_version, "2.0");
+        assert_eq!(empty.record_count, 0);
+
+        store.append_v2(&record_v2("ready", 7)).expect("append");
+        let report = store.report_v2().expect("report");
+        assert_eq!(report.record_count, 1);
+        assert_eq!(report.records[0].started_at_unix_seconds, 7);
+
+        let history = root.join(HISTORY_V2_FILE);
+        let mut invalid = record_v2("ready", 8);
+        invalid.schema_version = "future".to_owned();
+        fs::write(
+            &history,
+            format!("{}\n", serde_json::to_string(&invalid).unwrap()),
+        )
+        .expect("invalid fixture");
+        assert!(matches!(
+            store.report_v2(),
+            Err(ResourceHistoryError::InvalidHistory)
+        ));
         fs::remove_dir_all(root).expect("cleanup owned fixture");
     }
 

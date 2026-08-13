@@ -119,6 +119,13 @@ without guessing. [RESOURCE_OBSERVATION_HISTORY.md](RESOURCE_OBSERVATION_HISTORY
 is the controlling scope, privacy and qualification contract. Any forecast or
 threshold change remains blocked by its separate owner gate.
 
+Resource history v2 additionally provides bounded workload/executor context so
+samples from different launchers are not mixed. Adoption remains cooperative:
+each official launcher must use `guard exec`, and direct container-runtime
+processes are explicitly outside coverage. The audited inventory and rollout
+contract live in
+[ORBSTACK_TELEMETRY_COVERAGE.md](ORBSTACK_TELEMETRY_COVERAGE.md).
+
 ## Delivery sequence
 
 Each tranche is a separate pull request unless a smaller prerequisite is

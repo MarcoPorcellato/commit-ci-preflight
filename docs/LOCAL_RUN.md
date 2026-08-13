@@ -64,11 +64,14 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 12. Mark cache entries complete only when every check passes.
 13. Seal and atomically write the canonical receipt.
 
-For `guard exec` on macOS, pass `--resource-profile <class>` to classify an
-admitted workload without exposing repository or command identity. The
-watchdog then summarizes baseline and extrema into the persistent local file
-`~/Library/Application Support/commit-ci-preflight/resource-history-v1.jsonl`.
-At most 100 records are retained. History is observation-only, never enters a
+For `guard exec` on macOS, pass `--resource-profile <class>` and a stable
+`--resource-workload-family <cohort>` to classify an admitted workload without
+exposing repository or command identity. Official indirect launchers should
+also declare executor, cache state, execution mode, target platform and known
+requested CPU/memory limits. The watchdog summarizes baseline and extrema into
+the persistent local file
+`~/Library/Application Support/commit-ci-preflight/resource-history-v2.jsonl`.
+At most 500 records are retained. History is observation-only, never enters a
 receipt, never changes a policy decision and can be disabled with
 `--no-resource-history`. See
 [RESOURCE_OBSERVATION_HISTORY.md](RESOURCE_OBSERVATION_HISTORY.md) for the
@@ -78,6 +81,8 @@ changes only the history location.
 Admission is intentionally non-reentrant. Do not use `guard exec` around a
 workflow that invokes CCP guarded commands internally; split the outer workflow
 or run CCP's own integration suite directly after a successful resource probe.
+Only commands supervised by `guard exec` are covered. A direct Docker or
+OrbStack invocation that bypasses CCP remains outside this telemetry contract.
 
 A command failure or timeout is `FAIL`. A dependency skip, cancellation before
 execution, or uncertain runtime execution is `NOT_RUN` and makes required
@@ -123,6 +128,8 @@ workspace lock reported after a forced stop.
 
 `resource status --json` is read-only. It never reports usernames, absolute
 paths, commands, repository names, process inventory, or secrets.
+`resource history --json` is likewise read-only and returns only the strict
+privacy-minimized v2 records already written by admitted `guard exec` runs.
 
 ## Local evidence captured on 2026-08-09
 
