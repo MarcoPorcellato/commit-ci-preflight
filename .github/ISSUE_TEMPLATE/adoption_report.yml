@@ -1,0 +1,59 @@
+name: "Adoption report"
+description: "Document real repository adoption evidence and constraints."
+title: "adoption: "
+labels:
+  - adoption
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for concrete adoption feedback after trial in a separate repository.
+        Include only verified claims with exact evidence locations.
+
+        Native release qualification for a platform is evidence-based and should not be implied.
+
+  - type: input
+    id: repository
+    attributes:
+      label: Repository
+      description: Which repository adopted Commit CI Preflight?
+      placeholder: owner/repo
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform tested
+      description: Exact platform and runner class used.
+      placeholder: "macOS arm64 via OrbStack"
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence summary
+      description: Cite command outputs, receipts, and platform results in one place.
+      placeholder: |
+        - commit hash:
+        - receipt path:
+        - verifier result:
+    validations:
+      required: true
+
+  - type: textarea
+    id: blockers
+    attributes:
+      label: Remaining constraints
+      description: Known blockers before stable adoption.
+
+  - type: checkboxes
+    id: safety_checks
+    attributes:
+      label: Evidence and claim safety
+      options:
+        - label: "This report contains no deployment, signed attestation, or cost claims."
+          required: true
+        - label: "I can share repository-local references (no secrets) for verification."
+          required: true

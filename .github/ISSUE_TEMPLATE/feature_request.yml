@@ -1,0 +1,65 @@
+name: "Feature request"
+description: "Propose a new capability that improves positioning, adoption, or evidence quality."
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Proposals should state practical user benefit before architecture details.
+
+        We cannot claim parity with all local runners, marketplace actions, or hosted
+        runners. Describe where this request fits inside the current proof-carrying CI
+        split.
+
+  - type: textarea
+    id: problem_statement
+    attributes:
+      label: Problem this request solves
+      description: Explain the user problem in one paragraph.
+      placeholder: "Current workflow still requires..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed implementation
+      description: Describe the concrete change request (commands, files, UX, or docs).
+      placeholder: "Add ... with ... and ... output."
+    validations:
+      required: true
+
+  - type: textarea
+    id: success_criteria
+    attributes:
+      label: Acceptance criteria
+      description: Concrete conditions under which you will accept this change.
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: impact_scope
+    attributes:
+      label: Scope
+      description: Choose expected impact level.
+      options:
+        - Documentation and onboarding
+        - Repository policy and contribution workflow
+        - Product trust boundary messaging
+        - Unknown
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope_hygiene
+    attributes:
+      label: Claim hygiene
+      options:
+        - label: "The proposal does not claim unsupported delivery commitments."
+          required: true
+        - label: "The proposal includes only claims that can be tied to repository docs, fixtures, or tests."
