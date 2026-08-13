@@ -130,7 +130,7 @@ Deliverables:
 - add a compact, assumption-labeled cost illustration (with formulas and no
   universal savings claim);
 - add a concise A0 trust/non-claim summary before deep architecture and
-  component details; 
+  component details;
 - add a five-minute read-only first-inspection path using only documented,
   existing commands and examples; keep real execution in the isolated
   clean-room tutorial until one-command adoption exists;
