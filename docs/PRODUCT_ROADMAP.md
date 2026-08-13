@@ -112,6 +112,13 @@ Admission, watchdog, and resource protection remain supported as agent-safe
 local execution infrastructure, but receive no new features until the product
 activation and distribution gates below are complete.
 
+Owner-authorized safety exception (2026-08-13): observation-only local resource
+history may proceed before those gates because it changes no admission or
+watchdog decision and supplies the evidence needed to evaluate a future policy
+without guessing. [RESOURCE_OBSERVATION_HISTORY.md](RESOURCE_OBSERVATION_HISTORY.md)
+is the controlling scope, privacy and qualification contract. Any forecast or
+threshold change remains blocked by its separate owner gate.
+
 ## Delivery sequence
 
 Each tranche is a separate pull request unless a smaller prerequisite is

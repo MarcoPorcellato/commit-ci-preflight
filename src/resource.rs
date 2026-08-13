@@ -108,6 +108,58 @@ pub struct ResourceSnapshot {
     pub swap_total_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceObservationSummary {
+    pub baseline: ResourceSnapshot,
+    pub sample_count: u64,
+    pub minimum_available_percent: u8,
+    pub minimum_reclaimable_uncompressed_bytes: u64,
+    pub maximum_compressor_occupied_bytes: u64,
+    pub maximum_swap_used_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResourceObservation {
+    summary: Arc<Mutex<ResourceObservationSummary>>,
+}
+
+impl ResourceObservation {
+    pub fn new(baseline: ResourceSnapshot) -> Self {
+        Self {
+            summary: Arc::new(Mutex::new(ResourceObservationSummary {
+                sample_count: 1,
+                minimum_available_percent: baseline.available_percent,
+                minimum_reclaimable_uncompressed_bytes: baseline.reclaimable_uncompressed_bytes,
+                maximum_compressor_occupied_bytes: baseline.compressor_occupied_bytes,
+                maximum_swap_used_bytes: baseline.swap_used_bytes,
+                baseline,
+            })),
+        }
+    }
+
+    pub fn record(&self, snapshot: &ResourceSnapshot) {
+        if let Ok(mut summary) = self.summary.lock() {
+            summary.sample_count = summary.sample_count.saturating_add(1);
+            summary.minimum_available_percent = summary
+                .minimum_available_percent
+                .min(snapshot.available_percent);
+            summary.minimum_reclaimable_uncompressed_bytes = summary
+                .minimum_reclaimable_uncompressed_bytes
+                .min(snapshot.reclaimable_uncompressed_bytes);
+            summary.maximum_compressor_occupied_bytes = summary
+                .maximum_compressor_occupied_bytes
+                .max(snapshot.compressor_occupied_bytes);
+            summary.maximum_swap_used_bytes = summary
+                .maximum_swap_used_bytes
+                .max(snapshot.swap_used_bytes);
+        }
+    }
+
+    pub fn summary(&self) -> Option<ResourceObservationSummary> {
+        self.summary.lock().ok().map(|summary| summary.clone())
+    }
+}
+
 impl ResourceSnapshot {
     pub fn validate(&self) -> Result<(), ResourceProbeError> {
         if self.available_percent > MAX_PERCENT
@@ -374,10 +426,32 @@ impl ResourceWatchdog {
         Self::start_with_interval(probe, cancellation, WATCHDOG_SAMPLE_INTERVAL)
     }
 
+    pub fn start_observed<R: ResourceCommandRunner + 'static>(
+        probe: ResourceProbe<R>,
+        cancellation: CancellationToken,
+        observation: ResourceObservation,
+    ) -> Self {
+        Self::start_with_interval_and_observation(
+            probe,
+            cancellation,
+            WATCHDOG_SAMPLE_INTERVAL,
+            Some(observation),
+        )
+    }
+
     pub fn start_with_interval<R: ResourceCommandRunner + 'static>(
         probe: ResourceProbe<R>,
         cancellation: CancellationToken,
         interval: Duration,
+    ) -> Self {
+        Self::start_with_interval_and_observation(probe, cancellation, interval, None)
+    }
+
+    fn start_with_interval_and_observation<R: ResourceCommandRunner + 'static>(
+        probe: ResourceProbe<R>,
+        cancellation: CancellationToken,
+        interval: Duration,
+        observation: Option<ResourceObservation>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let trip = Arc::new(Mutex::new(None));
@@ -394,7 +468,12 @@ impl ResourceWatchdog {
                     break;
                 }
                 let decision = match probe.sample() {
-                    Ok(snapshot) => state.observe(&snapshot),
+                    Ok(snapshot) => {
+                        if let Some(observation) = &observation {
+                            observation.record(&snapshot);
+                        }
+                        state.observe(&snapshot)
+                    }
                     Err(ResourceProbeError::Cancelled) => Ok(WatchdogDecision::Continue),
                     Err(_) => Ok(WatchdogDecision::Tripped(WatchdogTripReason::ProbeFailure)),
                 };
@@ -744,6 +823,36 @@ mod tests {
 
     fn percent_ceiling(total: u64, percent: u64) -> u64 {
         (total * percent).div_ceil(100)
+    }
+
+    #[test]
+    fn observation_tracks_only_bounded_extrema() {
+        let baseline = snapshot();
+        let observation = ResourceObservation::new(baseline.clone());
+        let mut first = baseline.clone();
+        first.available_percent = 42;
+        first.reclaimable_uncompressed_bytes -= 100;
+        first.compressor_occupied_bytes += 200;
+        first.swap_used_bytes += 300;
+        observation.record(&first);
+        let mut second = baseline.clone();
+        second.available_percent = 47;
+        second.reclaimable_uncompressed_bytes -= 50;
+        second.compressor_occupied_bytes += 100;
+        second.swap_used_bytes += 150;
+        observation.record(&second);
+
+        assert_eq!(
+            observation.summary().expect("observation summary"),
+            ResourceObservationSummary {
+                baseline,
+                sample_count: 3,
+                minimum_available_percent: 42,
+                minimum_reclaimable_uncompressed_bytes: first.reclaimable_uncompressed_bytes,
+                maximum_compressor_occupied_bytes: first.compressor_occupied_bytes,
+                maximum_swap_used_bytes: first.swap_used_bytes,
+            }
+        );
     }
 
     #[test]

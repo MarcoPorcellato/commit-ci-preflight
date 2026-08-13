@@ -33,6 +33,10 @@ Semantic Versioning after its first public release.
   watchdog with typed resource-pressure cancellation.
 - Read-only `resource status --json`; Linux and Windows explicitly report
   `unsupported_not_enforced` for resource protection.
+- Observation-only macOS `guard exec` resource history with bounded workload
+  profiles, baseline/extrema summaries, deterministic outcomes, private atomic
+  JSONL persistence and 100-record rotation. It does not alter admission,
+  watchdog, receipts or remote execution.
 
 ### Changed
 
@@ -42,8 +46,9 @@ Semantic Versioning after its first public release.
 
 ### Not Yet Included
 
-- Admission and resource evidence integration into receipts remains deferred;
-  `benchmark` mid-workload resource watchdog coverage also remains deferred.
+- Predictive admission, `run`/`benchmark` history, container peak/stage metadata,
+  admission and resource evidence integration into receipts, and `benchmark`
+  mid-workload watchdog coverage remain deferred.
 
 ### Fixed
 

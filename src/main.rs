@@ -18,7 +18,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use commit_ci_preflight::admission::{
@@ -34,14 +34,18 @@ use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
 };
 use commit_ci_preflight::process::{
-    CancellationToken, GenerationGuard, OutputMode, ProcessRequest, ProcessResult,
-    ProcessSupervisor, ProcessTermination, RunIdentity, SupervisorPort,
+    CancellationReason, CancellationToken, GenerationGuard, OutputMode, ProcessRequest,
+    ProcessResult, ProcessSupervisor, ProcessTermination, RunIdentity, SupervisorPort,
 };
 use commit_ci_preflight::receipt::{CheckEvidence, EvidenceStatus};
 use commit_ci_preflight::resource::{
-    ResourceGuardError, ResourcePlatform, ResourceProbe, ResourceProbeError, ResourceWatchdog,
-    SupervisorResourceRunner, WatchdogTripReason, evaluate_pre_start, status_from_snapshot,
-    unknown_status, unsupported_status,
+    ResourceGuardError, ResourceObservation, ResourcePlatform, ResourceProbe, ResourceProbeError,
+    ResourceSnapshot, ResourceWatchdog, SupervisorResourceRunner, WatchdogTripReason,
+    evaluate_pre_start, status_from_snapshot, unknown_status, unsupported_status,
+};
+use commit_ci_preflight::resource_history::{
+    DEFAULT_RESOURCE_PROFILE, ResourceHistoryRecordV1, ResourceHistoryStore, ResourceRunOutcome,
+    validate_profile,
 };
 use commit_ci_preflight::run::{
     CompletionBarrier, RunError, RunRequest, SystemClock, execute_local_run_with_barrier,
@@ -229,6 +233,12 @@ struct GuardExecArgs {
     /// Maximum child runtime in seconds, capped at 24 hours.
     #[arg(long, default_value_t = GUARD_EXEC_DEFAULT_TIMEOUT.as_secs())]
     timeout_seconds: u64,
+    /// Stable, non-sensitive workload class used only by local resource history.
+    #[arg(long, default_value = DEFAULT_RESOURCE_PROFILE)]
+    resource_profile: String,
+    /// Disable local observation history without changing admission or watchdog behavior.
+    #[arg(long)]
+    no_resource_history: bool,
     /// Program and arguments. The `--` separator is required.
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     argv: Vec<OsString>,
@@ -401,7 +411,7 @@ fn print_benchmark(
         )
         .map_err(CliError::Admission)?;
     let result = resource_pre_start(supervisor.clone(), &cancellation)
-        .and_then(|()| run_benchmark(commit, runtime_probe.as_ref()).map_err(CliError::Benchmark));
+        .and_then(|_| run_benchmark(commit, runtime_probe.as_ref()).map_err(CliError::Benchmark));
     let envelope = release_admission(guard, result)?;
     if let Some(path) = output {
         write_new_receipt(path, &envelope).map_err(CliError::Benchmark)?;
@@ -442,6 +452,8 @@ fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
     if args.argv.is_empty() {
         return Err(CliError::Guard(GuardExecError::MissingProgram));
     }
+    validate_profile(&args.resource_profile)
+        .map_err(|_| CliError::Guard(GuardExecError::InvalidResourceProfile))?;
     let current_dir = fs::canonicalize(".")
         .map_err(|_| CliError::Guard(GuardExecError::InvalidCurrentDirectory))?;
     if !current_dir.is_dir() {
@@ -453,15 +465,21 @@ fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
     let supervisor = Arc::new(ProcessSupervisor::standard());
     let mut session = GuardExecSession::acquire(&cancellation, admission_timeout)?;
 
-    if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
-        let result = session.finish(Err(GuardExecError::from_cli(error)), &cancellation);
-        return result.map(|_| ()).map_err(CliError::Guard);
-    }
+    let baseline = match resource_pre_start(supervisor.clone(), &cancellation) {
+        Ok(baseline) => baseline,
+        Err(error) => {
+            let result = session.finish(Err(GuardExecError::from_cli(error)), &cancellation);
+            return result.map(|_| ()).map_err(CliError::Guard);
+        }
+    };
 
     session.start_watchdog(
         Arc::clone(&supervisor),
         current_dir.clone(),
         cancellation.clone(),
+        baseline,
+        args.resource_profile,
+        !args.no_resource_history,
     );
 
     let mut argv = args.argv;
@@ -937,9 +955,9 @@ fn print_resource_status(json: bool) -> Result<(), CliError> {
 fn resource_pre_start(
     supervisor: Arc<ProcessSupervisor>,
     cancellation: &CancellationToken,
-) -> Result<(), CliError> {
+) -> Result<Option<ResourceSnapshot>, CliError> {
     if ResourcePlatform::current() != ResourcePlatform::MacOs {
-        return Ok(());
+        return Ok(None);
     }
     let current_dir = std::env::current_dir().map_err(CliError::internal)?;
     let runner = SupervisorResourceRunner::new(supervisor, current_dir, cancellation.clone());
@@ -949,7 +967,7 @@ fn resource_pre_start(
     match evaluate_pre_start(&snapshot)
         .map_err(|error| CliError::Resource(ResourceGuardError::Probe(error)))?
     {
-        commit_ci_preflight::resource::PreStartDecision::Admit => Ok(()),
+        commit_ci_preflight::resource::PreStartDecision::Admit => Ok(Some(snapshot)),
         commit_ci_preflight::resource::PreStartDecision::Deny => {
             Err(CliError::Resource(ResourceGuardError::PreStartDenied))
         }
@@ -967,6 +985,44 @@ fn release_admission<T>(guard: AdmissionGuard, result: Result<T, CliError>) -> R
 struct GuardExecSession {
     admission: Option<AdmissionGuard>,
     watchdog: WatchdogCompletionBarrier,
+    resource_observation: Option<GuardResourceObservation>,
+}
+
+struct GuardResourceObservation {
+    observation: ResourceObservation,
+    store: ResourceHistoryStore,
+    profile: String,
+    started_at_unix_seconds: u64,
+    started_at: Instant,
+}
+
+impl GuardResourceObservation {
+    fn persist(
+        self,
+        outcome: ResourceRunOutcome,
+        watchdog_trip_reason: Option<WatchdogTripReason>,
+    ) {
+        let Some(summary) = self.observation.summary() else {
+            eprintln!("warning: local resource observation could not be summarized");
+            return;
+        };
+        let duration_milliseconds =
+            u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let record = ResourceHistoryRecordV1::from_summary(
+            &self.profile,
+            self.started_at_unix_seconds,
+            duration_milliseconds,
+            outcome,
+            watchdog_trip_reason,
+            &summary,
+        );
+        if record
+            .and_then(|record| self.store.append(&record))
+            .is_err()
+        {
+            eprintln!("warning: local resource history could not be updated");
+        }
+    }
 }
 
 impl GuardExecSession {
@@ -981,6 +1037,7 @@ impl GuardExecSession {
         Ok(Self {
             admission: Some(guard),
             watchdog: WatchdogCompletionBarrier::new(None),
+            resource_observation: None,
         })
     }
 
@@ -989,14 +1046,42 @@ impl GuardExecSession {
         supervisor: Arc<ProcessSupervisor>,
         current_dir: PathBuf,
         cancellation: CancellationToken,
+        baseline: Option<ResourceSnapshot>,
+        profile: String,
+        history_enabled: bool,
     ) {
         if ResourcePlatform::current() == ResourcePlatform::MacOs {
+            let runner =
+                SupervisorResourceRunner::new(supervisor, current_dir, cancellation.clone());
+            if history_enabled && let Some(baseline) = baseline {
+                match ResourceHistoryStore::platform() {
+                    Ok(store) => {
+                        let observation = ResourceObservation::new(baseline);
+                        self.watchdog =
+                            WatchdogCompletionBarrier::new(Some(ResourceWatchdog::start_observed(
+                                ResourceProbe::new(runner),
+                                cancellation,
+                                observation.clone(),
+                            )));
+                        self.resource_observation = Some(GuardResourceObservation {
+                            observation,
+                            store,
+                            profile,
+                            started_at_unix_seconds: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            started_at: Instant::now(),
+                        });
+                        return;
+                    }
+                    Err(_) => {
+                        eprintln!("warning: local resource history is unavailable");
+                    }
+                }
+            }
             self.watchdog = WatchdogCompletionBarrier::new(Some(ResourceWatchdog::start(
-                ResourceProbe::new(SupervisorResourceRunner::new(
-                    supervisor,
-                    current_dir,
-                    cancellation.clone(),
-                )),
+                ResourceProbe::new(runner),
                 cancellation,
             )));
         }
@@ -1008,6 +1093,10 @@ impl GuardExecSession {
         cancellation: &CancellationToken,
     ) -> Result<ProcessResult, GuardExecError> {
         self.watchdog.ensure_joined();
+        let trip = self.watchdog.trip();
+        if let Some(observation) = self.resource_observation.take() {
+            observation.persist(resource_run_outcome(&result, cancellation, trip), trip);
+        }
         let guard = self
             .admission
             .take()
@@ -1016,9 +1105,51 @@ impl GuardExecSession {
             result,
             cancellation,
             self.watchdog.take_join_error(),
-            self.watchdog.trip(),
+            trip,
             || guard.release().map_err(GuardExecError::Admission),
         )
+    }
+}
+
+fn resource_run_outcome(
+    result: &Result<ProcessResult, GuardExecError>,
+    cancellation: &CancellationToken,
+    trip: Option<WatchdogTripReason>,
+) -> ResourceRunOutcome {
+    if trip.is_some() || cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+        return ResourceRunOutcome::ResourcePressure;
+    }
+    if cancellation.reason() == Some(CancellationReason::User)
+        || matches!(
+            result,
+            Ok(ProcessResult {
+                termination: ProcessTermination::Cancelled,
+                ..
+            })
+        )
+    {
+        return ResourceRunOutcome::Cancelled;
+    }
+    if matches!(
+        result,
+        Ok(ProcessResult {
+            termination: ProcessTermination::TimedOut,
+            ..
+        }) | Err(GuardExecError::TimedOut)
+    ) {
+        return ResourceRunOutcome::TimedOut;
+    }
+    if matches!(
+        result,
+        Ok(ProcessResult {
+            termination: ProcessTermination::Completed,
+            exit: Some(exit),
+            ..
+        }) if exit.success
+    ) {
+        ResourceRunOutcome::Completed
+    } else {
+        ResourceRunOutcome::Failed
     }
 }
 
@@ -1233,6 +1364,7 @@ enum GuardExecError {
     InvalidAdmissionTimeout,
     InvalidTimeout,
     MissingProgram,
+    InvalidResourceProfile,
     InvalidCurrentDirectory,
     Admission(AdmissionError),
     Resource(ResourceGuardError),
@@ -1258,6 +1390,7 @@ impl GuardExecError {
             Self::InvalidAdmissionTimeout
             | Self::InvalidTimeout
             | Self::MissingProgram
+            | Self::InvalidResourceProfile
             | Self::InvalidCurrentDirectory => 2,
             Self::Admission(error) => error.exit_code(),
             Self::Resource(_) | Self::ResourcePressure => 6,
@@ -1280,6 +1413,9 @@ impl fmt::Display for GuardExecError {
                 formatter.write_str("guard exec timeout is outside the allowed range")
             }
             Self::MissingProgram => formatter.write_str("guard exec requires a program after --"),
+            Self::InvalidResourceProfile => formatter.write_str(
+                "guard exec resource profile must be 1-64 ASCII letters, digits, hyphens or underscores",
+            ),
             Self::InvalidCurrentDirectory => {
                 formatter.write_str("guard exec current directory could not be canonicalized")
             }
@@ -1420,7 +1556,7 @@ impl std::error::Error for CliMessageError {}
 mod tests {
     use super::{
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, WatchdogCompletionBarrier,
-        finalize_guard_exec_result, reconcile_watchdog_outcome,
+        finalize_guard_exec_result, reconcile_watchdog_outcome, resource_run_outcome,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::process::CancellationToken;
@@ -1469,6 +1605,8 @@ mod tests {
                     super::GUARD_EXEC_DEFAULT_TIMEOUT.as_secs()
                 );
                 assert_eq!(args.timeout_seconds, 1);
+                assert_eq!(args.resource_profile, super::DEFAULT_RESOURCE_PROFILE);
+                assert!(!args.no_resource_history);
                 assert_eq!(
                     args.argv,
                     vec![OsString::from("echo"), OsString::from("hello")]
@@ -1548,6 +1686,8 @@ mod tests {
         GuardExecArgs {
             admission_timeout_seconds: 1,
             timeout_seconds: 1,
+            resource_profile: super::DEFAULT_RESOURCE_PROFILE.to_owned(),
+            no_resource_history: false,
             argv: vec![OsString::from("fixture")],
         }
     }
@@ -1630,6 +1770,55 @@ mod tests {
             super::print_guard_exec(over_cap_child),
             Err(CliError::Guard(GuardExecError::InvalidTimeout))
         ));
+    }
+
+    #[test]
+    fn guard_exec_rejects_invalid_resource_profile_before_admission() {
+        let invalid = GuardExecArgs {
+            resource_profile: "repository/path".to_owned(),
+            ..guard_exec_args()
+        };
+        assert!(matches!(
+            super::print_guard_exec(invalid),
+            Err(CliError::Guard(GuardExecError::InvalidResourceProfile))
+        ));
+    }
+
+    #[test]
+    fn resource_observation_outcome_is_deterministic() {
+        let cancellation = CancellationToken::default();
+        assert_eq!(
+            resource_run_outcome(&Ok(completed_process_result()), &cancellation, None),
+            commit_ci_preflight::resource_history::ResourceRunOutcome::Completed
+        );
+
+        let mut failed = completed_process_result();
+        failed.exit = Some(ExitOutcome {
+            success: false,
+            code: Some(1),
+        });
+        assert_eq!(
+            resource_run_outcome(&Ok(failed), &cancellation, None),
+            commit_ci_preflight::resource_history::ResourceRunOutcome::Failed
+        );
+
+        let user_cancelled = CancellationToken::default();
+        user_cancelled.cancel();
+        assert_eq!(
+            resource_run_outcome(&Ok(completed_process_result()), &user_cancelled, None,),
+            commit_ci_preflight::resource_history::ResourceRunOutcome::Cancelled
+        );
+
+        let resource_cancelled = CancellationToken::default();
+        resource_cancelled.cancel_resource_pressure();
+        assert_eq!(
+            resource_run_outcome(
+                &Err(GuardExecError::ResourcePressure),
+                &resource_cancelled,
+                None,
+            ),
+            commit_ci_preflight::resource_history::ResourceRunOutcome::ResourcePressure
+        );
     }
 
     struct FailingResourceRunner;

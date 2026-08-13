@@ -64,6 +64,21 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 12. Mark cache entries complete only when every check passes.
 13. Seal and atomically write the canonical receipt.
 
+For `guard exec` on macOS, pass `--resource-profile <class>` to classify an
+admitted workload without exposing repository or command identity. The
+watchdog then summarizes baseline and extrema into the persistent local file
+`~/Library/Application Support/commit-ci-preflight/resource-history-v1.jsonl`.
+At most 100 records are retained. History is observation-only, never enters a
+receipt, never changes a policy decision and can be disabled with
+`--no-resource-history`. See
+[RESOURCE_OBSERVATION_HISTORY.md](RESOURCE_OBSERVATION_HISTORY.md) for the
+schema, privacy boundary, cleanup and forecast gate.
+Tests may isolate storage with an absolute `CCP_RESOURCE_HISTORY_DIR`; this
+changes only the history location.
+Admission is intentionally non-reentrant. Do not use `guard exec` around a
+workflow that invokes CCP guarded commands internally; split the outer workflow
+or run CCP's own integration suite directly after a successful resource probe.
+
 A command failure or timeout is `FAIL`. A dependency skip, cancellation before
 execution, or uncertain runtime execution is `NOT_RUN` and makes required
 evidence `PENDING`. Cleanup uncertainty is an internal error and can never be
