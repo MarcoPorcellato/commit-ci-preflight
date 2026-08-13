@@ -37,6 +37,10 @@ Semantic Versioning after its first public release.
   profiles, baseline/extrema summaries, deterministic outcomes, private atomic
   JSONL persistence and 100-record rotation. It does not alter admission,
   watchdog, receipts or remote execution.
+- Privacy-minimized resource history v2 with stable workload families,
+  executor/cache/execution-mode/target classifications, optional requested
+  limits, 500-record rotation, direct OrbStack detection, and an explicit
+  cross-repository coverage/adoption inventory. Legacy v1 data is untouched.
 
 ### Changed
 
@@ -47,6 +51,7 @@ Semantic Versioning after its first public release.
 ### Not Yet Included
 
 - Predictive admission, `run`/`benchmark` history, container peak/stage metadata,
+  observation of direct runtime processes that bypass `guard exec`,
   admission and resource evidence integration into receipts, and `benchmark`
   mid-workload watchdog coverage remain deferred.
 

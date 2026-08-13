@@ -124,16 +124,29 @@ commit-ci-preflight guard exec \
   --admission-timeout-seconds 21600 \
   --timeout-seconds 21600 \
   --resource-profile ready \
+  --resource-workload-family brain-linux-ci-v1 \
+  --resource-executor orbstack \
+  --resource-execution-mode emulated \
+  --resource-target-platform linux-amd64 \
   -- make all
 ```
 
 The wrapper never invokes a shell, never creates a receipt, and keeps the
 admission slot until the supervised process tree has stopped. Both waits
 default to six hours for `guard exec` and are capped at 24 hours. On macOS it
-also retains at most 100 local, privacy-bounded resource summaries for the
-declared profile. The history changes no policy decision and can be disabled
+retains at most 500 local, privacy-bounded v2 summaries with workload,
+executor, cache, execution-mode, target and optional requested-limit context.
+The history changes no policy decision and can be disabled
 with `--no-resource-history`; see the
 [resource observation history contract](docs/RESOURCE_OBSERVATION_HISTORY.md).
+Official launchers must pass through `guard exec` to be covered. CCP does not
+claim visibility into direct Docker or OrbStack processes that bypass it; see
+the [coverage and adoption inventory](docs/ORBSTACK_TELEMETRY_COVERAGE.md).
+Inspect the bounded local records without starting work:
+
+```console
+commit-ci-preflight resource history --json
+```
 
 ### 3. Run the clean-room demo
 

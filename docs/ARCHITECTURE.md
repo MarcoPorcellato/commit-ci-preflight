@@ -69,8 +69,10 @@ evidence.
 executes exactly one explicit argv without a shell and does not write receipts.
 After admission, it can attach a bounded observation accumulator to the
 existing watchdog. The accumulator retains only the baseline and extrema, and
-the CLI writes at most 100 strict local records while still holding the
-host-wide slot. Persistence is advisory: failures produce a generic warning
+the CLI writes at most 500 strict v2 local records while still holding the
+host-wide slot. Each v2 record adds a bounded non-sensitive workload family,
+executor, cache state, execution mode, target platform and optional requested
+CPU/memory ceilings. Persistence is advisory: failures produce a generic warning
 without changing process, admission, cancellation or receipt semantics.
 
 On macOS, a fresh strict sample from the absolute system tools is required
@@ -86,10 +88,13 @@ physical RAM. This is only one conjunct of admission: available memory,
 reclaimable uncompressed memory and compressor headroom must also pass. The
 in-run soft and hard watchdog thresholds remain unchanged.
 
-Observation history v1 is not a forecast and has no authority over admission.
+Observation history v2 is not a forecast and has no authority over admission.
 It excludes repository and command identity, remains outside receipts, and is
 never transmitted. The qualification and privacy contract is specified in
 [RESOURCE_OBSERVATION_HISTORY.md](RESOURCE_OBSERVATION_HISTORY.md).
+Coverage is cooperative: official launchers must use `guard exec`. CCP does not
+intercept direct container-runtime processes, as documented in
+[ORBSTACK_TELEMETRY_COVERAGE.md](ORBSTACK_TELEMETRY_COVERAGE.md).
 
 ## Configuration and planning
 
