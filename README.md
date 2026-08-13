@@ -240,6 +240,7 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 ## Documentation
 
 - [Complete adoption guide for another repository](docs/ADOPTION_GUIDE.md)
+- [Proof-carrying CI product roadmap](docs/PRODUCT_ROADMAP.md)
 - [Troubleshooting and safe recovery](docs/TROUBLESHOOTING.md)
 - [Implemented architecture](docs/ARCHITECTURE.md)
 - [Installation and checksums](docs/INSTALLATION.md)

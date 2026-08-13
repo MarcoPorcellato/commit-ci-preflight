@@ -18,6 +18,11 @@ bootstrap commit to a truthful public beta. It is intentionally detailed so a
 capable coding agent can proceed after one explicit owner authorization without
 inventing product, security, licensing, or release decisions along the way.
 
+The beta implementation described here is complete. Productization after the
+beta is governed by [PRODUCT_ROADMAP.md](PRODUCT_ROADMAP.md), which adds staged
+activation, verifier separation, distribution, cost intelligence, Linux
+qualification, identity assurance, and evidence-backed stable-release gates.
+
 ### 1.1 Implementation progress
 
 | Tranche | Status | Evidence |
