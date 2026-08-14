@@ -693,6 +693,8 @@ Before `0.1.0`, maintain:
 - `docs/CACHE_AND_WORKSPACE.md`: persistent locations, ownership, mounts, and preview-only cleanup;
 - `docs/GITHUB_GATE.md`: remote/local responsibility split and exact receipt gate;
 - `docs/BENCHMARK_AND_PARITY.md`: reproducible methodology, cost assumptions, and native receipts;
+- `docs/RELIABILITY_HARDENING_PLAN.md`: current reliability gap register and ordered T0-T11 hardening roadmap;
+- `docs/TESTING_AND_FAULT_INJECTION.md`: deterministic, integration, native, and chaos evidence classes;
 - `docs/adr/`: irreversible and cross-cutting decisions;
 - `CHANGELOG.md`: user-visible evolution.
 

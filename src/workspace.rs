@@ -424,6 +424,7 @@ mod tests {
     use super::*;
     use crate::cache::{CacheRootOptions, PlatformFamily, ResolvedCacheRoot};
     use crate::config::ConfigV1;
+    use std::process::Command;
 
     fn test_root(name: &str) -> PathBuf {
         std::env::var_os("CCP_TEST_ROOT")
@@ -615,6 +616,71 @@ artifacts = ["target/results.json"]
             b"replacement-owner\n"
         );
         fs::remove_file(lock_path).expect("remove exact replacement lock");
+        fs::remove_dir_all(test_root(name)).expect("clean fixture");
+    }
+
+    #[test]
+    fn characterizes_live_repository_bytes_changing_under_same_plan_before_t2() {
+        let name = "live-repository-mutation";
+        let (repository, cache, envelope) = fixture(name);
+        fs::write(
+            repository.join(".gitignore"),
+            b".cache/\ntarget/\nlocal-only-input.txt\n",
+        )
+        .expect("ignore local inputs");
+        fs::write(repository.join("tracked.txt"), b"tracked\n").expect("tracked fixture");
+        for args in [
+            &["init", "--quiet"][..],
+            &["config", "user.name", "CCP Test"][..],
+            &["config", "user.email", "ccp-test@example.invalid"][..],
+            &["add", ".gitignore", "tracked.txt"][..],
+            &["commit", "--quiet", "-m", "fixture"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(&repository)
+                    .args(args)
+                    .status()
+                    .expect("run git fixture command")
+                    .success()
+            );
+        }
+        let head_before = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("read fixture head")
+            .stdout;
+        let ignored_input = repository.join("local-only-input.txt");
+        fs::write(&ignored_input, b"first-local-value").expect("first local input");
+        let first = WorkspacePlanV1::build(&envelope, &repository, &cache).expect("first plan");
+        let first_bytes = fs::read(&ignored_input).expect("first bytes");
+
+        fs::write(&ignored_input, b"second-local-value").expect("mutate local input");
+        let second = WorkspacePlanV1::build(&envelope, &repository, &cache).expect("second plan");
+        let second_bytes = fs::read(&ignored_input).expect("second bytes");
+        let head_after = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("read fixture head")
+            .stdout;
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(["status", "--porcelain"])
+            .output()
+            .expect("read fixture status")
+            .stdout;
+
+        assert_eq!(first, second);
+        assert_ne!(first_bytes, second_bytes);
+        assert_eq!(head_before, head_after);
+        assert!(status.is_empty());
+        assert_eq!(first.mounts[0].source, repository);
         fs::remove_dir_all(test_root(name)).expect("clean fixture");
     }
 }

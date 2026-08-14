@@ -9,6 +9,9 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Reliability-hardening roadmap with six explicit P0 characterization
+  tripwires, an ordered T0-T11 delivery sequence, and a separate deterministic,
+  integration, native, and chaos testing contract.
 - Product roadmap for evolving the beta into proof-carrying CI with staged
   positioning, verifier separation, slim remote verification, distribution,
   one-command adoption, cost intelligence, Linux qualification, signed
