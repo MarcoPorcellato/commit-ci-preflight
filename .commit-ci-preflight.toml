@@ -3,7 +3,7 @@ project = "MarcoPorcellato/commit-ci-preflight"
 
 [runtime]
 kind = "docker_compatible"
-image = "docker.io/library/rust@sha256:a41f7740f8b45d45795624eec13a8b42263cc700f19f7e4e86e04d3dda08a479"
+image = "docker.io/library/rust@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc"
 cpu_count = 4
 memory_mib = 4096
 pids_limit = 512

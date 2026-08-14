@@ -102,14 +102,21 @@ explicit persistent cache root and retain the old one for review.
 
 ## macOS resource guard denies a run
 
-The `macos-v2` guard evaluates swap, available/reclaimable memory, compressor
-pressure, and sample certainty independently. Swap up to the smaller of 10 GiB
-and 30% of physical RAM is only one condition; satisfying it does not override
-the other gates.
+The `macos-v3` guard evaluates swap, available/reclaimable memory, compressor
+pressure, and sample certainty independently. Admission requires at least 20%
+available memory and 3 GiB reclaimable memory, accepts compressor occupancy
+through 40%, and permits swap through the smaller of 8 GiB and 30% of physical
+RAM. Satisfying one condition does not override the others.
 
 ```console
 commit-ci-preflight resource status --json
 ```
+
+The in-run soft watchdog matches pre-start compressor admission: three
+consecutive samples at 40% stop the workload, and
+45% remains an immediate hard stop. A command admitted between those values
+therefore receives only a short recovery window and cannot run indefinitely
+under sustained pressure.
 
 Close or finish memory-heavy work and retry later. Do not modify coordinator
 files, disable the guard, or infer that a machine with free swap is safe. Linux
@@ -187,4 +194,3 @@ Include:
 Keep private source, raw logs, credentials, tokens, environment values, and
 personal paths out of public issues. Security findings belong in the private
 channel described by [SECURITY.md](../SECURITY.md).
-

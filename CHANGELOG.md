@@ -52,6 +52,12 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Pin the repository's live CI contract to the official Rust 1.96.0 Bookworm
+  image so Linux checks have Git while retaining immutable image verification.
+- Version macOS admission as `macos-v3`: require at least 20% available memory,
+  cap pre-start swap at the smaller of 8 GiB and 30% of physical RAM, and admit
+  compressor occupancy through 40% and align the three-sample soft watchdog
+  with that 40% boundary. The immediate 45% hard watchdog remains unchanged.
 - Relax macOS pre-start swap admission to the smaller of 10 GiB and 30% of
   physical RAM, while retaining all independent memory, compressor and in-run
   watchdog protections (`macos-v2`).
@@ -65,6 +71,10 @@ Semantic Versioning after its first public release.
 
 ### Fixed
 
+- Route recovery CLI test fixtures through the declared `CCP_TEST_ROOT` so the
+  Linux CI contract can keep the repository mount read-only.
+- Normalize recovery-journal identifiers to the filesystem-safe 64-hex
+  contract instead of passing the prefixed canonical digest to the journal.
 - Keep the host-wide admission coordinator in its own persistent platform-cache
   root so starting guarded work cannot make the independently managed build
   cache uninitializable or invalid.
