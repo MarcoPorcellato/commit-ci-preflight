@@ -42,13 +42,14 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 3. Acquire the host-wide admission slot for `run`, `benchmark`, or `guard exec`,
    immediately before heavy execution, waiting cooperatively with cancellation
    until the selected timeout.
-4. On macOS, take a fresh strict `macos-v2` host-memory sample after slot
+4. On macOS, take a fresh strict `macos-v3` host-memory sample after slot
    acquisition. Denied, malformed, contradictory, timed-out, or uncertain
    samples release the slot and stop without starting heavy work. Linux and
    Windows report resource protection as unsupported and not enforced.
-   The swap-only pre-start ceiling is the smaller of 10 GiB and 30% of
-   physical RAM, inclusive. Available memory, reclaimable uncompressed memory
-   and compressor limits remain independent mandatory gates.
+   Admission requires at least 20% available memory, 3 GiB reclaimable
+   uncompressed memory, compressor occupancy no higher than 40%, and swap no
+   higher than the smaller of 8 GiB and 30% of physical RAM. Boundaries are
+   inclusive and independently mandatory.
 5. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
    receipt output itself is excluded from this dirty check.
 6. For `run`, probe the Docker-compatible runtime with bounded output and deadline.

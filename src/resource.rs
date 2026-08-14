@@ -27,12 +27,14 @@ use crate::process::{
 };
 
 pub const RESOURCE_SCHEMA_VERSION: &str = "1.0";
-pub const MACOS_POLICY_VERSION: &str = "macos-v2";
+pub const MACOS_POLICY_VERSION: &str = "macos-v3";
 pub const WATCHDOG_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 pub const RESOURCE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 pub const RESOURCE_CAPTURE_BYTES: usize = 65_536;
+pub const MIN_PRESTART_AVAILABLE_PERCENT: u8 = 20;
 pub const MIN_PRESTART_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
-pub const MAX_PRESTART_SWAP_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const MAX_PRESTART_COMPRESSOR_PERCENT: u8 = 40;
+pub const MAX_PRESTART_SWAP_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const HARD_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 pub const SOFT_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -199,12 +201,12 @@ pub fn evaluate_pre_start(
     let proportional_swap_limit = snapshot.total_memory_bytes.saturating_mul(30) / 100;
     let swap_limit = MAX_PRESTART_SWAP_BYTES.min(proportional_swap_limit);
     Ok(
-        if snapshot.available_percent >= 25
+        if snapshot.available_percent >= MIN_PRESTART_AVAILABLE_PERCENT
             && snapshot.reclaimable_uncompressed_bytes >= MIN_PRESTART_FREE_BYTES
             && !ratio_greater_than(
                 snapshot.compressor_occupied_bytes,
                 snapshot.total_memory_bytes,
-                30,
+                MAX_PRESTART_COMPRESSOR_PERCENT,
             )
             && snapshot.swap_used_bytes <= swap_limit
         {
@@ -857,27 +859,33 @@ mod tests {
 
     #[test]
     fn policy_boundaries_are_explicit() {
+        assert_eq!(MACOS_POLICY_VERSION, "macos-v3");
+        assert_eq!(MIN_PRESTART_AVAILABLE_PERCENT, 20);
+        assert_eq!(MAX_PRESTART_COMPRESSOR_PERCENT, 40);
+        assert_eq!(MAX_PRESTART_SWAP_BYTES, 8 * 1024 * 1024 * 1024);
         assert_eq!(
             evaluate_pre_start(&snapshot()).expect("admit"),
             PreStartDecision::Admit
         );
         let mut denied = snapshot();
-        denied.available_percent = 25;
+        denied.available_percent = MIN_PRESTART_AVAILABLE_PERCENT;
         denied.reclaimable_uncompressed_bytes = MIN_PRESTART_FREE_BYTES;
-        denied.compressor_occupied_bytes = 30 * denied.total_memory_bytes / 100;
+        denied.compressor_occupied_bytes =
+            u64::from(MAX_PRESTART_COMPRESSOR_PERCENT) * denied.total_memory_bytes / 100;
         denied.swap_used_bytes = MAX_PRESTART_SWAP_BYTES;
         assert_eq!(
             evaluate_pre_start(&denied).expect("boundary"),
             PreStartDecision::Admit
         );
-        denied.available_percent = 24;
+        denied.available_percent = MIN_PRESTART_AVAILABLE_PERCENT - 1;
         assert_eq!(
             evaluate_pre_start(&denied).expect("deny"),
             PreStartDecision::Deny
         );
 
         denied = snapshot();
-        denied.compressor_occupied_bytes = 31 * denied.total_memory_bytes / 100;
+        denied.compressor_occupied_bytes =
+            (u64::from(MAX_PRESTART_COMPRESSOR_PERCENT) + 1) * denied.total_memory_bytes / 100;
         assert_eq!(
             evaluate_pre_start(&denied).expect("compressor deny"),
             PreStartDecision::Deny
@@ -886,12 +894,12 @@ mod tests {
         denied.swap_total_bytes = 12 * 1024 * 1024 * 1024;
         denied.swap_used_bytes = MAX_PRESTART_SWAP_BYTES;
         assert_eq!(
-            evaluate_pre_start(&denied).expect("10 GiB swap boundary admit"),
+            evaluate_pre_start(&denied).expect("8 GiB swap boundary admit"),
             PreStartDecision::Admit
         );
         denied.swap_used_bytes = MAX_PRESTART_SWAP_BYTES + 1;
         assert_eq!(
-            evaluate_pre_start(&denied).expect("above 10 GiB swap deny"),
+            evaluate_pre_start(&denied).expect("above 8 GiB swap deny"),
             PreStartDecision::Deny
         );
         denied = snapshot();
