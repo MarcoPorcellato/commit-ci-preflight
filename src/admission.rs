@@ -1191,6 +1191,19 @@ mod tests {
     }
 
     #[test]
+    fn characterizes_partial_ticket_counter_blocking_admission_before_t6() {
+        let coordinator = coordinator("partial-counter");
+        coordinator.initialize().expect("initialize coordinator");
+        fs::write(coordinator.root().join(NEXT_TICKET), b"").expect("partial counter fixture");
+
+        let result = coordinator.acquire(Duration::from_secs(1), &CancellationToken::default());
+
+        assert!(matches!(result, Err(AdmissionError::MalformedCounter(_))));
+        assert!(!coordinator.status().expect("status").active);
+        fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
+    }
+
+    #[test]
     fn foreign_root_marker_fails_closed() {
         let coordinator = coordinator("owner");
         fs::create_dir_all(coordinator.root()).expect("coordinator root");

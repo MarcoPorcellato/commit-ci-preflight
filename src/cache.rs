@@ -1262,4 +1262,30 @@ timeout_seconds = 60
         clean(&resolved.path);
         clean(&repo);
     }
+
+    #[test]
+    fn characterizes_complete_entry_remaining_complete_after_data_mutation_before_t5() {
+        let (repo, resolved) = resolved_fixture("complete-entry-mutation");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let envelope = envelope();
+        let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
+        let prepared = cache.prepare_entry(&key).expect("prepare");
+        let payload = prepared.data_path.join("payload.bin");
+        fs::write(&payload, b"known-good").expect("write known-good payload");
+        cache.mark_entry_complete(&key).expect("mark complete");
+
+        fs::write(&payload, b"failed-run-mutation").expect("simulate failed run mutation");
+
+        assert!(cache.prepare_entry(&key).expect("reopen").was_complete);
+        let inventory = cache.inventory().expect("inventory");
+        assert_eq!(inventory.entries.len(), 1);
+        assert_eq!(inventory.entries[0].status, CacheEntryStatus::Complete);
+        assert_eq!(
+            fs::read(payload).expect("read mutation"),
+            b"failed-run-mutation"
+        );
+
+        clean(&resolved.path);
+        clean(&repo);
+    }
 }

@@ -768,6 +768,25 @@ timeout_seconds = 60
     }
 
     #[test]
+    fn characterizes_one_shot_docker_client_without_daemon_identity_before_t3() {
+        let envelope = envelope();
+        let workspace = workspace(&envelope);
+        let dry_run = DockerCompatibleRuntime
+            .dry_run(&envelope, &workspace)
+            .expect("dry run");
+        let argv = &dry_run.checks[0].argv;
+
+        assert_eq!(argv.first().map(String::as_str), Some("run"));
+        assert!(argv.iter().any(|part| part == "--rm"));
+        assert!(!argv.iter().any(|part| {
+            matches!(
+                part.as_str(),
+                "--name" | "--label" | "--cidfile" | "create" | "start"
+            )
+        }));
+    }
+
+    #[test]
     fn host_runtime_is_explicitly_unsupported() {
         let error = runtime_for(RuntimeKind::Host)
             .err()

@@ -335,6 +335,8 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 - [Upgrade and rollback](docs/UPGRADE_AND_ROLLBACK.md)
 - [Beta support policy](docs/BETA_SUPPORT.md)
 - [Architecture and implementation plan](docs/IMPLEMENTATION_PLAN.md)
+- [Reliability hardening roadmap](docs/RELIABILITY_HARDENING_PLAN.md)
+- [Testing and fault-injection contract](docs/TESTING_AND_FAULT_INJECTION.md)
 
 ## Contributing
 

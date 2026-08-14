@@ -223,6 +223,29 @@ fn digest_valid_policy_mismatches_fail_each_covered_policy_dimension() {
 }
 
 #[test]
+fn characterizes_declared_digest_not_binding_check_argv_before_t7() {
+    let original = receipt();
+    let mut altered = original.receipt.clone();
+    altered.checks[0].argv = vec![
+        "cargo".to_owned(),
+        "test".to_owned(),
+        "--release".to_owned(),
+    ];
+    assert_eq!(
+        altered.configuration_digest,
+        original.receipt.configuration_digest
+    );
+    let altered = ReceiptEnvelopeV1::seal(altered).expect("seal altered receipt");
+
+    let report = report_for(&altered);
+
+    assert_eq!(report.integrity_status, VerificationStatus::Pass);
+    assert_eq!(report.policy_status, VerificationStatus::Pass);
+    assert_eq!(report.decision, VerificationDecision::Pass);
+    assert!(report.findings.is_empty());
+}
+
+#[test]
 fn unsupported_schema_unknown_fields_and_oversize_input_fail_closed() {
     let mut unsupported: serde_json::Value = serde_json::from_slice(RECEIPT).expect("JSON");
     unsupported["receipt"]["schema_version"] = serde_json::Value::String("2.0".to_owned());

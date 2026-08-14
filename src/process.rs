@@ -750,6 +750,7 @@ mod tests {
         Cancel(CancellationToken),
         NeverExit,
         Stale(GenerationGuard),
+        MonitorFailure,
         CleanupFailure,
     }
 
@@ -817,6 +818,7 @@ mod tests {
                     Ok(None)
                 }
                 FakeBehavior::NeverExit | FakeBehavior::CleanupFailure => Ok(None),
+                FakeBehavior::MonitorFailure => Err(io::Error::other("injected monitor failure")),
                 FakeBehavior::Stale(guard) => {
                     guard
                         .replace(identity("generation-2"))
@@ -971,6 +973,23 @@ mod tests {
             .expect_err("cleanup failure must fail closed");
 
         assert!(matches!(error, ProcessError::CleanupUncertain { .. }));
+    }
+
+    #[test]
+    fn characterizes_monitor_failure_skipping_cleanup_before_t4() {
+        let (supervisor, state, _) = supervisor(FakeBehavior::MonitorFailure);
+        let request = request();
+        let guard = GenerationGuard::new(request.identity.clone());
+
+        let error = supervisor
+            .execute(&request, &CancellationToken::default(), &guard)
+            .expect_err("monitor failure is surfaced");
+
+        assert!(matches!(error, ProcessError::Monitor(_)));
+        let state = state.lock().expect("state");
+        assert_eq!(state.graceful, 0);
+        assert_eq!(state.forced, 0);
+        assert_eq!(state.sealed, 0);
     }
 
     #[test]
