@@ -971,7 +971,7 @@ fn new_journal_id(plan_digest: &str, generation: u64) -> Result<String, CliError
         .duration_since(UNIX_EPOCH)
         .map_err(CliError::internal)?
         .as_nanos();
-    canonical_digest(&JournalIdInput {
+    let digest = canonical_digest(&JournalIdInput {
         schema_version: RUN_JOURNAL_SCHEMA_VERSION,
         plan_digest,
         generation,
@@ -979,7 +979,16 @@ fn new_journal_id(plan_digest: &str, generation: u64) -> Result<String, CliError
         process_id: std::process::id(),
         sequence: JOURNAL_SEQUENCE.fetch_add(1, Ordering::Relaxed),
     })
-    .map_err(CliError::internal)
+    .map_err(CliError::internal)?;
+    digest
+        .strip_prefix("sha256:")
+        .filter(|run_id| run_id.len() == 64)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            CliError::internal(std::io::Error::other(
+                "canonical journal digest has an invalid format",
+            ))
+        })
 }
 
 struct JournalLifecycleObserver<'a> {
@@ -1932,8 +1941,8 @@ mod tests {
     use super::{
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
         ResourceExecutionModeArg, ResourceExecutorArg, WatchdogCompletionBarrier,
-        detect_resource_executor, finalize_guard_exec_result, reconcile_watchdog_outcome,
-        resource_run_outcome,
+        detect_resource_executor, finalize_guard_exec_result, new_journal_id,
+        reconcile_watchdog_outcome, resource_run_outcome,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::process::CancellationToken;
@@ -1970,6 +1979,22 @@ mod tests {
         let internal = CliError::internal(std::io::Error::other("internal"));
         assert_eq!(usage.exit_code(), 2);
         assert_eq!(internal.exit_code(), 70);
+    }
+
+    #[test]
+    fn journal_id_is_filesystem_safe_hex_without_digest_prefix() {
+        let run_id = new_journal_id(
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            1,
+        )
+        .expect("journal id");
+
+        assert_eq!(run_id.len(), 64);
+        assert!(
+            run_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
     }
 
     #[test]
