@@ -20,7 +20,7 @@ change the guarded process result.
 |---|---|---|
 | `macos-v1` | Fixed pre-start thresholds and two-second watchdog | Shipped in PR 12 |
 | `macos-v2` | Swap-only admission relaxed to `min(10 GiB, 30% RAM)` | Shipped in PR 15 |
-| `macos-v3` | Pre-start admission uses 20% available memory, 40% compressor and `min(8 GiB, 30% RAM)` swap; watchdog unchanged | Current policy |
+| `macos-v3` | Pre-start admission uses 20% available memory, 40% compressor and `min(8 GiB, 30% RAM)` swap; the three-sample soft compressor watchdog is 40% and the hard trip remains 45% | Current policy |
 | observation history v1 | Per-profile baseline, extrema, duration and outcome; no prediction | Legacy file retained unchanged |
 | observation history v2 | Adds bounded workload/executor context for comparable cross-repository samples | Current tranche |
 | forecast shadow mode | Backtest a deterministic upper-bound forecast without changing admission | Future, requires sufficient comparable samples |
@@ -146,7 +146,7 @@ implements and backtests a deterministic forecast. That gate should require:
 3. a stable profile, container limit and cache-state classification;
 4. an upper-bound estimate derived from recent peak deltas plus an explicit
    safety margin;
-5. a predicted compressor peak below the 35% soft watchdog threshold with
+5. a predicted compressor peak below the 40% soft watchdog threshold with
    additional margin;
 6. unchanged 45% hard compressor trip, other hard limits, fail-closed probes,
    cancellation and host-wide serialization;

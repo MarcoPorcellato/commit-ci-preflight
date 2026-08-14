@@ -255,7 +255,7 @@ impl WatchdogState {
         }
         let soft = snapshot.available_percent < 15
             || snapshot.reclaimable_uncompressed_bytes < SOFT_FREE_BYTES
-            || snapshot.compressor_percent_at_least(35)
+            || snapshot.compressor_percent_at_least(40)
             || snapshot.swap_percent_at_least(30);
         if soft {
             self.consecutive_soft_samples = self.consecutive_soft_samples.saturating_add(1);
@@ -1000,7 +1000,7 @@ mod tests {
                 value.reclaimable_uncompressed_bytes = SOFT_FREE_BYTES - 1
             },
             |value: &mut ResourceSnapshot| {
-                value.compressor_occupied_bytes = percent_ceiling(value.total_memory_bytes, 35)
+                value.compressor_occupied_bytes = percent_ceiling(value.total_memory_bytes, 40)
             },
             |value: &mut ResourceSnapshot| {
                 value.swap_used_bytes = percent_ceiling(value.total_memory_bytes, 30)

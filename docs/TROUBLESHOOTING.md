@@ -112,8 +112,8 @@ RAM. Satisfying one condition does not override the others.
 commit-ci-preflight resource status --json
 ```
 
-The in-run soft watchdog remains intentionally stricter than pre-start
-compressor admission: three consecutive samples at 35% stop the workload, and
+The in-run soft watchdog matches pre-start compressor admission: three
+consecutive samples at 40% stop the workload, and
 45% remains an immediate hard stop. A command admitted between those values
 therefore receives only a short recovery window and cannot run indefinitely
 under sustained pressure.

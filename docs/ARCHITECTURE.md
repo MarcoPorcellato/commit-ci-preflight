@@ -87,7 +87,7 @@ Policy `macos-v3` admits only with at least 20% available memory and 3 GiB
 reclaimable uncompressed memory. It accepts compressor occupancy through 40%
 and swap through the smaller of 8 GiB and 30% of physical RAM. These are
 independent conjuncts. The in-run soft threshold remains stricter: three
-consecutive samples at 35% compressor pressure stop the workload, while 45%
+consecutive samples at 40% compressor pressure stop the workload, while 45%
 remains an immediate hard stop. This separation in time reduces false
 pre-start denials without weakening sustained or critical pressure handling.
 

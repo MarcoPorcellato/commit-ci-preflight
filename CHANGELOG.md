@@ -56,8 +56,8 @@ Semantic Versioning after its first public release.
   image so Linux checks have Git while retaining immutable image verification.
 - Version macOS admission as `macos-v3`: require at least 20% available memory,
   cap pre-start swap at the smaller of 8 GiB and 30% of physical RAM, and admit
-  compressor occupancy through 40%. The existing three-sample soft watchdog
-  and immediate hard watchdog remain unchanged.
+  compressor occupancy through 40% and align the three-sample soft watchdog
+  with that 40% boundary. The immediate 45% hard watchdog remains unchanged.
 - Relax macOS pre-start swap admission to the smaller of 10 GiB and 30% of
   physical RAM, while retaining all independent memory, compressor and in-run
   watchdog protections (`macos-v2`).
