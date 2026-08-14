@@ -57,6 +57,8 @@ pub struct MountBinding {
 pub struct WorkspacePlanV1 {
     pub schema_version: &'static str,
     pub repository: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_snapshot_digest: Option<String>,
     pub run_root: PathBuf,
     pub mounts: Vec<MountBinding>,
 }
@@ -67,7 +69,7 @@ impl WorkspacePlanV1 {
         repository: &Path,
         cache: &ResolvedCacheRoot,
     ) -> Result<Self, WorkspaceError> {
-        Self::build_with_cache_sources(envelope, repository, cache, &BTreeMap::new())
+        Self::build_with_cache_sources(envelope, repository, cache, &BTreeMap::new(), None)
     }
 
     fn build_with_cache_sources(
@@ -75,6 +77,7 @@ impl WorkspacePlanV1 {
         repository: &Path,
         cache: &ResolvedCacheRoot,
         cache_sources: &BTreeMap<String, PathBuf>,
+        source_snapshot_digest: Option<&str>,
     ) -> Result<Self, WorkspaceError> {
         let repository = fs::canonicalize(repository).map_err(WorkspaceError::Io)?;
         if !repository.is_dir() {
@@ -137,6 +140,7 @@ impl WorkspacePlanV1 {
         Ok(Self {
             schema_version: "1.0",
             repository,
+            source_snapshot_digest: source_snapshot_digest.map(str::to_owned),
             run_root,
             mounts,
         })
@@ -184,12 +188,24 @@ impl PreparedWorkspace {
             repository,
             cache.root(),
             &cache_sources,
+            None,
         )?;
         Ok(Self {
             plan,
             cache_keys,
             lock,
         })
+    }
+
+    pub fn prepare_snapshot(
+        envelope: &ExecutionPlanEnvelopeV1,
+        snapshot_root: &Path,
+        source_snapshot_digest: &str,
+        cache: &ManagedCache,
+    ) -> Result<Self, WorkspaceError> {
+        let mut prepared = Self::prepare(envelope, snapshot_root, cache)?;
+        prepared.plan.source_snapshot_digest = Some(source_snapshot_digest.to_owned());
+        Ok(prepared)
     }
 
     pub fn mark_caches_complete(&self, cache: &ManagedCache) -> Result<(), WorkspaceError> {
@@ -424,7 +440,6 @@ mod tests {
     use super::*;
     use crate::cache::{CacheRootOptions, PlatformFamily, ResolvedCacheRoot};
     use crate::config::ConfigV1;
-    use std::process::Command;
 
     fn test_root(name: &str) -> PathBuf {
         std::env::var_os("CCP_TEST_ROOT")
@@ -620,67 +635,19 @@ artifacts = ["target/results.json"]
     }
 
     #[test]
-    fn characterizes_live_repository_bytes_changing_under_same_plan_before_t2() {
-        let name = "live-repository-mutation";
+    fn workspace_mounts_the_explicit_snapshot_root_not_the_live_checkout() {
+        let name = "explicit-snapshot-root";
         let (repository, cache, envelope) = fixture(name);
-        fs::write(
-            repository.join(".gitignore"),
-            b".cache/\ntarget/\nlocal-only-input.txt\n",
-        )
-        .expect("ignore local inputs");
-        fs::write(repository.join("tracked.txt"), b"tracked\n").expect("tracked fixture");
-        for args in [
-            &["init", "--quiet"][..],
-            &["config", "user.name", "CCP Test"][..],
-            &["config", "user.email", "ccp-test@example.invalid"][..],
-            &["add", ".gitignore", "tracked.txt"][..],
-            &["commit", "--quiet", "-m", "fixture"][..],
-        ] {
-            assert!(
-                Command::new("git")
-                    .arg("-C")
-                    .arg(&repository)
-                    .args(args)
-                    .status()
-                    .expect("run git fixture command")
-                    .success()
-            );
-        }
-        let head_before = Command::new("git")
-            .arg("-C")
-            .arg(&repository)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .expect("read fixture head")
-            .stdout;
-        let ignored_input = repository.join("local-only-input.txt");
-        fs::write(&ignored_input, b"first-local-value").expect("first local input");
-        let first = WorkspacePlanV1::build(&envelope, &repository, &cache).expect("first plan");
-        let first_bytes = fs::read(&ignored_input).expect("first bytes");
+        let snapshot = test_root(name).join("snapshot");
+        fs::create_dir(&snapshot).expect("snapshot root");
+        fs::create_dir_all(snapshot.join(".cache/cargo")).expect("cache target");
+        fs::create_dir_all(snapshot.join("results")).expect("artifact parent");
+        fs::write(snapshot.join("results/first.json"), b"").expect("artifact target");
 
-        fs::write(&ignored_input, b"second-local-value").expect("mutate local input");
-        let second = WorkspacePlanV1::build(&envelope, &repository, &cache).expect("second plan");
-        let second_bytes = fs::read(&ignored_input).expect("second bytes");
-        let head_after = Command::new("git")
-            .arg("-C")
-            .arg(&repository)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .expect("read fixture head")
-            .stdout;
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(&repository)
-            .args(["status", "--porcelain"])
-            .output()
-            .expect("read fixture status")
-            .stdout;
+        let plan = WorkspacePlanV1::build(&envelope, &snapshot, &cache).expect("plan");
 
-        assert_eq!(first, second);
-        assert_ne!(first_bytes, second_bytes);
-        assert_eq!(head_before, head_after);
-        assert!(status.is_empty());
-        assert_eq!(first.mounts[0].source, repository);
+        assert_eq!(plan.mounts[0].source, snapshot);
+        assert_ne!(plan.mounts[0].source, repository);
         fs::remove_dir_all(test_root(name)).expect("clean fixture");
     }
 }
