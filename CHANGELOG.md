@@ -9,6 +9,13 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T2 immutable Git-object source materialization with a canonical path/mode/OID
+  manifest, fail-closed LFS/submodule/symlink policy, pre-admission snapshot
+  preparation, read-only runtime binding, post-run byte revalidation, and
+  journal-owned cleanup/recovery. The accompanying ADR, TRIZ contradiction
+  ledger, and invariant/evidence matrix distinguish deterministic proof from
+  still-pending native qualification.
+
 - Durable filesystem primitives with deterministic operation-failure tests,
   append-only run-journal v1 state transitions, and bounded `recover status`
   / `recover apply <run-id>` commands. Recovery status is read-only; apply
