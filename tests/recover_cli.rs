@@ -36,10 +36,15 @@ struct Fixture {
 impl Fixture {
     fn new(label: &str) -> Self {
         let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::current_dir()
-            .expect("current directory")
-            .parent()
-            .expect("repository parent")
+        let root = std::env::var_os("CCP_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .expect("current directory")
+                    .parent()
+                    .expect("repository parent")
+                    .to_path_buf()
+            })
             .join(format!(
                 ".ccp-recover-test-{}-{sequence}-{label}",
                 std::process::id()
