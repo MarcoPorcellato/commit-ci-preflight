@@ -22,7 +22,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
-use crate::receipt::{EvidenceStatus, ReceiptEnvelopeV1, ReceiptError, canonical_json};
+use crate::receipt::{
+    CheckEvidence, EvidenceStatus, PlatformEvidence, ReceiptEnvelopeV1, ReceiptEnvelopeV2,
+    ReceiptError, RepositoryEvidence, RunEvidence, canonical_json,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationPolicyDocument {
@@ -253,13 +256,47 @@ pub fn verify_receipt_document(
         ));
         return Ok(report);
     }
-    let envelope: ReceiptEnvelopeV1 = match serde_json::from_slice(bytes) {
+    let document = match serde_json::from_slice::<serde_json::Value>(bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            report.findings.push(finding(
+                "receipt.parse_or_shape",
+                "receipt",
+                "receipt is not valid strict schema v1 or v2 JSON",
+            ));
+            return Ok(report);
+        }
+    };
+    let Some(schema_version) = document
+        .pointer("/receipt/schema_version")
+        .and_then(serde_json::Value::as_str)
+    else {
+        report.findings.push(finding(
+            "receipt.parse_or_shape",
+            "receipt.schema_version",
+            "receipt schema version is missing or invalid",
+        ));
+        return Ok(report);
+    };
+    let parsed = match schema_version {
+        "1.0" => serde_json::from_slice::<ReceiptEnvelopeV1>(bytes).map(VerifiedReceipt::V1),
+        "2.0" => serde_json::from_slice::<ReceiptEnvelopeV2>(bytes).map(VerifiedReceipt::V2),
+        _ => {
+            report.findings.push(finding(
+                "receipt.unsupported_schema",
+                "receipt.schema_version",
+                "receipt schema version is unsupported",
+            ));
+            return Ok(report);
+        }
+    };
+    let envelope = match parsed {
         Ok(envelope) => envelope,
         Err(_) => {
             report.findings.push(finding(
                 "receipt.parse_or_shape",
                 "receipt",
-                "receipt is not valid strict schema v1 JSON",
+                "receipt is not valid strict schema v1 or v2 JSON",
             ));
             return Ok(report);
         }
@@ -276,18 +313,18 @@ pub fn verify_receipt_document(
             ),
             _ => (
                 "receipt.semantic_invalid",
-                "receipt violates schema v1 semantic invariants",
+                "receipt violates schema semantic invariants",
             ),
         };
         report.findings.push(finding(code, "receipt", message));
         return Ok(report);
     }
 
-    report.receipt_id = Some(envelope.receipt_id.clone());
+    report.receipt_id = Some(envelope.receipt_id().to_owned());
     report.integrity_status = VerificationStatus::Pass;
     report.policy_status = VerificationStatus::Pass;
     evaluate_policy(
-        &envelope,
+        envelope.view(),
         policy,
         expected_commit,
         evaluated_at,
@@ -352,14 +389,64 @@ pub fn receipt_input_failure_report(
     })
 }
 
+struct ReceiptPolicyView<'a> {
+    repository: &'a RepositoryEvidence,
+    run: &'a RunEvidence,
+    platform: &'a PlatformEvidence,
+    configuration_digest: &'a str,
+    checks: &'a [CheckEvidence],
+    overall_status: EvidenceStatus,
+}
+
+enum VerifiedReceipt {
+    V1(ReceiptEnvelopeV1),
+    V2(ReceiptEnvelopeV2),
+}
+
+impl VerifiedReceipt {
+    fn verify(&self) -> Result<(), ReceiptError> {
+        match self {
+            Self::V1(value) => value.verify(),
+            Self::V2(value) => value.verify(),
+        }
+    }
+
+    fn receipt_id(&self) -> &str {
+        match self {
+            Self::V1(value) => &value.receipt_id,
+            Self::V2(value) => &value.receipt_id,
+        }
+    }
+
+    fn view(&self) -> ReceiptPolicyView<'_> {
+        match self {
+            Self::V1(value) => ReceiptPolicyView {
+                repository: &value.receipt.repository,
+                run: &value.receipt.run,
+                platform: &value.receipt.platform,
+                configuration_digest: &value.receipt.configuration_digest,
+                checks: &value.receipt.checks,
+                overall_status: value.receipt.overall_status,
+            },
+            Self::V2(value) => ReceiptPolicyView {
+                repository: &value.receipt.repository,
+                run: &value.receipt.run,
+                platform: &value.receipt.platform,
+                configuration_digest: &value.receipt.configuration_digest,
+                checks: &value.receipt.checks,
+                overall_status: value.receipt.overall_status,
+            },
+        }
+    }
+}
+
 fn evaluate_policy(
-    envelope: &ReceiptEnvelopeV1,
+    receipt: ReceiptPolicyView<'_>,
     policy: &VerificationPolicyV1,
     expected_commit: &str,
     evaluated_at: i64,
     findings: &mut Vec<VerificationFindingV1>,
 ) {
-    let receipt = &envelope.receipt;
     check_equal(
         &receipt.repository.repository,
         &policy.project,
@@ -384,7 +471,7 @@ fn evaluate_policy(
         ));
     }
     check_equal(
-        &receipt.configuration_digest,
+        receipt.configuration_digest,
         &policy.configuration_digest,
         "policy.configuration",
         "configuration_digest",

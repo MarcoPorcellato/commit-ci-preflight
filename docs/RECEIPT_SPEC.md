@@ -1,9 +1,9 @@
-# Receipt specification v1
+# Receipt specification v1 and v2
 
 ## Status
 
-This document specifies the implemented receipt contract for schema version
-`1.0`. A receipt is deterministic integrity evidence. It is **not** an
+This document specifies the implemented receipt contracts for schema versions
+`1.0` and `2.0`. A receipt is deterministic integrity evidence. It is **not** an
 identity-bound attestation and does not prove that the producer or host was
 trusted.
 
@@ -15,14 +15,23 @@ as requirements within this project.
 A receipt document is a UTF-8 JSON object containing:
 
 - `receipt_id`: lowercase `sha256:` digest of the canonical `receipt` payload;
-- `receipt`: a `ReceiptV1` payload conforming to
-  [`../schema/receipt-v1.schema.json`](../schema/receipt-v1.schema.json).
+- `receipt`: either a `ReceiptV1` payload conforming to
+  [`../schema/receipt-v1.schema.json`](../schema/receipt-v1.schema.json), or a
+  `ReceiptV2` payload conforming to
+  [`../schema/receipt-v2.schema.json`](../schema/receipt-v2.schema.json).
 
 Unknown fields are rejected at every typed object boundary.
 
+Schema v2 preserves the common v1 evidence and adds required
+`source_snapshot` evidence: strategy, canonical manifest digest and entry
+count. New snapshot-backed runs publish v2; historical v1 documents remain
+strictly readable and are never reinterpreted as carrying snapshot assurance.
+The pinned v2 schema and vector are `schema/receipt-v2.schema.json` and
+`tests/fixtures/receipt-v2-pass.json`.
+
 ## Canonical JSON profile
 
-The v1 canonicalizer:
+The shared v1 canonical JSON profile used by both receipt schemas:
 
 1. serializes the typed Rust value into a JSON value;
 2. recursively sorts every object key in ascending string order;
@@ -36,8 +45,23 @@ This is the **CCP canonical JSON v1 profile**. It must not be described as RFC
 8785 unless a later ADR establishes complete RFC conformance and cross-language
 vectors.
 
-The committed pass fixture is the normative golden vector:
-[`../tests/fixtures/receipt-v1-pass.json`](../tests/fixtures/receipt-v1-pass.json).
+The committed pass fixtures are the normative golden vectors:
+[`../tests/fixtures/receipt-v1-pass.json`](../tests/fixtures/receipt-v1-pass.json)
+and [`../tests/fixtures/receipt-v2-pass.json`](../tests/fixtures/receipt-v2-pass.json).
+
+## Source snapshot evidence in v2
+
+Receipt v2 requires `source_snapshot.schema_version = "1.0"`, strategy
+`git_object`, a canonical `sha256:` manifest digest, and a positive entry
+count. The receipt intentionally does not include source contents, host paths,
+worktree paths or user identity. The verifier recomputes the envelope digest;
+changing any snapshot field invalidates receipt integrity before policy is
+evaluated.
+
+The journal stores a separate private `source-snapshot-v1.json` binding with
+the exact commit, manifest digest, entry count and fixed CCP-owned resource ID.
+That record supports bounded recovery; it is not copied into the receipt and
+does not add host-path disclosure.
 
 ## Status semantics
 
@@ -86,7 +110,7 @@ fixtures MUST NOT read the wall clock.
 
 ## Privacy
 
-The typed v1 schema intentionally has no fields for environment values, raw
+The typed v1 and v2 schemas intentionally have no fields for environment values, raw
 stdout/stderr, source contents, usernames, email addresses, machine names, IP
 addresses, or absolute home paths. Output may be represented only by a digest.
 

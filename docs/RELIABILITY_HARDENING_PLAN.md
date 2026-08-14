@@ -377,7 +377,8 @@ Exit gate:
 Source-side checkpoint on `codex/reliability-hardening-t1`:
 
 - immutable create-new journal events are active on the real `run` lifecycle;
-- receipt v1 remains unchanged and separate from recovery state;
+- receipt v1 remains unchanged and separate from recovery state; T2 adds a
+  strict v2 publication path for snapshot-backed runs without rewriting v1;
 - `recover status` opens only an initialized managed cache and performs no
   mutation;
 - `recover apply <run-id>` quarantines one exact CCP-owned unfinished journal;
@@ -392,6 +393,10 @@ Source-side checkpoint on `codex/reliability-hardening-t1`:
   required before a cross-platform qualification claim.
 
 ### PR T2 — Immutable source snapshot and byte identity
+
+Status (2026-08-14): implemented in source with deterministic contract tests.
+Native platform and crash/power-loss qualification remain pending and are not
+represented as PASS.
 
 Deliverables:
 

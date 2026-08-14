@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use commit_ci_preflight::receipt::{EvidenceStatus, ReceiptEnvelopeV1};
+use commit_ci_preflight::receipt::{EvidenceStatus, ReceiptEnvelopeV1, ReceiptEnvelopeV2};
 use commit_ci_preflight::verify::{
     PolicyError, VerificationDecision, VerificationError, VerificationPolicyV1, VerificationStatus,
     verification_policy_schema_json, verification_report_schema_json, verify_receipt_document,
 };
 
 const RECEIPT: &[u8] = include_bytes!("fixtures/receipt-v1-pass.json");
+const RECEIPT_V2: &[u8] = include_bytes!("fixtures/receipt-v2-pass.json");
 const POLICY: &[u8] = include_bytes!("fixtures/policy-v1.toml");
 const EXAMPLE_POLICY: &[u8] = include_bytes!("../examples/policy/example-project.toml");
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -100,6 +101,23 @@ fn valid_receipt_passes_integrity_and_repository_policy() {
         first.canonical_bytes().expect("report bytes"),
         second.canonical_bytes().expect("replay bytes")
     );
+}
+
+#[test]
+fn valid_v2_receipt_passes_and_snapshot_tampering_fails_integrity() {
+    let report =
+        verify_receipt_document(RECEIPT_V2, &policy(), COMMIT, EVALUATED_AT).expect("verify v2");
+    assert_eq!(report.integrity_status, VerificationStatus::Pass);
+    assert_eq!(report.policy_status, VerificationStatus::Pass);
+    assert_eq!(report.decision, VerificationDecision::Pass);
+
+    let mut envelope: ReceiptEnvelopeV2 = serde_json::from_slice(RECEIPT_V2).expect("v2 receipt");
+    envelope.receipt.source_snapshot.manifest_digest = format!("sha256:{}", "f".repeat(64));
+    let tampered = serde_json::to_vec(&envelope).expect("tampered v2");
+    let report =
+        verify_receipt_document(&tampered, &policy(), COMMIT, EVALUATED_AT).expect("tamper report");
+    assert_eq!(report.integrity_status, VerificationStatus::Fail);
+    assert_eq!(report.policy_status, VerificationStatus::NotRun);
 }
 
 #[test]
@@ -248,7 +266,7 @@ fn characterizes_declared_digest_not_binding_check_argv_before_t7() {
 #[test]
 fn unsupported_schema_unknown_fields_and_oversize_input_fail_closed() {
     let mut unsupported: serde_json::Value = serde_json::from_slice(RECEIPT).expect("JSON");
-    unsupported["receipt"]["schema_version"] = serde_json::Value::String("2.0".to_owned());
+    unsupported["receipt"]["schema_version"] = serde_json::Value::String("9.0".to_owned());
     let unsupported = verify_receipt_document(
         &serde_json::to_vec(&unsupported).expect("bytes"),
         &policy(),
@@ -257,6 +275,24 @@ fn unsupported_schema_unknown_fields_and_oversize_input_fail_closed() {
     )
     .expect("unsupported report");
     assert!(finding_codes(&unsupported).contains(&"receipt.unsupported_schema"));
+
+    let malformed =
+        verify_receipt_document(b"{", &policy(), COMMIT, EVALUATED_AT).expect("malformed report");
+    assert!(finding_codes(&malformed).contains(&"receipt.parse_or_shape"));
+
+    let mut missing: serde_json::Value = serde_json::from_slice(RECEIPT).expect("JSON");
+    missing["receipt"]
+        .as_object_mut()
+        .expect("receipt object")
+        .remove("schema_version");
+    let missing = verify_receipt_document(
+        &serde_json::to_vec(&missing).expect("bytes"),
+        &policy(),
+        COMMIT,
+        EVALUATED_AT,
+    )
+    .expect("missing schema report");
+    assert!(finding_codes(&missing).contains(&"receipt.parse_or_shape"));
 
     let mut unknown: serde_json::Value = serde_json::from_slice(RECEIPT).expect("JSON");
     unknown["receipt"]["unexpected"] = serde_json::Value::Bool(true);

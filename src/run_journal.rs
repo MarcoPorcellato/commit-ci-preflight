@@ -25,6 +25,7 @@ const RUNS_DIR: &str = "runs";
 const ROOT_MARKER: &str = ".ccp-run-journal-root-v1.json";
 const RUN_MARKER: &str = ".ccp-run-owner-v1.json";
 const RESOURCES_DIR: &str = "resources";
+const SOURCE_BINDING: &str = "source-snapshot-v1.json";
 const QUARANTINE_PREFIX: &str = "quarantined-";
 static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -46,6 +47,16 @@ struct RunOwnerMarkerV1 {
     root_token: String,
     run_id: String,
     run_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunJournalSourceV1 {
+    pub schema_version: String,
+    pub commit_sha: String,
+    pub manifest_digest: String,
+    pub entry_count: u64,
+    pub resource_id: String,
 }
 
 #[derive(Serialize)]
@@ -300,6 +311,34 @@ impl RunJournalStore {
         Ok(target)
     }
 
+    pub fn bind_source(
+        &self,
+        run_id: &str,
+        commit_sha: &str,
+        manifest_digest: &str,
+        entry_count: u64,
+    ) -> Result<RunJournalSourceV1, RunJournalError> {
+        validate_run_id(run_id)?;
+        validate_hex_identity(commit_sha)?;
+        validate_digest(manifest_digest)?;
+        if entry_count == 0 {
+            return Err(RunJournalError::Corrupt);
+        }
+        let run = self.run_path(run_id);
+        self.validate_run_marker(&run, run_id)?;
+        let binding = RunJournalSourceV1 {
+            schema_version: RUN_JOURNAL_SCHEMA_VERSION.to_owned(),
+            commit_sha: commit_sha.to_owned(),
+            manifest_digest: manifest_digest.to_owned(),
+            entry_count,
+            resource_id: "source-snapshot-v1".to_owned(),
+        };
+        let mut bytes = serde_json::to_vec(&binding).map_err(|_| RunJournalError::Corrupt)?;
+        bytes.push(b'\n');
+        self.durable.create_new(&run.join(SOURCE_BINDING), &bytes)?;
+        Ok(binding)
+    }
+
     pub fn status(&self) -> Result<RecoveryStatusV1, RunJournalError> {
         let mut runs = Vec::new();
         let mut entries: Vec<_> =
@@ -407,13 +446,29 @@ impl RunJournalStore {
         let mut paths: Vec<_> = fs::read_dir(&run)?
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .filter(|entry| entry.file_name() != RUN_MARKER && entry.file_name() != RESOURCES_DIR)
+            .filter(|entry| {
+                entry.file_name() != RUN_MARKER
+                    && entry.file_name() != RESOURCES_DIR
+                    && entry.file_name() != SOURCE_BINDING
+            })
             .map(|entry| entry.path())
             .collect();
         paths.sort();
         let resources = run.join(RESOURCES_DIR);
         if resources.exists() {
             validate_existing_plain_directory(&resources)?;
+        }
+        let source_binding = run.join(SOURCE_BINDING);
+        if source_binding.exists() {
+            let binding: RunJournalSourceV1 = read_json_marker(&source_binding)?;
+            if binding.schema_version != RUN_JOURNAL_SCHEMA_VERSION
+                || validate_hex_identity(&binding.commit_sha).is_err()
+                || validate_digest(&binding.manifest_digest).is_err()
+                || binding.entry_count == 0
+                || binding.resource_id != "source-snapshot-v1"
+            {
+                return Err(RunJournalError::Corrupt);
+            }
         }
         let mut entries: Vec<RunJournalEntryV1> = Vec::with_capacity(paths.len());
         for path in paths {
@@ -469,6 +524,31 @@ fn validate_resource_id(value: &str) -> Result<(), RunJournalError> {
     } else {
         Err(RunJournalError::InvalidRunId)
     }
+}
+
+fn validate_hex_identity(value: &str) -> Result<(), RunJournalError> {
+    if matches!(value.len(), 40 | 64)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(RunJournalError::Corrupt)
+    }
+}
+
+fn validate_digest(value: &str) -> Result<(), RunJournalError> {
+    value
+        .strip_prefix("sha256:")
+        .filter(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .map(|_| ())
+        .ok_or(RunJournalError::Corrupt)
 }
 
 fn validate_existing_plain_directory(path: &Path) -> Result<(), RunJournalError> {
@@ -760,6 +840,94 @@ mod tests {
         assert_eq!(
             first.runs[0].classification,
             RecoveryClassificationV1::Restartable
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn source_binding_is_private_strict_and_recovery_owned() {
+        let root = cache_root("source-binding");
+        let store = RunJournalStore::initialize(&root).expect("store");
+        store.create_run(RUN_ID, AT).expect("run");
+        let resource = store
+            .reserve_resource(RUN_ID, "source-snapshot-v1")
+            .expect("resource");
+        let binding = store
+            .bind_source(
+                RUN_ID,
+                "1111111111111111111111111111111111111111",
+                &format!("sha256:{}", "2".repeat(64)),
+                7,
+            )
+            .expect("binding");
+
+        assert_eq!(binding.resource_id, "source-snapshot-v1");
+        assert!(
+            !resource.exists(),
+            "reservation is path-free and non-mutating"
+        );
+        let serialized = serde_json::to_string(&binding).expect("JSON");
+        assert!(!serialized.contains(root.to_string_lossy().as_ref()));
+        assert_eq!(store.status().expect("status").runs.len(), 1);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn source_binding_rejects_invalid_duplicate_and_tampered_identity() {
+        let root = cache_root("source-binding-invalid");
+        let store = RunJournalStore::initialize(&root).expect("store");
+        store.create_run(RUN_ID, AT).expect("run");
+        let digest = format!("sha256:{}", "2".repeat(64));
+
+        assert!(matches!(
+            store.bind_source(RUN_ID, "not-a-commit", &digest, 1),
+            Err(RunJournalError::Corrupt)
+        ));
+        assert!(matches!(
+            store.bind_source(
+                RUN_ID,
+                "1111111111111111111111111111111111111111",
+                "sha256:invalid",
+                1,
+            ),
+            Err(RunJournalError::Corrupt)
+        ));
+        assert!(matches!(
+            store.bind_source(
+                RUN_ID,
+                "1111111111111111111111111111111111111111",
+                &digest,
+                0,
+            ),
+            Err(RunJournalError::Corrupt)
+        ));
+        store
+            .bind_source(
+                RUN_ID,
+                "1111111111111111111111111111111111111111",
+                &digest,
+                1,
+            )
+            .expect("valid binding");
+        assert!(matches!(
+            store.bind_source(
+                RUN_ID,
+                "1111111111111111111111111111111111111111",
+                &digest,
+                1,
+            ),
+            Err(RunJournalError::Durable(_))
+        ));
+
+        fs::write(
+            store.run_path(RUN_ID).join(SOURCE_BINDING),
+            br#"{"schema_version":"1.0","unexpected":true}"#,
+        )
+        .expect("tamper binding");
+        let status = store.status().expect("status");
+        assert_eq!(
+            status.runs[0].classification,
+            RecoveryClassificationV1::OperatorRequired
         );
         fs::remove_dir_all(root).expect("cleanup");
     }
