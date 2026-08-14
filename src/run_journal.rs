@@ -24,6 +24,7 @@ const JOURNAL_DIR: &str = "run-journal-v1";
 const RUNS_DIR: &str = "runs";
 const ROOT_MARKER: &str = ".ccp-run-journal-root-v1.json";
 const RUN_MARKER: &str = ".ccp-run-owner-v1.json";
+const RESOURCES_DIR: &str = "resources";
 const QUARANTINE_PREFIX: &str = "quarantined-";
 static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -272,6 +273,33 @@ impl RunJournalStore {
         self.append_entry(run_id, previous.seq + 1, state, at_utc, failure_kind)
     }
 
+    /// Reserve one exact CCP-owned location for ephemeral run resources.
+    /// The directory remains inside the owned run tree so `recover apply`
+    /// quarantines it together with an interrupted journal.
+    pub fn reserve_resource(
+        &self,
+        run_id: &str,
+        resource_id: &str,
+    ) -> Result<PathBuf, RunJournalError> {
+        validate_run_id(run_id)?;
+        validate_resource_id(resource_id)?;
+        let run = self.run_path(run_id);
+        self.validate_run_marker(&run, run_id)?;
+        let resources = run.join(RESOURCES_DIR);
+        match self.durable.create_new_directory(&resources) {
+            Ok(()) => {}
+            Err(DurableFsError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {
+                validate_existing_plain_directory(&resources)?;
+            }
+            Err(error) => return Err(RunJournalError::Durable(error)),
+        }
+        let target = resources.join(resource_id);
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(RunJournalError::OwnershipMismatch);
+        }
+        Ok(target)
+    }
+
     pub fn status(&self) -> Result<RecoveryStatusV1, RunJournalError> {
         let mut runs = Vec::new();
         let mut entries: Vec<_> =
@@ -379,10 +407,14 @@ impl RunJournalStore {
         let mut paths: Vec<_> = fs::read_dir(&run)?
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
-            .filter(|entry| entry.file_name() != RUN_MARKER)
+            .filter(|entry| entry.file_name() != RUN_MARKER && entry.file_name() != RESOURCES_DIR)
             .map(|entry| entry.path())
             .collect();
         paths.sort();
+        let resources = run.join(RESOURCES_DIR);
+        if resources.exists() {
+            validate_existing_plain_directory(&resources)?;
+        }
         let mut entries: Vec<RunJournalEntryV1> = Vec::with_capacity(paths.len());
         for path in paths {
             let metadata = fs::symlink_metadata(&path)?;
@@ -423,6 +455,19 @@ impl RunJournalStore {
             return Err(RunJournalError::OwnershipMismatch);
         }
         Ok(())
+    }
+}
+
+fn validate_resource_id(value: &str) -> Result<(), RunJournalError> {
+    if !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        Ok(())
+    } else {
+        Err(RunJournalError::InvalidRunId)
     }
 }
 

@@ -34,6 +34,7 @@ use crate::receipt::{
     ReceiptError, ReceiptV1, RepositoryEvidence, RunEvidence, canonical_digest,
 };
 use crate::runtime::{RuntimeError, RuntimePort, docker_execution_environment, doctor_guard};
+use crate::source_snapshot::{SourceSnapshot, SourceSnapshotError};
 use crate::workspace::{PreparedWorkspace, WorkspaceError};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,6 +48,7 @@ pub struct RunRequest<'a> {
     pub repository: &'a Path,
     pub cache: &'a ManagedCache,
     pub generation: u64,
+    pub source_snapshot: Option<&'a SourceSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -177,21 +179,25 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
         generation: request.generation.to_string(),
     };
     let generation = GenerationGuard::new(identity.clone());
-    let commit = inspect_repository(
-        request.envelope,
-        &repository,
-        supervisor,
-        cancellation,
-        &generation,
-        &identity,
-    )
-    .map_err(|error| {
-        if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
-            RunError::ResourcePressure
-        } else {
-            error
-        }
-    })?;
+    let commit = if let Some(snapshot) = request.source_snapshot {
+        snapshot.commit_sha().to_owned()
+    } else {
+        inspect_repository(
+            request.envelope,
+            &repository,
+            supervisor,
+            cancellation,
+            &generation,
+            &identity,
+        )
+        .map_err(|error| {
+            if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+                RunError::ResourcePressure
+            } else {
+                error
+            }
+        })?
+    };
     let identity = RunIdentity {
         commit: Some(commit.clone()),
         ..identity
@@ -200,11 +206,15 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
         .replace(identity.clone())
         .map_err(RunError::Process)?;
 
+    let execution_root = request
+        .source_snapshot
+        .map(SourceSnapshot::root)
+        .unwrap_or(repository.as_path());
     let probe = runtime
         .probe(
             request.envelope,
             supervisor,
-            &repository,
+            execution_root,
             cancellation,
             &doctor_guard(request.envelope),
         )
@@ -218,8 +228,17 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
     }
-    let prepared = PreparedWorkspace::prepare(request.envelope, &repository, request.cache)
-        .map_err(RunError::Workspace)?;
+    let prepared = if let Some(snapshot) = request.source_snapshot {
+        PreparedWorkspace::prepare_snapshot(
+            request.envelope,
+            execution_root,
+            &snapshot.evidence().manifest_digest,
+            request.cache,
+        )
+    } else {
+        PreparedWorkspace::prepare(request.envelope, execution_root, request.cache)
+    }
+    .map_err(RunError::Workspace)?;
     let dry_run = runtime
         .dry_run(request.envelope, &prepared.plan)
         .map_err(RunError::Runtime)?;
@@ -259,7 +278,7 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
                 identity: identity.clone(),
                 program: OsString::from(rendered.program),
                 argv: rendered.argv.iter().map(OsString::from).collect(),
-                current_dir: repository.clone(),
+                current_dir: execution_root.to_path_buf(),
                 environment: environment.clone(),
                 timeout: Duration::from_secs(declared.timeout_seconds),
                 max_capture_bytes: CHECK_CAPTURE_BYTES,
@@ -306,6 +325,11 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
     )?;
     if completed_commit != commit {
         return Err(RunError::StaleCommit);
+    }
+    if let Some(snapshot) = request.source_snapshot {
+        snapshot
+            .revalidate(supervisor, &post_run_cancellation, &generation, &identity)
+            .map_err(RunError::SourceSnapshot)?;
     }
     if cancellation.reason() == Some(CancellationReason::ResourcePressure)
         && !has_resource_pressure_not_run(&checks)
@@ -719,6 +743,7 @@ pub enum RunError {
     Invariant(&'static str),
     Cache(CacheError),
     Workspace(WorkspaceError),
+    SourceSnapshot(SourceSnapshotError),
     Runtime(RuntimeError),
     Process(ProcessError),
     Receipt(ReceiptError),
@@ -739,6 +764,7 @@ impl RunError {
             Self::Process(_) | Self::GitInspection => 4,
             Self::Cache(_)
             | Self::Workspace(_)
+            | Self::SourceSnapshot(_)
             | Self::Clock
             | Self::Invariant(_)
             | Self::Receipt(_)
@@ -765,6 +791,7 @@ impl fmt::Display for RunError {
             Self::Invariant(message) => write!(formatter, "run invariant failed: {message}"),
             Self::Cache(error) => write!(formatter, "{error}"),
             Self::Workspace(error) => write!(formatter, "{error}"),
+            Self::SourceSnapshot(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Process(error) => write!(formatter, "{error}"),
             Self::Receipt(error) => write!(formatter, "{error}"),
@@ -778,6 +805,7 @@ impl std::error::Error for RunError {
         match self {
             Self::Cache(error) => Some(error),
             Self::Workspace(error) => Some(error),
+            Self::SourceSnapshot(error) => Some(error),
             Self::Runtime(error) => Some(error),
             Self::Process(error) => Some(error),
             Self::Receipt(error) => Some(error),
@@ -1109,6 +1137,7 @@ depends_on = ["first"]
                     repository: &self.repository,
                     cache: &self.cache,
                     generation: 7,
+                    source_snapshot: None,
                 },
                 &DockerCompatibleRuntime,
                 &FakeSupervisor::new(mode),
@@ -1128,6 +1157,7 @@ depends_on = ["first"]
                     repository: &self.repository,
                     cache: &self.cache,
                     generation: 7,
+                    source_snapshot: None,
                 },
                 &DockerCompatibleRuntime,
                 &FakeSupervisor::new(mode),
@@ -1184,6 +1214,7 @@ depends_on = ["first"]
                 repository: &fixture.repository,
                 cache: &fixture.cache,
                 generation: 7,
+                source_snapshot: None,
             },
             &DockerCompatibleRuntime,
             &FakeSupervisor::new(ExecutionMode::Pass),
