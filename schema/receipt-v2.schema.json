@@ -1,44 +1,28 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "MatrixReceiptEnvelopeV2",
-  "type": "object",
-  "properties": {
-    "receipt": {
-      "$ref": "#/$defs/MatrixReceiptV2"
-    },
-    "receipt_id": {
-      "type": "string"
-    }
-  },
-  "additionalProperties": false,
-  "required": [
-    "receipt_id",
-    "receipt"
-  ],
   "$defs": {
     "CheckEvidence": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "argv": {
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "cancelled": {
           "type": "boolean"
         },
         "duration_ms": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0
+          "minimum": 0,
+          "type": "integer"
         },
         "exit_code": {
+          "format": "int32",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int32"
+          ]
         },
         "id": {
           "type": "string"
@@ -68,7 +52,6 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "id",
         "required",
@@ -78,19 +61,20 @@
         "duration_ms",
         "timed_out",
         "cancelled"
-      ]
+      ],
+      "type": "object"
     },
     "EvidenceStatus": {
-      "type": "string",
       "enum": [
         "PASS",
         "FAIL",
         "PENDING",
         "NOT_RUN"
-      ]
+      ],
+      "type": "string"
     },
     "MatrixReceiptV2": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "configuration_digest": {
           "type": "string"
@@ -117,16 +101,15 @@
           "$ref": "#/$defs/RunEvidence"
         },
         "runtime_receipts": {
-          "type": "array",
           "items": {
             "$ref": "#/$defs/MatrixRuntimeReceiptV2"
-          }
+          },
+          "type": "array"
         },
         "schema_version": {
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "schema_version",
         "producer",
@@ -136,10 +119,11 @@
         "runtime_receipts",
         "overall_status",
         "redaction_policy_version"
-      ]
+      ],
+      "type": "object"
     },
     "MatrixRuntimeReceiptV2": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "receipt": {
           "$ref": "#/$defs/ReceiptEnvelopeV1"
@@ -148,14 +132,14 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "runtime_id",
         "receipt"
-      ]
+      ],
+      "type": "object"
     },
     "PlatformEvidence": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "host_arch": {
           "type": "string"
@@ -176,7 +160,6 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "host_os",
         "host_arch",
@@ -184,10 +167,11 @@
         "runtime_version",
         "image_reference",
         "image_digest"
-      ]
+      ],
+      "type": "object"
     },
     "ProducerEvidence": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "name": {
           "type": "string"
@@ -196,14 +180,14 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "name",
         "version"
-      ]
+      ],
+      "type": "object"
     },
     "ReceiptEnvelopeV1": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "receipt": {
           "$ref": "#/$defs/ReceiptV1"
@@ -212,20 +196,20 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "receipt_id",
         "receipt"
-      ]
+      ],
+      "type": "object"
     },
     "ReceiptV1": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "checks": {
-          "type": "array",
           "items": {
             "$ref": "#/$defs/CheckEvidence"
-          }
+          },
+          "type": "array"
         },
         "configuration_digest": {
           "type": "string"
@@ -258,7 +242,6 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "schema_version",
         "producer",
@@ -269,10 +252,68 @@
         "checks",
         "overall_status",
         "redaction_policy_version"
-      ]
+      ],
+      "type": "object"
+    },
+    "ReceiptV2": {
+      "additionalProperties": false,
+      "properties": {
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/CheckEvidence"
+          },
+          "type": "array"
+        },
+        "configuration_digest": {
+          "type": "string"
+        },
+        "incomplete_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "overall_status": {
+          "$ref": "#/$defs/EvidenceStatus"
+        },
+        "platform": {
+          "$ref": "#/$defs/PlatformEvidence"
+        },
+        "producer": {
+          "$ref": "#/$defs/ProducerEvidence"
+        },
+        "redaction_policy_version": {
+          "type": "string"
+        },
+        "repository": {
+          "$ref": "#/$defs/RepositoryEvidence"
+        },
+        "run": {
+          "$ref": "#/$defs/RunEvidence"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "source_snapshot": {
+          "$ref": "#/$defs/SourceSnapshotEvidence"
+        }
+      },
+      "required": [
+        "schema_version",
+        "producer",
+        "repository",
+        "run",
+        "source_snapshot",
+        "platform",
+        "configuration_digest",
+        "checks",
+        "overall_status",
+        "redaction_policy_version"
+      ],
+      "type": "object"
     },
     "RepositoryEvidence": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "commit_sha": {
           "type": "string"
@@ -284,23 +325,23 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "repository",
         "commit_sha",
         "dirty"
-      ]
+      ],
+      "type": "object"
     },
     "RunEvidence": {
-      "type": "object",
+      "additionalProperties": false,
       "properties": {
         "finished_at_utc": {
           "type": "string"
         },
         "generation": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0
+          "minimum": 0,
+          "type": "integer"
         },
         "run_id": {
           "type": "string"
@@ -309,13 +350,70 @@
           "type": "string"
         }
       },
-      "additionalProperties": false,
       "required": [
         "run_id",
         "generation",
         "started_at_utc",
         "finished_at_utc"
-      ]
+      ],
+      "type": "object"
+    },
+    "SourceSnapshotEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "entry_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "manifest_digest": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "strategy": {
+          "$ref": "#/$defs/SourceSnapshotStrategy"
+        }
+      },
+      "required": [
+        "schema_version",
+        "strategy",
+        "manifest_digest",
+        "entry_count"
+      ],
+      "type": "object"
+    },
+    "SourceSnapshotStrategy": {
+      "enum": [
+        "git-object",
+        "git-archive",
+        "detached-worktree"
+      ],
+      "type": "string"
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "receipt": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/MatrixReceiptV2"
+        },
+        {
+          "$ref": "#/$defs/ReceiptV2"
+        }
+      ]
+    },
+    "receipt_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "receipt_id",
+    "receipt"
+  ],
+  "title": "ReceiptContractsV2",
+  "type": "object"
 }
