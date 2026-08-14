@@ -26,5 +26,6 @@ pub mod resource_history;
 pub mod run;
 pub mod run_journal;
 pub mod runtime;
+mod schema_contract;
 pub mod verify;
 pub mod workspace;

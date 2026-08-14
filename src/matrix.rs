@@ -533,7 +533,7 @@ pub fn matrix_config_schema_json() -> Result<String, MatrixError> {
 }
 
 pub fn matrix_receipt_schema_json() -> Result<String, MatrixError> {
-    serde_json::to_string_pretty(&schema_for!(MatrixReceiptEnvelopeV2)).map_err(MatrixError::Json)
+    crate::schema_contract::combined_receipt_v2_schema_json().map_err(MatrixError::Json)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
