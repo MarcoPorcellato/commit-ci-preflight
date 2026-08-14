@@ -267,6 +267,8 @@ commit-ci-preflight dry-run
 commit-ci-preflight run
 commit-ci-preflight verify
 commit-ci-preflight cache path|init|inventory|cleanup
+commit-ci-preflight recover status --json
+commit-ci-preflight recover apply <run-id> --json
 commit-ci-preflight migrate-github-actions
 commit-ci-preflight benchmark
 commit-ci-preflight verify-benchmark
@@ -277,6 +279,8 @@ Key boundaries:
 - `run` requires a clean Git commit and writes a canonical receipt;
 - `verify` separates integrity, policy, and identity assurance;
 - cache cleanup is preview-only in 0.1.0;
+- `recover status` is read-only and path-free; `recover apply` accepts one exact
+  64-character run identifier and only quarantines CCP-owned journal state;
 - `migrate-github-actions` parses YAML as untrusted data and does not execute
   marketplace actions, expressions, commands, or secrets;
 - `guard exec` is a shell-free wrapper around one explicit program argv and
