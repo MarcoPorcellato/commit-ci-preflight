@@ -31,7 +31,8 @@ use crate::process::{
 };
 use crate::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, ReceiptEnvelopeV1,
-    ReceiptError, ReceiptV1, RepositoryEvidence, RunEvidence, canonical_digest,
+    ReceiptEnvelopeV2, ReceiptError, ReceiptV1, ReceiptV2, RepositoryEvidence, RunEvidence,
+    SourceSnapshotEvidence, SourceSnapshotStrategy, canonical_digest,
 };
 use crate::runtime::{RuntimeError, RuntimePort, docker_execution_environment, doctor_guard};
 use crate::source_snapshot::{SourceSnapshot, SourceSnapshotError};
@@ -54,6 +55,7 @@ pub struct RunRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunOutcome {
     pub receipt: ReceiptEnvelopeV1,
+    pub receipt_v2: Option<ReceiptEnvelopeV2>,
     pub receipt_path: PathBuf,
 }
 
@@ -97,6 +99,13 @@ impl RunOutcome {
             EvidenceStatus::Pass => 0,
             EvidenceStatus::Fail => 1,
             EvidenceStatus::Pending | EvidenceStatus::NotRun => 5,
+        }
+    }
+
+    pub fn published_canonical_bytes(&self) -> Result<Vec<u8>, ReceiptError> {
+        match &self.receipt_v2 {
+            Some(receipt) => receipt.canonical_bytes(),
+            None => self.receipt.canonical_bytes(),
         }
     }
 }
@@ -398,10 +407,43 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
         redaction_policy_version: REDACTION_POLICY_VERSION.to_owned(),
     })
     .map_err(RunError::Receipt)?;
-    let receipt_path =
-        write_receipt_atomic(&repository, &request.envelope.plan.receipt.output, &receipt)?;
+    let receipt_v2 = request
+        .source_snapshot
+        .map(|snapshot| {
+            ReceiptEnvelopeV2::seal(ReceiptV2 {
+                schema_version: crate::receipt::RECEIPT_V2_SCHEMA_VERSION.to_owned(),
+                producer: receipt.receipt.producer.clone(),
+                repository: receipt.receipt.repository.clone(),
+                run: receipt.receipt.run.clone(),
+                source_snapshot: SourceSnapshotEvidence {
+                    schema_version: crate::receipt::SOURCE_SNAPSHOT_SCHEMA_VERSION.to_owned(),
+                    strategy: SourceSnapshotStrategy::GitObject,
+                    manifest_digest: snapshot.evidence().manifest_digest.clone(),
+                    entry_count: snapshot.evidence().entry_count,
+                },
+                platform: receipt.receipt.platform.clone(),
+                configuration_digest: receipt.receipt.configuration_digest.clone(),
+                checks: receipt.receipt.checks.clone(),
+                overall_status: receipt.receipt.overall_status,
+                incomplete_reason: receipt.receipt.incomplete_reason.clone(),
+                redaction_policy_version: receipt.receipt.redaction_policy_version.clone(),
+            })
+        })
+        .transpose()
+        .map_err(RunError::Receipt)?;
+    let published_bytes = match &receipt_v2 {
+        Some(value) => value.canonical_bytes(),
+        None => receipt.canonical_bytes(),
+    }
+    .map_err(RunError::Receipt)?;
+    let receipt_path = write_receipt_bytes_atomic(
+        &repository,
+        &request.envelope.plan.receipt.output,
+        &published_bytes,
+    )?;
     Ok(RunOutcome {
         receipt,
+        receipt_v2,
         receipt_path,
     })
 }
@@ -647,6 +689,15 @@ pub fn write_receipt_atomic(
     relative_output: &str,
     receipt: &ReceiptEnvelopeV1,
 ) -> Result<PathBuf, RunError> {
+    let bytes = receipt.canonical_bytes().map_err(RunError::Receipt)?;
+    write_receipt_bytes_atomic(repository, relative_output, &bytes)
+}
+
+fn write_receipt_bytes_atomic(
+    repository: &Path,
+    relative_output: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, RunError> {
     let repository = fs::canonicalize(repository).map_err(RunError::Io)?;
     let target = repository.join(relative_output);
     if !target.starts_with(&repository) {
@@ -661,14 +712,13 @@ pub fn write_receipt_atomic(
     }
     let sequence = RECEIPT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(".receipt-tmp-{}-{sequence}", std::process::id()));
-    let bytes = receipt.canonical_bytes().map_err(RunError::Receipt)?;
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)
             .map_err(RunError::Io)?;
-        file.write_all(&bytes).map_err(RunError::Io)?;
+        file.write_all(bytes).map_err(RunError::Io)?;
         file.sync_all().map_err(RunError::Io)?;
         fs::rename(&temporary, &target).map_err(RunError::Io)
     })();
@@ -884,16 +934,20 @@ mod tests {
                         "post-run Git audit reused the cancelled run token",
                     ));
                 }
-                let is_status = request
-                    .argv
-                    .first()
-                    .is_some_and(|argument| argument == "status");
+                let git_command = request.argv.first().and_then(|argument| argument.to_str());
+                let is_status = git_command == Some("status");
                 if matches!(self.mode, ExecutionMode::CancelDuringGitInspection)
                     && self.git_revisions.fetch_add(1, Ordering::SeqCst) == 0
                 {
                     cancellation.cancel_resource_pressure();
                 }
-                let stdout = if is_status {
+                let stdout = if git_command == Some("ls-tree") {
+                    format!("100644 blob {}\tREADME.md\0", "c".repeat(40)).into_bytes()
+                } else if git_command == Some("cat-file") {
+                    b"snapshot source\n".to_vec()
+                } else if git_command == Some("hash-object") {
+                    format!("{}\n", "c".repeat(40)).into_bytes()
+                } else if is_status {
                     if matches!(self.mode, ExecutionMode::Dirty) {
                         b" M source.rs\n".to_vec()
                     } else {
@@ -1198,6 +1252,64 @@ depends_on = ["first"]
                 .iter()
                 .all(|entry| entry.status == crate::cache::CacheEntryStatus::Complete)
         );
+    }
+
+    #[test]
+    fn snapshot_run_publishes_v2_receipt_bound_to_manifest() {
+        let fixture = RunFixture::new("snapshot-v2");
+        let supervisor = FakeSupervisor::new(ExecutionMode::Pass);
+        let commit = "a".repeat(40);
+        let identity = RunIdentity {
+            project: fixture.envelope.plan.project.clone(),
+            commit: Some(commit.clone()),
+            config_digest: fixture.envelope.plan_digest.clone(),
+            generation: "7".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let resource_root = fixture.root.join("source-snapshot");
+        let mut snapshot = SourceSnapshot::materialize(
+            &fixture.repository,
+            &commit,
+            &resource_root,
+            &supervisor,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("source snapshot");
+        snapshot
+            .prepare_mount_overlay(&fixture.envelope)
+            .expect("mount overlay");
+
+        let outcome = execute_local_run(
+            &RunRequest {
+                envelope: &fixture.envelope,
+                repository: &fixture.repository,
+                cache: &fixture.cache,
+                generation: 7,
+                source_snapshot: Some(&snapshot),
+            },
+            &DockerCompatibleRuntime,
+            &supervisor,
+            &CancellationToken::default(),
+            &FixedClock::new(),
+        )
+        .expect("snapshot run");
+
+        let decoded: ReceiptEnvelopeV2 =
+            serde_json::from_slice(&fs::read(&outcome.receipt_path).expect("receipt bytes"))
+                .expect("v2 receipt JSON");
+        decoded.verify().expect("sealed v2 receipt");
+        assert_eq!(decoded.receipt.repository.commit_sha, commit);
+        assert_eq!(
+            decoded.receipt.source_snapshot.manifest_digest,
+            snapshot.evidence().manifest_digest
+        );
+        assert_eq!(
+            decoded.receipt.source_snapshot.entry_count,
+            snapshot.evidence().entry_count
+        );
+        assert_eq!(outcome.receipt_v2, Some(decoded));
     }
 
     #[test]

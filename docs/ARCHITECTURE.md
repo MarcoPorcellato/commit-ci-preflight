@@ -7,12 +7,12 @@ candidate. Future signing, package distribution, additional runtime adapters,
 and full GitHub Actions compatibility are not part of the architecture claimed
 here.
 
-T2 in the reliability hardening plan is still proposed/in progress. The
-planned immutable source snapshot work is documented separately in
+T2 is implemented in source; native qualification remains pending. The
+immutable source snapshot work is documented in
 [`docs/adr/0002-immutable-git-object-snapshots.md`](adr/0002-immutable-git-object-snapshots.md),
 [`docs/TRIZ_CONTRADICTIONS.md`](TRIZ_CONTRADICTIONS.md), and
 [`docs/INVARIANT_EVIDENCE_MATRIX.md`](INVARIANT_EVIDENCE_MATRIX.md). This page
-continues to describe only the implemented 0.1.0 source candidate.
+includes the implemented 0.1.0 source candidate and T2 source boundary.
 
 ## System purpose
 

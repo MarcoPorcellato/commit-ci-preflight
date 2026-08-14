@@ -1,13 +1,13 @@
 # ADR 0002: Immutable Git-object snapshots for T2
 
-- Status: Proposed
-- Tranche: T2 in progress
+- Status: Accepted and implemented; native qualification pending
+- Tranche: T2 source-complete
 - Date: 2026-08-14
 - Decision owner: Marco Porcellato
 
 ## Context
 
-The current implementation mounts the repository path read-only at
+Before T2, the implementation mounted the repository path read-only at
 `/workspace`, while still reading whatever bytes exist in the user's working
 tree at runtime. `src/workspace.rs` canonicalizes the repository path,
 validates that it is a directory, and binds it into the container as a
@@ -32,7 +32,7 @@ submodule drift through the live source mount.
 
 ## Decision
 
-T2 should materialize a CCP-owned immutable source snapshot for attestable
+T2 materializes a CCP-owned immutable source snapshot for attestable
 execution and mount only that snapshot at runtime.
 
 The preferred implementation direction is:
@@ -86,5 +86,5 @@ Costs:
 - No attestable run without a source snapshot digest.
 - No PASS if source identity is uncertain, unsupported, or stale.
 - No silent reinterpretation of unsupported LFS or submodule states.
-- No claim that T2 is implemented or qualified until the snapshot path is
-  covered by exact-commit regression evidence.
+- Deterministic implementation evidence is not native platform qualification;
+  native and crash/power-loss receipts remain separate and pending.

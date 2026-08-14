@@ -30,7 +30,7 @@ must eventually invert the assertion:
 
 | Gap | Characterization location | Closure tranche |
 |---|---|---|
-| Live repository bytes can change under the same workspace plan | `src/workspace.rs` | T2 |
+| Immutable source execution (closed: positive snapshot tests replaced the characterization) | `src/source_snapshot.rs`, `src/workspace.rs` | T2 closed in source; native qualification pending |
 | A complete cache entry can be mutated while retaining its complete marker | `src/cache.rs` | T5 |
 | A newly sealed receipt can alter argv while retaining the declared configuration digest | `tests/verification_contract.rs` | T7 |
 | A partial ticket counter blocks admission | `src/admission.rs` | T6 |
@@ -81,6 +81,10 @@ The v1 compatibility baseline remains pinned in:
 Receipt v1 remains readable during hardening, but it cannot provide v2 physical
 assurance. Verifiers must report the actual assurance scope and fail closed when
 repository policy requires evidence that the selected schema cannot carry.
+
+Receipt v2 is additionally pinned in `schema/receipt-v2.schema.json` and
+`tests/fixtures/receipt-v2-pass.json`. Deterministic tests cover v1/v2 dispatch,
+snapshot-digest tampering, source revalidation and journal ownership.
 
 ## Rules for future fault tests
 
