@@ -401,7 +401,8 @@ Exit gate:
 Source-side checkpoint on `codex/reliability-hardening-t1`:
 
 - immutable create-new journal events are active on the real `run` lifecycle;
-- receipt v1 remains unchanged and separate from recovery state;
+- receipt v1 remains unchanged and separate from recovery state; T2 adds a
+  strict v2 publication path for snapshot-backed runs without rewriting v1;
 - `recover status` opens only an initialized managed cache and performs no
   mutation;
 - `recover apply <run-id>` quarantines one exact CCP-owned unfinished journal;
@@ -417,15 +418,10 @@ Source-side checkpoint on `codex/reliability-hardening-t1`:
 
 ### PR T2 — Immutable source snapshot and byte identity
 
-Status (reconciled 2026-08-19): deterministic source implementation exists in
-PR #34 and in a separate clean local continuation, but the public PR is stale
-and conflicting against current `main`. The source branch is not yet an
-accepted mainline milestone. Reconciliation must happen in a fresh worktree
-from the exact current `origin/main`, preserving the local continuation as an
-independent source of candidate fixes. The merge simulation identifies
-conflicts in the receipt-v2 schema and run orchestration. Until those conflicts
-are resolved and a new exact-head receipt is accepted, T2 is **IMPLEMENTED
-CANDIDATE / NOT QUALIFIED**.
+Status (reconciled 2026-08-20): implemented in this PR with deterministic
+contract tests. Native platform and crash/power-loss qualification remain
+pending and are not represented as PASS. Until the rebased exact head has an
+accepted receipt, T2 remains **IMPLEMENTED CANDIDATE / NOT QUALIFIED**.
 
 Deliverables:
 

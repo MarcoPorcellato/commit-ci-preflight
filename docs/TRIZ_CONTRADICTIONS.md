@@ -2,11 +2,10 @@
 
 ## Status
 
-This is a proposed analysis for T2 only. It is based on the current code paths
-in `src/workspace.rs` and `src/runtime.rs`, plus
-[`docs/RELIABILITY_HARDENING_PLAN.md`](RELIABILITY_HARDENING_PLAN.md). It does
-not claim that immutable snapshots, source digests, or receipt v2 are already
-implemented or qualified.
+This is the implemented decision ledger for T2. It is based on the code paths
+in `src/source_snapshot.rs`, `src/run.rs`, and `src/runtime.rs`, plus
+[`docs/RELIABILITY_HARDENING_PLAN.md`](RELIABILITY_HARDENING_PLAN.md). It
+separates deterministic implementation evidence from native qualification.
 
 ## Ideal final result
 
@@ -24,9 +23,9 @@ The ideal system would:
 
 ## Engineering contradictions
 
-| Need | Conflict | Proposed resolution |
+| Need | Conflict | Implemented resolution |
 | --- | --- | --- |
-| Exact commit fidelity | The current live repository mount can still expose ignored files, generated state, local symlinks, LFS differences, or submodule drift | Materialize a CCP-owned immutable snapshot before admission |
+| Exact commit fidelity | Before T2, the live repository mount could expose ignored files, generated state, local symlinks, LFS differences, or submodule drift | Materialize a CCP-owned immutable snapshot before admission |
 | Strong provenance | A plain checkout or whole-tree copy does not identify every admissible object | Record a canonical manifest over path, mode, blob OID, and submodule OID |
 | Tight failure handling | Unsupported Git states should not sneak through as partial support | Fail closed before admission and after source revalidation |
 | Bounded recovery | Snapshot cleanup must not become an untracked side effect of execution | Journal snapshot identity and cleanup state separately from the run phase |
@@ -85,21 +84,22 @@ shell layer.
 - Silently accepting unsupported LFS or submodule states.
 - Letting generated files, IDE state, or local caches influence attestation.
 - Recomputing source identity only after receipt sealing.
-- Describing T2 as implemented or qualified before snapshot evidence exists.
+- Conflating deterministic T2 implementation evidence with native or release
+  qualification.
 
 ## Measurable gates
 
-| Gate | Evidence needed |
-| --- | --- |
-| Same supported Git tree produces the same source digest | Deterministic snapshot manifest and digest tests |
-| Ignored files and local noise cannot affect attestation | Regression coverage that changes only ignored or generated state |
-| Unsupported LFS or submodule states fail closed | Explicit failure tests before admission |
-| Snapshot identity reaches the verifier | `source_snapshot_digest` in the execution contract and receipt v2 |
-| Source is revalidated before sealing | A post-execution check that compares the bound snapshot identity |
-| Cleanup is bounded and recoverable | Journaled snapshot lifecycle with exact ownership markers |
+| Gate | Evidence | Status |
+| --- | --- | --- |
+| Same supported Git tree produces the same source digest | Deterministic snapshot manifest and digest tests | PASS in source |
+| Ignored files and local noise cannot affect attestation | Git-object materialization plus snapshot-backed run test | PASS in source |
+| Unsupported LFS or submodule states fail closed | Explicit typed rejection tests before admission | PASS in source |
+| Snapshot identity reaches the verifier | Receipt v2 publication and v1/v2 verifier dispatch | PASS in source |
+| Source is revalidated before sealing | Post-execution file, mode, blob and manifest checks | PASS in source |
+| Cleanup is bounded and recoverable | Strict journal source binding and exact run ownership | PASS in source; native crash proof PENDING |
 
 ## Non-claim
 
-T2 is still proposed and in progress. Nothing in this document should be read
-as implementation evidence, release qualification, or a claim that the live
-workspace mount is already replaced.
+T2 is implemented in source and deterministically tested. Native platform,
+crash/power-loss, and release qualification remain pending and require
+separate evidence.

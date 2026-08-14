@@ -2,37 +2,40 @@
 
 ## Status
 
-This matrix is for the proposed T2 snapshot tranche only. It separates current
-evidence from the evidence that T2 still needs. It does not claim that T2 is
-implemented or qualified.
+This matrix records the implemented T2 snapshot tranche. It separates
+deterministic source evidence from native qualification still pending.
 
 ## Reading guide
 
-- **Current evidence**: what the current code or docs already show.
-- **Gap**: what is still missing for T2.
-- **T2 proof artifact**: the evidence T2 should produce.
-- **Gate**: the measurable check that would close the gap.
+- **Implemented evidence**: deterministic source evidence present in this tranche.
+- **Residual gap**: evidence that still requires native or fault qualification.
+- **Proof artifact**: the durable implementation or test evidence.
+- **Gate**: the measurable acceptance condition and its current status.
 
 ## Matrix
 
-| Invariant | Current evidence | Gap | T2 proof artifact | Gate |
+| Invariant | Implemented evidence | Residual gap | Proof artifact | Gate |
 | --- | --- | --- | --- | --- |
-| Exact commit bytes are isolated from the user's mutable working tree | `src/workspace.rs` mounts the canonicalized repository path read-only at `/workspace`; `src/runtime.rs` renders explicit `docker run` argv with `--read-only`; `docs/CACHE_AND_WORKSPACE.md` calls this a containment contract, not a complete sandbox | The current mount still comes from the live checkout, so ignored files, generated state, IDE files, local symlinks, LFS differences, or submodule drift can still influence execution | CCP-owned immutable source snapshot materialized outside the working tree | Changing only ignored or generated state does not change the snapshot digest or execution outcome |
-| Source identity is canonical and reproducible | The plan already uses deterministic config and receipt hashing, but the source side still lacks a manifest and digest | There is no canonical path/mode/blob OID/submodule OID manifest yet | Canonical source manifest plus `source_snapshot_digest` | The same supported Git tree yields the same digest on repeated runs |
-| Unsupported Git states fail closed | Current docs and code validate mount targets and directory shape, but not the full T2 Git-state policy | No explicit policy yet for sparse-checkout, submodules, LFS, executable bits, or symlinks at the source-snapshot layer | Source policy table and failure cases for unsupported states | Any unsupported source state stops before admission |
-| Receipt evidence binds source identity | Receipt v1 and the current architecture track plan and runtime evidence, not source snapshot identity | `source_snapshot_digest` is absent from the current receipt contract | Receipt v2 with source snapshot binding | Verifier rejects mismatched source identity even if other fields match |
-| Source identity is revalidated before sealing | Current `run` flow seals receipts after execution and cache completion, but without immutable source evidence | No post-execution source revalidation step exists for T2 | Post-execution source revalidation record in the journal | Receipt sealing does not occur unless the bound snapshot still matches |
-| Snapshot cleanup is bounded and recoverable | The current workspace layer already uses a `.run-lock-v1` lock and managed cache ownership rules | There is no T2 snapshot journal entry or cleanup/recovery classification yet | Journaled snapshot lifecycle with explicit ownership markers | Cleanup is reproducible, bounded, and does not depend on ad hoc operator action |
-| T2 remains proposed, not implemented | The hardening plan marks T2 as a deliverable tranche and defines its exit gate | No implementation or qualification receipt exists for T2 | ADR, TRIZ analysis, and this matrix | No document in this tranche may claim PASS or qualification |
+| Exact commit bytes are isolated from the user's mutable working tree | `SourceSnapshot::materialize` reads the committed tree and blobs through Git, writes a CCP-owned tree, and `PreparedWorkspace::prepare_snapshot` mounts only that tree | Native runtime observation remains pending | `src/source_snapshot.rs`, `src/workspace.rs`, and the snapshot-backed run test | Deterministic isolation PASS; native qualification PENDING |
+| Source identity is canonical and reproducible | `SourceManifestV1` sorts entries and binds commit, path, mode, object kind and object ID; canonical SHA-256 produces `manifest_digest` | Cross-platform native vectors remain pending | Source-snapshot unit tests and receipt v2 golden fixture | Repeated supported manifests have identical digest: PASS |
+| Unsupported Git states fail closed | Submodules, symlinks and LFS pointers are rejected; unsupported modes fail; executable entries are supported on Unix and rejected on unsupported platforms. Sparse working-tree shape is ignored because materialization reads the full committed tree; unavailable objects fail as Git errors | Windows-native executable-mode behavior is not qualified | Typed `SourceSnapshotError` variants and deterministic rejection tests | Deterministic policy PASS; Windows-native qualification PENDING |
+| Receipt evidence binds source identity | Snapshot-backed runs publish strict receipt v2 with strategy, manifest digest and entry count; historical v1 remains readable without implied snapshot assurance | Trusted producer identity and signing are later tranches | `schema/receipt-v2.schema.json`, `tests/fixtures/receipt-v2-pass.json`, and dual-version verifier dispatch | Tampered snapshot digest fails integrity: PASS |
+| Source identity is revalidated before sealing | `SourceSnapshot::revalidate` checks file set, mode, blob identity and manifest digest after execution and before receipt construction | Native interruption evidence remains pending | Run lifecycle ordering and source revalidation tests | Changed snapshot cannot produce a sealed receipt: PASS |
+| Snapshot cleanup is bounded and recoverable | The journal reserves one opaque resource, records `source-snapshot-v1.json` with strict source identity, and existing run quarantine owns the complete run directory; cleanup targets only the exact snapshot resource | Crash/power-loss and Windows replacement receipts remain pending | `RunJournalSourceV1`, create-new durable binding, recovery validation and fault-injection seam | Deterministic ownership PASS; native crash qualification PENDING |
+| Qualification remains truthful | Deterministic tests cover materialization, revalidation, journal binding, v2 publication, v1/v2 verification and tamper rejection | Native platform and crash/power-loss receipts are pending | Separate source-test report and future native receipts | No unavailable native run is called PASS |
 
 ## Current boundary
 
-The current codebase is already explicit about a few useful boundaries:
+The implemented source boundary is explicit:
 
-- the repository mount is read-only;
+- the mutable repository is used to resolve a clean exact `HEAD`, not as the
+  attestable runtime mount;
+- the runtime receives only the CCP-owned source snapshot;
 - writable state is limited to declared cache and artifact bindings;
 - the runtime renders explicit argv instead of using an implicit shell;
-- the hardening plan already identifies commit-to-byte fidelity as the T2 gap.
+- receipt v2 carries source identity while receipt v1 remains a strict legacy
+  contract;
+- the run journal owns source cleanup without recording host paths.
 
-Those are the starting point, not the finish line. T2 is the tranche that
-turns those boundaries into immutable source evidence.
+This closes T2 in deterministic source evidence. Native platform,
+crash/power-loss and release qualification remain separate gates.

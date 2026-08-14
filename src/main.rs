@@ -917,6 +917,15 @@ fn print_run(
         lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
         return Err(CliError::Run(RunError::SourceSnapshot(error)));
     }
+    if let Err(error) = journal.bind_source(
+        &journal_id,
+        &commit,
+        &source_snapshot.evidence().manifest_digest,
+        source_snapshot.evidence().entry_count,
+    ) {
+        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        return Err(CliError::RunJournal(error));
+    }
     let admission =
         AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
     let guard = match admission.acquire(
@@ -1004,8 +1013,7 @@ fn print_run(
         .map_err(CliError::Run)?;
     if json {
         let bytes = outcome
-            .receipt
-            .canonical_bytes()
+            .published_canonical_bytes()
             .map_err(CliError::internal)?;
         println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
     } else {

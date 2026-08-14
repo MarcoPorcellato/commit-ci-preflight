@@ -19,6 +19,11 @@ Semantic Versioning after its first public release.
   journal-owned cleanup/recovery. The accompanying ADR, TRIZ contradiction
   ledger, and invariant/evidence matrix distinguish deterministic proof from
   still-pending native qualification.
+- Receipt v2 source-snapshot evidence with preserved v1 golden compatibility,
+  strict v1/v2 verifier dispatch, snapshot-digest tamper detection, and a
+  privacy-minimized journal binding for commit, manifest digest, entry count,
+  and the fixed CCP-owned resource identifier.
+
 - Durable filesystem primitives with deterministic operation-failure tests,
   append-only run-journal v1 state transitions, and bounded `recover status`
   / `recover apply <run-id>` commands. Recovery status is read-only; apply
