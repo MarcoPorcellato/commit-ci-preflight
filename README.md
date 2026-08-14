@@ -340,6 +340,9 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 - [Beta support policy](docs/BETA_SUPPORT.md)
 - [Architecture and implementation plan](docs/IMPLEMENTATION_PLAN.md)
 - [Reliability hardening roadmap](docs/RELIABILITY_HARDENING_PLAN.md)
+- [T2 immutable source snapshot ADR](docs/adr/0002-immutable-git-object-snapshots.md)
+- [T2 contradictions analysis](docs/TRIZ_CONTRADICTIONS.md)
+- [T2 invariant evidence matrix](docs/INVARIANT_EVIDENCE_MATRIX.md)
 - [Testing and fault-injection contract](docs/TESTING_AND_FAULT_INJECTION.md)
 
 ## Contributing
