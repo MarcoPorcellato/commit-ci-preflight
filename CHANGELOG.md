@@ -9,6 +9,11 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Durable filesystem primitives with deterministic operation-failure tests,
+  append-only run-journal v1 state transitions, and bounded `recover status`
+  / `recover apply <run-id>` commands. Recovery status is read-only; apply
+  uses root/run-bound ownership tokens, quarantines one exact CCP-owned
+  unfinished journal, is retry-safe after rename, and never deletes it.
 - Reliability-hardening roadmap with six explicit P0 characterization
   tripwires, an ordered T0-T11 delivery sequence, and a separate deterministic,
   integration, native, and chaos testing contract.
