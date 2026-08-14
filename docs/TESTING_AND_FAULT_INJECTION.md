@@ -54,6 +54,19 @@ must not merely rename, ignore, or remove it.
 T1 introduces the shared fault-injecting durable-filesystem seam. T2, T3, T5,
 and T6 then consume it rather than creating unrelated filesystem abstractions.
 
+The T1 implementation exercises each atomic-replacement operation with a
+deterministic fail-at-N harness and accepts only a complete old or complete new
+value. Run-journal tests cover strict transitions, deterministic replay,
+read-only status, exact-owner quarantine, malformed IDs, stable exit codes,
+privacy-minimized JSON, root/run-bound opaque ownership tokens, idempotent
+post-rename recovery, and injected storage-full failures. On Windows, Rust's
+standard library cannot durably replace an existing file without a
+remove-then-rename gap, so that operation explicitly fails closed; the active
+journal avoids the limitation by publishing immutable create-new events.
+
+Native crash/power-loss and Windows-host qualification remain separate gates.
+Deterministic source tests do not claim either result.
+
 ## Compatibility fixtures
 
 The v1 compatibility baseline remains pinned in:

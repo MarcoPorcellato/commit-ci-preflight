@@ -325,6 +325,23 @@ Exit gate:
 - ENOSPC leaves a readable last-known state and an actionable bounded error;
 - Unix and Windows replacement semantics have platform-specific tests.
 
+Source-side checkpoint on `codex/reliability-hardening-t1`:
+
+- immutable create-new journal events are active on the real `run` lifecycle;
+- receipt v1 remains unchanged and separate from recovery state;
+- `recover status` opens only an initialized managed cache and performs no
+  mutation;
+- `recover apply <run-id>` quarantines one exact CCP-owned unfinished journal;
+- root/run-bound opaque ownership tokens prevent static marker reuse, and a
+  retry recognizes an already completed quarantine after a directory-sync
+  failure;
+- malformed, foreign, ambiguous, terminal, or corrupt state fails closed;
+- deterministic Unix tests cover operation-level storage failures and
+  old-or-new atomic replacement; Windows replacement of an existing file is
+  explicitly unsupported rather than implemented as remove-then-rename;
+- Windows-native crash and power-loss qualification is **NOT RUN** and remains
+  required before a cross-platform qualification claim.
+
 ### PR T2 — Immutable source snapshot and byte identity
 
 Deliverables:

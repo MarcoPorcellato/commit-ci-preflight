@@ -59,6 +59,27 @@ pub trait CompletionBarrier {
     fn finalize(&mut self, checks: &[CheckEvidence]) -> Result<(), RunError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunLifecyclePhase {
+    Prepared,
+    Executing,
+    Finalizing,
+    Sealed,
+}
+
+pub trait RunLifecycleObserver {
+    fn transition(&mut self, phase: RunLifecyclePhase) -> Result<(), RunError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopRunLifecycleObserver;
+
+impl RunLifecycleObserver for NoopRunLifecycleObserver {
+    fn transition(&mut self, _phase: RunLifecyclePhase) -> Result<(), RunError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct NoopCompletionBarrier;
 
@@ -120,6 +141,27 @@ pub fn execute_local_run_with_barrier(
     cancellation: &CancellationToken,
     clock: &dyn Clock,
     barrier: &mut dyn CompletionBarrier,
+) -> Result<RunOutcome, RunError> {
+    let mut lifecycle = NoopRunLifecycleObserver;
+    execute_local_run_with_barrier_and_lifecycle(
+        request,
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        barrier,
+        &mut lifecycle,
+    )
+}
+
+pub fn execute_local_run_with_barrier_and_lifecycle(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    barrier: &mut dyn CompletionBarrier,
+    lifecycle: &mut dyn RunLifecycleObserver,
 ) -> Result<RunOutcome, RunError> {
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
@@ -184,6 +226,7 @@ pub fn execute_local_run_with_barrier(
     if dry_run.checks.len() != request.envelope.plan.checks.len() {
         return Err(RunError::Invariant("runtime check plan length changed"));
     }
+    lifecycle.transition(RunLifecyclePhase::Prepared)?;
 
     let started_at_utc = clock.now_utc()?;
     let run_id = run_id(
@@ -196,6 +239,7 @@ pub fn execute_local_run_with_barrier(
     let mut statuses = BTreeMap::new();
     let mut checks = Vec::with_capacity(request.envelope.plan.checks.len());
     let mut terminal_reason: Option<&'static str> = None;
+    lifecycle.transition(RunLifecyclePhase::Executing)?;
 
     for (declared, rendered) in request.envelope.plan.checks.iter().zip(&dry_run.checks) {
         let evidence = if cancellation.is_cancelled() {
@@ -270,6 +314,7 @@ pub fn execute_local_run_with_barrier(
     }
 
     barrier.finalize(&checks)?;
+    lifecycle.transition(RunLifecyclePhase::Finalizing)?;
 
     let all_checks_passed = checks
         .iter()
@@ -943,6 +988,18 @@ mod tests {
         deny: bool,
     }
 
+    #[derive(Default)]
+    struct RecordingLifecycle {
+        phases: Vec<RunLifecyclePhase>,
+    }
+
+    impl RunLifecycleObserver for RecordingLifecycle {
+        fn transition(&mut self, phase: RunLifecyclePhase) -> Result<(), RunError> {
+            self.phases.push(phase);
+            Ok(())
+        }
+    }
+
     impl CompletionBarrier for CountingBarrier {
         fn finalize(&mut self, _checks: &[CheckEvidence]) -> Result<(), RunError> {
             self.calls += 1;
@@ -1110,6 +1167,39 @@ depends_on = ["first"]
                 .entries
                 .iter()
                 .all(|entry| entry.status == crate::cache::CacheEntryStatus::Complete)
+        );
+    }
+
+    #[test]
+    fn successful_run_reports_ordered_prepared_executing_and_finalizing_phases() {
+        let fixture = RunFixture::new("lifecycle");
+        let mut barrier = CountingBarrier {
+            calls: 0,
+            deny: false,
+        };
+        let mut lifecycle = RecordingLifecycle::default();
+        execute_local_run_with_barrier_and_lifecycle(
+            &RunRequest {
+                envelope: &fixture.envelope,
+                repository: &fixture.repository,
+                cache: &fixture.cache,
+                generation: 7,
+            },
+            &DockerCompatibleRuntime,
+            &FakeSupervisor::new(ExecutionMode::Pass),
+            &CancellationToken::default(),
+            &FixedClock::new(),
+            &mut barrier,
+            &mut lifecycle,
+        )
+        .expect("run");
+        assert_eq!(
+            lifecycle.phases,
+            vec![
+                RunLifecyclePhase::Prepared,
+                RunLifecyclePhase::Executing,
+                RunLifecyclePhase::Finalizing,
+            ]
         );
     }
 

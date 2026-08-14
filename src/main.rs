@@ -18,6 +18,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
@@ -37,7 +38,7 @@ use commit_ci_preflight::process::{
     CancellationReason, CancellationToken, GenerationGuard, OutputMode, ProcessRequest,
     ProcessResult, ProcessSupervisor, ProcessTermination, RunIdentity, SupervisorPort,
 };
-use commit_ci_preflight::receipt::{CheckEvidence, EvidenceStatus};
+use commit_ci_preflight::receipt::{CheckEvidence, EvidenceStatus, canonical_digest};
 use commit_ci_preflight::resource::{
     ResourceGuardError, ResourceObservation, ResourcePlatform, ResourceProbe, ResourceProbeError,
     ResourceSnapshot, ResourceWatchdog, SupervisorResourceRunner, WatchdogTripReason,
@@ -49,7 +50,12 @@ use commit_ci_preflight::resource_history::{
     ResourceHistoryRecordV2, ResourceHistoryStore, ResourceRunOutcome, validate_profile,
 };
 use commit_ci_preflight::run::{
-    CompletionBarrier, RunError, RunRequest, SystemClock, execute_local_run_with_barrier,
+    Clock, CompletionBarrier, RunError, RunLifecycleObserver, RunLifecyclePhase, RunRequest,
+    SystemClock, execute_local_run_with_barrier_and_lifecycle,
+};
+use commit_ci_preflight::run_journal::{
+    RUN_JOURNAL_SCHEMA_VERSION, RecoveryStatusV1, RunFailureKindV1, RunJournalError,
+    RunJournalStateV1, RunJournalStore,
 };
 use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
@@ -59,10 +65,12 @@ use commit_ci_preflight::verify::{
     system_evaluated_at_utc, verify_receipt_document,
 };
 use commit_ci_preflight::workspace::{WorkspaceError, WorkspacePlanV1};
+use serde::Serialize;
 
 const GUARD_EXEC_DEFAULT_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 const GUARD_EXEC_MAX_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const GUARD_EXEC_CAPTURE_BYTES: usize = 1_048_576;
+static JOURNAL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Parser)]
 #[command(name = "commit-ci-preflight", version, about)]
@@ -207,6 +215,11 @@ enum Command {
     Cache {
         #[command(subcommand)]
         action: CacheCommand,
+    },
+    /// Inspect or quarantine unfinished CCP-owned run journal state.
+    Recover {
+        #[command(subcommand)]
+        action: RecoverCommand,
     },
 }
 
@@ -381,6 +394,26 @@ enum CacheCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum RecoverCommand {
+    /// Classify persisted run journals without modifying them.
+    Status {
+        #[command(flatten)]
+        location: CacheLocationArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Quarantine one exact unfinished CCP-owned run journal.
+    Apply {
+        /// Exact lowercase 64-character run identifier.
+        run_id: String,
+        #[command(flatten)]
+        location: CacheLocationArgs,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum AdmissionCommand {
     /// Report only bounded coordinator state and ticket identifiers.
     Status {
@@ -463,6 +496,7 @@ fn main() {
             json,
         ),
         Some(Command::Cache { action }) => run_cache_command(action),
+        Some(Command::Recover { action }) => run_recover_command(action),
         None => {
             Cli::command()
                 .print_help()
@@ -803,21 +837,46 @@ fn print_run(
     let root = resolve_cache_root(location)?;
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
+    let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
+    let journal_id = new_journal_id(&envelope.plan_digest, generation)?;
+    let journal_clock = SystemClock;
+    journal
+        .create_run(
+            &journal_id,
+            &journal_clock.now_utc().map_err(CliError::Run)?,
+        )
+        .map_err(CliError::RunJournal)?;
+    let mut lifecycle = JournalLifecycleObserver {
+        store: &journal,
+        run_id: &journal_id,
+        clock: &journal_clock,
+    };
     let supervisor = Arc::new(ProcessSupervisor::standard());
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
     let admission =
         AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
-    let guard = admission
-        .acquire(
-            Duration::from_secs(admission_timeout_seconds),
-            &cancellation,
-        )
-        .map_err(CliError::Admission)?;
+    let guard = match admission.acquire(
+        Duration::from_secs(admission_timeout_seconds),
+        &cancellation,
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
+            return Err(CliError::Admission(error));
+        }
+    };
+    lifecycle.transition_state(RunJournalStateV1::Admitted, None)?;
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
         return match guard.release() {
-            Ok(()) => Err(error),
-            Err(release_error) => Err(CliError::Admission(release_error)),
+            Ok(()) => {
+                lifecycle.fail(cli_failure_kind(&error))?;
+                Err(error)
+            }
+            Err(release_error) => {
+                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
+                Err(CliError::Admission(release_error))
+            }
         };
     }
     let watchdog = if ResourcePlatform::current() == ResourcePlatform::MacOs {
@@ -842,7 +901,7 @@ fn print_run(
         None
     };
     let mut completion_barrier = WatchdogCompletionBarrier::new(watchdog);
-    let outcome = execute_local_run_with_barrier(
+    let run_result = execute_local_run_with_barrier_and_lifecycle(
         &RunRequest {
             envelope: &envelope,
             repository: &location.repository,
@@ -854,11 +913,27 @@ fn print_run(
         &cancellation,
         &SystemClock,
         &mut completion_barrier,
-    )
-    .map_err(CliError::Run);
+        &mut lifecycle,
+    );
+    let outcome = run_result.map_err(CliError::Run);
     completion_barrier.ensure_joined();
     let outcome = reconcile_watchdog_outcome(outcome, &mut completion_barrier);
-    let outcome = release_admission(guard, outcome)?;
+    let outcome = match guard.release() {
+        Ok(()) => match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                lifecycle.fail(cli_failure_kind(&error))?;
+                return Err(error);
+            }
+        },
+        Err(error) => {
+            lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
+            return Err(CliError::Admission(error));
+        }
+    };
+    lifecycle
+        .transition(RunLifecyclePhase::Sealed)
+        .map_err(CliError::Run)?;
     if json {
         let bytes = outcome
             .receipt
@@ -878,6 +953,93 @@ fn print_run(
         Ok(())
     } else {
         Err(CliError::RunOutcome(outcome.receipt.receipt.overall_status))
+    }
+}
+
+#[derive(Serialize)]
+struct JournalIdInput<'a> {
+    schema_version: &'static str,
+    plan_digest: &'a str,
+    generation: u64,
+    unix_nanos: u128,
+    process_id: u32,
+    sequence: u64,
+}
+
+fn new_journal_id(plan_digest: &str, generation: u64) -> Result<String, CliError> {
+    let unix_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(CliError::internal)?
+        .as_nanos();
+    canonical_digest(&JournalIdInput {
+        schema_version: RUN_JOURNAL_SCHEMA_VERSION,
+        plan_digest,
+        generation,
+        unix_nanos,
+        process_id: std::process::id(),
+        sequence: JOURNAL_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+    })
+    .map_err(CliError::internal)
+}
+
+struct JournalLifecycleObserver<'a> {
+    store: &'a RunJournalStore,
+    run_id: &'a str,
+    clock: &'a dyn Clock,
+}
+
+impl JournalLifecycleObserver<'_> {
+    fn transition_state(
+        &mut self,
+        state: RunJournalStateV1,
+        failure_kind: Option<RunFailureKindV1>,
+    ) -> Result<(), CliError> {
+        let at_utc = self.clock.now_utc().map_err(CliError::Run)?;
+        self.store
+            .transition(self.run_id, state, &at_utc, failure_kind)
+            .map_err(CliError::RunJournal)?;
+        Ok(())
+    }
+
+    fn fail(&mut self, kind: RunFailureKindV1) -> Result<(), CliError> {
+        self.transition_state(RunJournalStateV1::Failed, Some(kind))
+    }
+}
+
+impl RunLifecycleObserver for JournalLifecycleObserver<'_> {
+    fn transition(&mut self, phase: RunLifecyclePhase) -> Result<(), RunError> {
+        let state = match phase {
+            RunLifecyclePhase::Prepared => RunJournalStateV1::Prepared,
+            RunLifecyclePhase::Executing => RunJournalStateV1::Executing,
+            RunLifecyclePhase::Finalizing => RunJournalStateV1::Finalizing,
+            RunLifecyclePhase::Sealed => RunJournalStateV1::Sealed,
+        };
+        let at_utc = self.clock.now_utc()?;
+        self.store
+            .transition(self.run_id, state, &at_utc, None)
+            .map_err(|_| RunError::Invariant("run journal transition failed"))?;
+        Ok(())
+    }
+}
+
+fn run_failure_kind(error: &RunError) -> RunFailureKindV1 {
+    match error {
+        RunError::ResourcePressure => RunFailureKindV1::ResourcePressure,
+        RunError::StaleCommit => RunFailureKindV1::StaleCommit,
+        RunError::Workspace(_) | RunError::Cache(_) => RunFailureKindV1::PreparationFailed,
+        RunError::Runtime(_) | RunError::Process(_) => RunFailureKindV1::ExecutionFailed,
+        RunError::Receipt(_) | RunError::UnsafeReceiptPath => RunFailureKindV1::FinalizationFailed,
+        RunError::Invariant(_) => RunFailureKindV1::Invariant,
+        _ => RunFailureKindV1::Unknown,
+    }
+}
+
+fn cli_failure_kind(error: &CliError) -> RunFailureKindV1 {
+    match error {
+        CliError::Run(error) => run_failure_kind(error),
+        CliError::Resource(_) => RunFailureKindV1::ResourcePressure,
+        CliError::Admission(_) => RunFailureKindV1::CleanupFailed,
+        _ => RunFailureKindV1::Unknown,
     }
 }
 
@@ -1009,6 +1171,58 @@ fn run_cache_command(action: CacheCommand) -> Result<(), CliError> {
                 println!("Candidates: {}", plan.candidates.len());
                 println!("Reclaimable bytes: {}", plan.reclaimable_bytes);
                 println!("Deletion performed: false");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_recover_command(action: RecoverCommand) -> Result<(), CliError> {
+    match action {
+        RecoverCommand::Status { location, json } => {
+            let root = resolve_cache_root(&location)?;
+            let cache = ManagedCache::open(root).map_err(CliError::Cache)?;
+            let report =
+                match RunJournalStore::open(&cache.root().path).map_err(CliError::RunJournal)? {
+                    Some(store) => store.status().map_err(CliError::RunJournal)?,
+                    None => RecoveryStatusV1 {
+                        schema_version: RUN_JOURNAL_SCHEMA_VERSION.to_owned(),
+                        runs: Vec::new(),
+                    },
+                };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(CliError::internal)?
+                );
+            } else {
+                println!("Run journals: {}", report.runs.len());
+                for run in report.runs {
+                    println!("  - {}: {:?}", run.run_id, run.classification);
+                }
+                println!("Read-only: no state was changed.");
+            }
+            Ok(())
+        }
+        RecoverCommand::Apply {
+            run_id,
+            location,
+            json,
+        } => {
+            let root = resolve_cache_root(&location)?;
+            let cache = ManagedCache::open(root).map_err(CliError::Cache)?;
+            let store = RunJournalStore::open(&cache.root().path)
+                .map_err(CliError::RunJournal)?
+                .ok_or(CliError::RunJournal(RunJournalError::NonActionable))?;
+            let result = store.apply(&run_id).map_err(CliError::RunJournal)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&result).map_err(CliError::internal)?
+                );
+            } else {
+                println!("Run: {}", result.run_id);
+                println!("Recovery outcome: {:?}", result.outcome);
             }
             Ok(())
         }
@@ -1601,6 +1815,7 @@ enum CliError {
     Admission(AdmissionError),
     Resource(ResourceGuardError),
     Run(RunError),
+    RunJournal(RunJournalError),
     RunOutcome(EvidenceStatus),
     Verification(VerificationError),
     VerifyOutcome(VerificationDecision),
@@ -1630,6 +1845,7 @@ impl CliError {
             Self::Admission(error) => error.exit_code(),
             Self::Resource(error) => error.exit_code(),
             Self::Run(error) => error.exit_code(),
+            Self::RunJournal(error) => error.exit_code(),
             Self::RunOutcome(EvidenceStatus::Fail) => 1,
             Self::RunOutcome(EvidenceStatus::Pending | EvidenceStatus::NotRun) => 5,
             Self::RunOutcome(EvidenceStatus::Pass) => 0,
@@ -1658,6 +1874,7 @@ impl fmt::Display for CliError {
             Self::Admission(error) => write!(formatter, "{error}"),
             Self::Resource(error) => write!(formatter, "{error}"),
             Self::Run(error) => write!(formatter, "{error}"),
+            Self::RunJournal(error) => write!(formatter, "{error}"),
             Self::RunOutcome(status) => write!(formatter, "run completed with {status:?}"),
             Self::Verification(error) => write!(formatter, "{error}"),
             Self::VerifyOutcome(decision) => {
@@ -1687,6 +1904,7 @@ impl std::error::Error for CliError {
             Self::Admission(error) => Some(error),
             Self::Resource(error) => Some(error),
             Self::Run(error) => Some(error),
+            Self::RunJournal(error) => Some(error),
             Self::RunOutcome(_) => None,
             Self::Verification(error) => Some(error),
             Self::VerifyOutcome(_) => None,
