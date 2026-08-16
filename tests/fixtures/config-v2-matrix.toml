@@ -1,0 +1,40 @@
+schema_version = "2.0"
+project = "example/project"
+
+[receipt]
+output = ".ccp/receipt.json"
+freshness_seconds = 300
+
+[[runtimes]]
+id = "python311"
+kind = "docker_compatible"
+image = "example.invalid/python311@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 256
+pids_limit = 64
+network = false
+
+[[runtimes]]
+id = "python312"
+kind = "docker_compatible"
+image = "example.invalid/python312@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+cpu_count = 1
+memory_mib = 256
+pids_limit = 64
+network = false
+
+[[checks]]
+id = "compat-py311"
+runtime_id = "python311"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 30
+
+[[checks]]
+id = "repository-check"
+runtime_id = "python312"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 30

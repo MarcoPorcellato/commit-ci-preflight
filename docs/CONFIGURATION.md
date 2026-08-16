@@ -17,6 +17,11 @@ deserialization. Configuration strings are literal: Commit CI Preflight does
 not perform shell expansion, environment interpolation, command substitution,
 or template evaluation.
 
+For one exact-head qualification across independently pinned runtimes, use the
+separate v2 matrix contract in
+[`MULTI_RUNTIME_RECEIPTS.md`](MULTI_RUNTIME_RECEIPTS.md). V1 remains the
+single-runtime contract described on this page and is not widened implicitly.
+
 ## Inspect a plan
 
 ```console

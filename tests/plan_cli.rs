@@ -17,6 +17,7 @@ use std::process::Command;
 use commit_ci_preflight::config::config_schema_json;
 
 const CONFIG: &str = "tests/fixtures/config-v1-read-only.toml";
+const MATRIX_CONFIG: &str = "tests/fixtures/config-v2-matrix.toml";
 const PINNED_SCHEMA: &str = include_str!("../schema/config-v1.schema.json");
 
 #[test]
@@ -62,6 +63,34 @@ fn human_plan_explicitly_reports_read_only_behavior() {
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
     assert!(stdout.contains("Read-only: no command was executed."));
     assert!(stdout.contains("must-not-execute"));
+}
+
+#[test]
+fn v2_plan_exposes_reviewable_per_runtime_digests_without_execution() {
+    let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args(["plan", "--config", MATRIX_CONFIG, "--json"])
+        .output()
+        .expect("run matrix plan command");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("matrix plan JSON");
+    assert_eq!(json["plan"]["schema_version"], "2.0");
+    assert_eq!(
+        json["plan"]["runtimes"].as_array().expect("runtimes").len(),
+        2
+    );
+    for runtime in json["plan"]["runtimes"].as_array().expect("runtimes") {
+        assert!(
+            runtime["configuration_digest"]
+                .as_str()
+                .expect("configuration digest")
+                .starts_with("sha256:")
+        );
+    }
 }
 
 #[test]

@@ -326,6 +326,9 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
+- [Multi-runtime receipts v2](docs/MULTI_RUNTIME_RECEIPTS.md) — one exact-head
+  local receipt for independently pinned compatibility runtimes.
+
 - [Complete adoption guide for another repository](docs/ADOPTION_GUIDE.md)
 - [Proof-carrying CI product roadmap](docs/PRODUCT_ROADMAP.md)
 - [Repository presentation and social preview](docs/REPOSITORY_PRESENTATION.md)

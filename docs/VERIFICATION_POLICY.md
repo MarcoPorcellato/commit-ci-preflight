@@ -98,3 +98,7 @@ claims remain outside v1 and must not be inferred from a PASS report.
 
 The GitHub gate adds event binding and a commit status, but does not upgrade the
 unsigned receipt into producer identity or host attestation.
+
+For the separate v2 policy that binds every required check to a named pinned
+runtime, see [`MULTI_RUNTIME_RECEIPTS.md`](MULTI_RUNTIME_RECEIPTS.md). The v1
+policy and its historical receipts remain unchanged.

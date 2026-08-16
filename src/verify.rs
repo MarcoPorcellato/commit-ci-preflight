@@ -24,6 +24,67 @@ use serde::{Deserialize, Serialize};
 
 use crate::receipt::{EvidenceStatus, ReceiptEnvelopeV1, ReceiptError, canonical_json};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationPolicyDocument {
+    V1(VerificationPolicyV1),
+    V2(crate::matrix::MatrixVerificationPolicyV2),
+}
+
+#[derive(Debug)]
+pub enum VerificationPolicyDocumentError {
+    Io(io::Error),
+    TooLarge,
+    InvalidUtf8,
+    Parse(toml::de::Error),
+    UnsupportedSchemaVersion,
+    V1(PolicyError),
+    V2(crate::matrix::MatrixError),
+}
+
+impl fmt::Display for VerificationPolicyDocumentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(_) => formatter.write_str("cannot read verification policy"),
+            Self::TooLarge => formatter.write_str("verification policy exceeds size limit"),
+            Self::InvalidUtf8 => formatter.write_str("verification policy is not UTF-8"),
+            Self::Parse(_) => formatter.write_str("verification policy is not valid TOML"),
+            Self::UnsupportedSchemaVersion => {
+                formatter.write_str("verification policy schema version is unsupported")
+            }
+            Self::V1(error) => write!(formatter, "{error}"),
+            Self::V2(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for VerificationPolicyDocumentError {}
+
+pub fn load_verification_policy_document(
+    path: &Path,
+) -> Result<VerificationPolicyDocument, VerificationPolicyDocumentError> {
+    let metadata = fs::metadata(path).map_err(VerificationPolicyDocumentError::Io)?;
+    if metadata.len() > MAX_POLICY_BYTES as u64 {
+        return Err(VerificationPolicyDocumentError::TooLarge);
+    }
+    let bytes = fs::read(path).map_err(VerificationPolicyDocumentError::Io)?;
+    let source =
+        std::str::from_utf8(&bytes).map_err(|_| VerificationPolicyDocumentError::InvalidUtf8)?;
+    let value: toml::Value =
+        toml::from_str(source).map_err(VerificationPolicyDocumentError::Parse)?;
+    let version = value.get("schema_version").and_then(toml::Value::as_str);
+    match version {
+        Some(POLICY_SCHEMA_VERSION) => VerificationPolicyV1::parse(&bytes)
+            .map(VerificationPolicyDocument::V1)
+            .map_err(VerificationPolicyDocumentError::V1),
+        Some(crate::matrix::MATRIX_POLICY_SCHEMA_VERSION) => {
+            crate::matrix::MatrixVerificationPolicyV2::parse(source)
+                .map(VerificationPolicyDocument::V2)
+                .map_err(VerificationPolicyDocumentError::V2)
+        }
+        _ => Err(VerificationPolicyDocumentError::UnsupportedSchemaVersion),
+    }
+}
+
 pub const POLICY_SCHEMA_VERSION: &str = "1.0";
 pub const VERIFICATION_REPORT_SCHEMA_VERSION: &str = "1.0";
 const MAX_POLICY_BYTES: usize = 1024 * 1024;
@@ -245,6 +306,29 @@ pub fn verify_receipt_document(
     Ok(report)
 }
 
+/// Verify a receipt against the strict policy version selected from trusted
+/// policy bytes. V1 keeps its original parser and behaviour; V2 is an
+/// explicitly opt-in multi-runtime contract.
+pub fn verify_receipt_document_for_policy(
+    bytes: &[u8],
+    policy: &VerificationPolicyDocument,
+    expected_commit: &str,
+    evaluated_at_utc: &str,
+) -> Result<VerificationReportV1, VerificationError> {
+    match policy {
+        VerificationPolicyDocument::V1(policy) => {
+            verify_receipt_document(bytes, policy, expected_commit, evaluated_at_utc)
+        }
+        VerificationPolicyDocument::V2(policy) => crate::matrix::verify_matrix_receipt_document(
+            bytes,
+            policy,
+            expected_commit,
+            evaluated_at_utc,
+        )
+        .map_err(|error| VerificationError::Matrix(error.to_string())),
+    }
+}
+
 pub fn receipt_input_failure_report(
     expected_commit: &str,
     evaluated_at_utc: &str,
@@ -395,7 +479,7 @@ fn check_equal(
     }
 }
 
-fn finding(code: &str, field: &str, message: &str) -> VerificationFindingV1 {
+pub(crate) fn finding(code: &str, field: &str, message: &str) -> VerificationFindingV1 {
     VerificationFindingV1 {
         code: code.to_owned(),
         field: field.to_owned(),
@@ -479,7 +563,7 @@ fn validate_image_reference(value: &str) -> Result<(), PolicyError> {
     validate_digest(digest).map_err(|_| PolicyError::InvalidField("image_reference"))
 }
 
-fn validate_commit(value: &str) -> Result<(), VerificationError> {
+pub(crate) fn validate_commit(value: &str) -> Result<(), VerificationError> {
     if !matches!(value.len(), 40 | 64)
         || !value
             .bytes()
@@ -490,7 +574,7 @@ fn validate_commit(value: &str) -> Result<(), VerificationError> {
     Ok(())
 }
 
-fn parse_utc_seconds(value: &str) -> Option<i64> {
+pub(crate) fn parse_utc_seconds(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
     if bytes.len() != 20
         || bytes[4] != b'-'
@@ -615,6 +699,7 @@ pub enum VerificationError {
     InvalidExpectedCommit,
     InvalidEvaluationTime,
     Receipt(ReceiptError),
+    Matrix(String),
 }
 
 impl fmt::Display for VerificationError {
@@ -628,6 +713,7 @@ impl fmt::Display for VerificationError {
                 formatter.write_str("verification time is not representable as strict UTC")
             }
             Self::Receipt(_) => formatter.write_str("verification report serialization failed"),
+            Self::Matrix(error) => write!(formatter, "matrix verification failed: {error}"),
         }
     }
 }

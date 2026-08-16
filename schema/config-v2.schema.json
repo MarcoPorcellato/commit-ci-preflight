@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MatrixConfigV2",
+  "type": "object",
+  "properties": {
+    "caches": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CacheConfig"
+      }
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MatrixCheckConfigV2"
+      }
+    },
+    "environment": {
+      "$ref": "#/$defs/EnvironmentConfig"
+    },
+    "project": {
+      "type": "string"
+    },
+    "receipt": {
+      "$ref": "#/$defs/ReceiptConfig"
+    },
+    "runtimes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MatrixRuntimeConfigV2"
+      }
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "runtimes",
+    "checks"
+  ],
+  "$defs": {
+    "CacheConfig": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "mount_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "mount_path"
+      ]
+    },
+    "EnvironmentConfig": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "MatrixCheckConfigV2": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "depends_on": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "runtime_id": {
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "working_directory": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "runtime_id",
+        "required",
+        "argv",
+        "working_directory",
+        "timeout_seconds"
+      ]
+    },
+    "MatrixRuntimeConfigV2": {
+      "type": "object",
+      "properties": {
+        "cpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "id": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RuntimeKind"
+        },
+        "memory_mib": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "network": {
+          "type": "boolean",
+          "default": false
+        },
+        "pids_limit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "image",
+        "cpu_count",
+        "memory_mib",
+        "pids_limit"
+      ]
+    },
+    "ReceiptConfig": {
+      "type": "object",
+      "properties": {
+        "freshness_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 86400,
+          "minimum": 0
+        },
+        "output": {
+          "type": "string",
+          "default": ".ccp/receipt.json"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeKind": {
+      "type": "string",
+      "enum": [
+        "docker_compatible",
+        "host"
+      ]
+    }
+  }
+}
