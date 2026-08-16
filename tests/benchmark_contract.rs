@@ -97,7 +97,8 @@ fn output_is_create_new_and_never_overwrites_evidence() {
 }
 
 #[test]
-fn cli_run_and_independent_verify_use_stable_exit_codes() {
+#[ignore = "requires native host resource admission; run explicitly"]
+fn native_cli_run_and_independent_verify_use_stable_exit_codes() {
     let root = test_root("cli-verify");
     fs::create_dir_all(&root).expect("create CLI root");
     let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))

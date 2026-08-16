@@ -51,16 +51,23 @@ finished. That possible rule requires a separate assurance decision.
   159 passing tests before a host-bound test received exit code 6;
 - a second full run with only the two admission-dependent end-to-end tests
   explicitly skipped passed all 220 remaining tests across every target;
-- the two pending tests are
-  `cli_run_and_independent_verify_use_stable_exit_codes` and
-  `guard_exec_portable_end_to_end_contract`;
-- direct reproduction confirmed `error: host resource admission denied` for
-  the pending path, rather than a test assertion or candidate-policy defect;
-- Clippy was NOT-RUN because `cargo-clippy` is not applicable to the installed
-  `1.96.0-aarch64-apple-darwin` toolchain.
+- after restart, both admission-dependent end-to-end tests passed when executed
+  individually on exact commit `911c89092a884af8ce3a63360f37ee687a6f75a2`;
+- a subsequent unfiltered suite raised compressor occupancy above the installed
+  `macos-v3` 40% pre-start boundary, causing the same test to receive exit code
+  6 despite 40% available memory, 7,594,246,144 reclaimable bytes and zero swap;
+- because the normative default suite must not depend on live host pressure,
+  the two contracts are now explicit native opt-in tests with documented exact
+  commands; they are not deleted, mocked or counted as default-suite PASS;
+- after that separation, the complete deterministic default passed with 218
+  tests PASS and the two native tests truthfully reported as ignored;
+- `cargo +stable clippy --locked --all-targets --all-features -- -D warnings`:
+  PASS using the already-installed stable toolchain without downloads.
 
-No Docker container, OrbStack workload, guarded CCP run, GitHub workflow, or
-native qualification was started while the host was under resource denial.
+Before restart, no Docker container, OrbStack workload, guarded CCP run, GitHub
+workflow, or native qualification was started under resource denial. After
+restart, only the two documented native CLI contracts ran while admission was
+`Admit`; no OrbStack workload or GitHub workflow was started.
 
 ## Host condition at checkpoint
 
@@ -83,7 +90,7 @@ commit-ci-preflight admission status --json
 docker --context orbstack ps
 cargo fmt --all -- --check
 cargo test --locked --all-targets --all-features
-cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo +stable clippy --locked --all-targets --all-features -- -D warnings
 git diff --check
 ```
 

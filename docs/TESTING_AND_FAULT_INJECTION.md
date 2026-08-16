@@ -22,6 +22,22 @@ not require Docker, OrbStack, network access, or live host-pressure thresholds.
 Native and chaos qualification require separate commands and persistent
 receipts; source inspection or a deterministic fake cannot substitute for them.
 
+Two CLI contracts intentionally acquire the real host admission slot and are
+therefore native opt-in tests rather than members of the deterministic default:
+
+```console
+cargo test --locked --test benchmark_contract \
+  native_cli_run_and_independent_verify_use_stable_exit_codes \
+  -- --ignored --exact
+cargo test --locked --test guard_exec_cli \
+  native_guard_exec_portable_end_to_end_contract \
+  -- --ignored --exact
+```
+
+Run them only after `resource status` is `Admit` and `admission status` reports
+no active or queued work. An ignored result in the default suite is not native
+PASS evidence; record the explicit command and exact commit separately.
+
 ## T0 characterization rules
 
 The T0 tests deliberately describe six known gaps without claiming that the

@@ -162,6 +162,14 @@ healthy reset, swap trend, first-trip preservation, strict history validation,
 and privacy exclusions. Native OrbStack qualification remains required after a
 host restart and fresh `Admit` decision.
 
+Post-restart qualification also confirmed that two pre-existing CLI contracts
+acquire real macOS admission. Running either alone under `Admit` passed, while
+running it after the deterministic suite could receive exit code 6 solely from
+the changed live compressor sample. To preserve the T0 invariant that the
+default suite is independent of host pressure, those two tests are explicit
+native opt-in gates with documented exact commands. An ignored default-suite
+result is not native PASS evidence.
+
 ## 4. Reliability gap register
 
 ### 4.1 P0 — must be closed before new product capability
