@@ -43,7 +43,7 @@ receipt.
 | `workspace` | Read-only source mount plan and declared writable cache/artifact mounts |
 | `cache` | Persistent root resolution, ownership marker, content-addressed entries, inventory, locks, and preview-only cleanup |
 | `admission` | Persistent platform-cache coordinator, FIFO/best-effort lock-backed tickets, one heavy-command slot, cancellation, timeout, and bounded status |
-| `resource` | Strict macOS-v2 host-memory probes, pre-start policy, in-run watchdog, bounded extrema observation, typed capability/status, and deterministic probe seams |
+| `resource` | Strict macOS-v4 host-memory probes, pre-start policy, compound in-run watchdog, bounded extrema/trip observation, typed capability/status, and deterministic probe seams |
 | `resource_history` | Privacy-minimized local JSONL summaries, strict profile validation, bounded rotation, symbolic-path rejection, and atomic persistence |
 | `run` | End-to-end orchestration and fail-closed aggregation |
 | `receipt` | Versioned evidence types, canonical JSON, SHA-256 integrity ID, schema, and atomic publication |
@@ -83,13 +83,15 @@ resource capability as `unsupported_not_enforced`; no protection is claimed on
 those platforms. Resource status is read-only and bounded, and receipt schema
 changes are deferred.
 
-Policy `macos-v3` admits only with at least 20% available memory and 3 GiB
-reclaimable uncompressed memory. It accepts compressor occupancy through 40%
-and swap through the smaller of 8 GiB and 30% of physical RAM. These are
-independent conjuncts. The in-run soft threshold remains stricter: three
-consecutive samples at 40% compressor pressure stop the workload, while 45%
-remains an immediate hard stop. This separation in time reduces false
-pre-start denials without weakening sustained or critical pressure handling.
+Policy `macos-v4` admits only with at least 20% available memory and 3 GiB
+reclaimable uncompressed memory, and with swap through the smaller of 8 GiB
+and 30% of physical RAM. These are independent pre-start conjuncts.
+Compression is advisory by itself both before and during execution; at
+pre-start, 70% or more compression denies only with another pressure signal.
+Soft cancellation requires at least two converging pressure signals for 15
+consecutive two-second samples; critical available memory, reclaimable memory,
+or 8 GiB swap remain immediate stops. Compressor pressure becomes an immediate
+stop only at 70% together with another pressure signal.
 
 Observation history v2 is not a forecast and has no authority over admission.
 It excludes repository and command identity, remains outside receipts, and is

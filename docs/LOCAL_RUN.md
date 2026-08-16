@@ -7,11 +7,21 @@ compatible runtime, managed workspace, cache, and receipt contracts. It runs
 only explicit argv from a clean Git checkout and never inserts a shell.
 
 ```console
+export CARGO_HOME=.ccp-mounts/cargo-home
+export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
+export RUSTUP_HOME=.ccp-mounts/rustup-home
 commit-ci-preflight run \
   --config .commit-ci-preflight.toml \
   --repository . \
   --generation 1
 ```
+
+The repository configuration allowlists these three variables and mounts the
+matching paths as writable managed caches. Set them before the run; otherwise
+Cargo or Rustup can fall back to a read-only image path and the first check can
+fail even though the same command passes on the host. CCP does not invent
+allowlisted environment values because they are part of the trusted operator
+input. `dry-run --json` reports names and mounts, never secret values.
 
 Use `--json` to print the canonical receipt. Raw stdout and stderr remain local
 bounded process state and are not emitted by default or stored in the receipt;
@@ -42,14 +52,15 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 3. Acquire the host-wide admission slot for `run`, `benchmark`, or `guard exec`,
    immediately before heavy execution, waiting cooperatively with cancellation
    until the selected timeout.
-4. On macOS, take a fresh strict `macos-v3` host-memory sample after slot
+4. On macOS, take a fresh strict `macos-v4` host-memory sample after slot
    acquisition. Denied, malformed, contradictory, timed-out, or uncertain
    samples release the slot and stop without starting heavy work. Linux and
    Windows report resource protection as unsupported and not enforced.
    Admission requires at least 20% available memory, 3 GiB reclaimable
-   uncompressed memory, compressor occupancy no higher than 40%, and swap no
-   higher than the smaller of 8 GiB and 30% of physical RAM. Boundaries are
-   inclusive and independently mandatory.
+   uncompressed memory, and swap no higher than the smaller of 8 GiB and 30%
+   of physical RAM. Boundaries are inclusive and independently mandatory.
+   Compression alone is advisory; it denies admission only at 70% or more
+   together with another pressure signal.
 5. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
    receipt output itself is excluded from this dirty check.
 6. For `run`, probe the Docker-compatible runtime with bounded output and deadline.
@@ -58,7 +69,9 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 9. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
 10. For `run`, start the macOS watchdog before local check execution. It samples
     every two seconds, cancels through the existing process supervisor on a
-    hard trip or three consecutive soft trips, and joins before slot release.
+    hard trip or 15 consecutive compound soft samples (about 30 seconds), and
+    joins before slot release. Compressor occupancy alone never cancels an
+    otherwise healthy in-progress run.
     `benchmark` has no mid-workload watchdog in this tranche.
 11. Execute the `run` checks or benchmark workload with timeout, cancellation, and
     stale-generation guards.

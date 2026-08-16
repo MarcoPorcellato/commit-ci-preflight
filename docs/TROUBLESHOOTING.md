@@ -88,6 +88,24 @@ commit-ci-preflight dry-run --config .commit-ci-preflight.toml --repository . --
 Reproduce only the failing explicit check in a deliberate diagnostic context.
 Do not synthesize a receipt or reinterpret an absent receipt as PASS.
 
+## First Rust check fails only inside the read-only container
+
+The repository's own `.commit-ci-preflight.toml` allowlists `CARGO_HOME`,
+`CARGO_TARGET_DIR`, and `RUSTUP_HOME` and provides writable cache mounts at the
+matching relative paths. Export those reviewed values before invoking `run`:
+
+```console
+export CARGO_HOME=.ccp-mounts/cargo-home
+export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
+export RUSTUP_HOME=.ccp-mounts/rustup-home
+```
+
+If they are absent, Cargo or Rustup can select a read-only path from the image
+and an otherwise valid `format` check can exit `1`. Preserve that failed
+receipt, confirm the exact configuration and mounts with `dry-run --json`, and
+start a new monotonically higher generation only after correcting the operator
+environment. Do not make the repository mount writable.
+
 ## Workspace lock after a forced stop
 
 The run workspace lock and the admission queue are different mechanisms. If a
@@ -102,21 +120,25 @@ explicit persistent cache root and retain the old one for review.
 
 ## macOS resource guard denies a run
 
-The `macos-v3` guard evaluates swap, available/reclaimable memory, compressor
-pressure, and sample certainty independently. Admission requires at least 20%
-available memory and 3 GiB reclaimable memory, accepts compressor occupancy
-through 40%, and permits swap through the smaller of 8 GiB and 30% of physical
-RAM. Satisfying one condition does not override the others.
+The `macos-v4` guard evaluates swap, available/reclaimable memory, compressor
+pressure, and sample certainty. Admission requires at least 20% available
+memory and 3 GiB reclaimable memory, and permits swap through the smaller of
+8 GiB and 30% of physical RAM. Those three limits are independently mandatory.
+Compression alone is advisory; even extreme compression denies only when it
+accompanies another pressure signal.
 
 ```console
 commit-ci-preflight resource status --json
 ```
 
-The in-run soft watchdog matches pre-start compressor admission: three
-consecutive samples at 40% stop the workload, and
-45% remains an immediate hard stop. A command admitted between those values
-therefore receives only a short recovery window and cannot run indefinitely
-under sustained pressure.
+The in-run watchdog intentionally differs from admission. Compression alone is
+not evidence that a running workload is unsafe. Soft cancellation requires at
+least two signals among low available memory, low reclaimable memory, at least
+55% compression, at least 4 GiB swap, or at least 1 GiB swap growth across the
+30-second trend window. The compound condition must persist for 15 samples.
+Immediate cancellation remains for critically low available/reclaimable
+memory, 8 GiB swap, or at least 70% compression accompanied by another pressure
+signal.
 
 Close or finish memory-heavy work and retry later. Do not modify coordinator
 files, disable the guard, or infer that a machine with free swap is safe. Linux

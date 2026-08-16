@@ -4,10 +4,11 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **IN PROGRESS — T0 deterministic characterization implemented locally; native qualification pending** |
+| Status | **IN PROGRESS — T1 merged; macOS-v4 compound pre-start/watchdog candidate locally verified; OrbStack qualification pending; T2-T11 remain** |
 | Baseline date | 2026-08-14 |
 | Baseline branch | `main` |
 | Baseline commit | `641a0eed29075696eec1e4e07f8de554f6ce9459` |
+| Current delivery anchor | `origin/main` at `9c506890880b89747462c0d21087e49abe78b8ee` before the macOS-v4 branch |
 | Current release line | `v0.1.0-rc.1` prerelease |
 | Owner and release authority | Marco Porcellato |
 | Scope | Correctness, crash consistency, runtime ownership, evidence fidelity, recovery, and qualification |
@@ -125,6 +126,54 @@ observation tranche as “In progress”, although PRs #29 and #30 are present o
 must be reconciled when this hardening plan is adopted. `PRODUCT_ROADMAP.md`
 continues to govern productization; this document changes only the reliability
 critical path and stable-release gates.
+
+### 3.6 Urgent macOS-v4 watchdog correction
+
+This correction is reliability work under P1-8, not predictive admission or a
+new product capability. The local v2 history contained 84 records, including 14
+resource-pressure outcomes. Ten of those outcomes could only have crossed the
+compressor criterion because their minimum available and reclaimable memory
+and maximum swap never crossed another soft threshold. The latest affected JIT
+shadow retained 42% available memory, at least 8,126,005,248 reclaimable bytes,
+zero swap, and reached 43.4% compressor occupancy before `macos-v3` cancelled
+it. These aggregates contain no repository, command, commit, user or machine
+identity.
+
+Approved `macos-v4` invariants:
+
+- keep the reviewed `macos-v3` pre-start available, reclaimable and swap limits;
+- never deny an otherwise healthy pre-start sample or cancel an in-progress run
+  for compressor occupancy alone;
+- require at least 70% compressor occupancy plus another pressure signal for a
+  compressor-driven immediate pre-start denial;
+- require at least two converging soft signals for 15 consecutive two-second
+  samples;
+- treat 8 GiB swap, critically low available/reclaimable memory, or 70%
+  compressor occupancy plus another signal as immediate hard pressure;
+- use a bounded 30-second swap-growth signal without retaining the full time
+  series;
+- append the exact hard/soft trip sample to compatible local v2 history;
+- keep current fail-closed receipt and outer-result semantics unchanged in this
+  tranche. A future rule allowing a late soft trip after completed execution to
+  preserve PASS requires a separate assurance decision and tests.
+
+The deterministic acceptance fixture reproduces the observed 42% available,
+8,126,005,248 reclaimable, 16,777,625,600 compressed and zero-swap sample and
+must continue. Separate tests cover every hard signal, compound soft duration,
+healthy reset, swap trend, first-trip preservation, strict history validation,
+and privacy exclusions. Native OrbStack qualification remains required after a
+host restart and fresh `Admit` decision.
+
+Post-restart qualification also confirmed that two pre-existing CLI contracts
+acquire real macOS admission. Running either alone under `Admit` passed, while
+running it after the deterministic suite could receive exit code 6 solely from
+the changed live compressor sample. To preserve the T0 invariant that the
+default suite is independent of host pressure, those two tests are explicit
+native opt-in gates with documented exact commands. An ignored default-suite
+result is not native PASS evidence. That same sample motivated the approved
+compound pre-start correction: it retained 40% available memory,
+7,594,246,144 reclaimable bytes and zero swap, so compression alone was not a
+credible reason to discard the next run before the watchdog could observe it.
 
 ## 4. Reliability gap register
 

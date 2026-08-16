@@ -85,7 +85,8 @@ fn run_guard_exec(
 }
 
 #[test]
-fn guard_exec_portable_end_to_end_contract() {
+#[ignore = "requires native host resource admission; run explicitly"]
+fn native_guard_exec_portable_end_to_end_contract() {
     let base = std::env::var_os("CCP_TEST_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);

@@ -52,6 +52,17 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Version the macOS resource policy as `macos-v4`: keep the 20% available,
+  3 GiB reclaimable and bounded-swap pre-start limits, but make compressor
+  occupancy advisory unless at least 70% compression accompanies another
+  pressure signal. Compressor occupancy alone also cannot cancel a healthy
+  in-progress run. Soft cancellation now requires two converging signals for
+  about 30 seconds; critical memory/swap and compound compressor pressure
+  remain immediate stops. Resource history v2 remains backward-compatible and
+  records the exact hard/soft trip snapshot.
+- Classify the two CLI contracts that acquire real macOS resource admission as
+  explicit native opt-in tests, keeping the default Rust suite deterministic
+  while preserving their separate exact-host qualification commands.
 - Pin the repository's live CI contract to the official Rust 1.96.0 Bookworm
   image so Linux checks have Git while retaining immutable image verification.
 - Version macOS admission as `macos-v3`: require at least 20% available memory,
