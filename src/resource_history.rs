@@ -165,6 +165,38 @@ pub struct ResourceHistoryRecordV2 {
     pub baseline_swap_used_bytes: u64,
     pub maximum_swap_used_bytes: u64,
     pub total_memory_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trip_snapshot: Option<ResourceTripSnapshotV2>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceTripSnapshotV2 {
+    pub available_percent: u8,
+    pub reclaimable_uncompressed_bytes: u64,
+    pub compressor_occupied_bytes: u64,
+    pub swap_used_bytes: u64,
+}
+
+impl ResourceTripSnapshotV2 {
+    fn from_summary(summary: &ResourceObservationSummary) -> Self {
+        Self {
+            available_percent: summary.last_snapshot.available_percent,
+            reclaimable_uncompressed_bytes: summary.last_snapshot.reclaimable_uncompressed_bytes,
+            compressor_occupied_bytes: summary.last_snapshot.compressor_occupied_bytes,
+            swap_used_bytes: summary.last_snapshot.swap_used_bytes,
+        }
+    }
+
+    fn validate(&self, total_memory_bytes: u64) -> Result<(), ResourceHistoryError> {
+        if self.available_percent > 100
+            || self.reclaimable_uncompressed_bytes > total_memory_bytes
+            || self.compressor_occupied_bytes > total_memory_bytes
+        {
+            return Err(ResourceHistoryError::InvalidContext);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -220,6 +252,12 @@ impl ResourceHistoryRecordV2 {
         summary: &ResourceObservationSummary,
     ) -> Result<Self, ResourceHistoryError> {
         context.validate()?;
+        let trip_snapshot = match watchdog_trip_reason {
+            Some(WatchdogTripReason::HardPressure | WatchdogTripReason::SoftPressure) => {
+                Some(ResourceTripSnapshotV2::from_summary(summary))
+            }
+            Some(WatchdogTripReason::ProbeFailure) | None => None,
+        };
         Ok(Self {
             schema_version: RESOURCE_HISTORY_V2_SCHEMA_VERSION.to_owned(),
             policy_version: MACOS_POLICY_VERSION.to_owned(),
@@ -241,7 +279,25 @@ impl ResourceHistoryRecordV2 {
             baseline_swap_used_bytes: summary.baseline.swap_used_bytes,
             maximum_swap_used_bytes: summary.maximum_swap_used_bytes,
             total_memory_bytes: summary.baseline.total_memory_bytes,
+            trip_snapshot,
         })
+    }
+
+    fn validate(&self) -> Result<(), ResourceHistoryError> {
+        if self.schema_version != RESOURCE_HISTORY_V2_SCHEMA_VERSION {
+            return Err(ResourceHistoryError::InvalidContext);
+        }
+        self.context.validate()?;
+        if let Some(snapshot) = &self.trip_snapshot {
+            snapshot.validate(self.total_memory_bytes)?;
+            if !matches!(
+                self.watchdog_trip_reason,
+                Some(ResourceTripReasonV1::HardPressure | ResourceTripReasonV1::SoftPressure)
+            ) {
+                return Err(ResourceHistoryError::InvalidContext);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -280,11 +336,7 @@ impl ResourceHistoryStore {
             return Err(ResourceHistoryError::InvalidHistory);
         }
         for record in &records {
-            if record.schema_version != RESOURCE_HISTORY_V2_SCHEMA_VERSION {
-                return Err(ResourceHistoryError::InvalidHistory);
-            }
             record
-                .context
                 .validate()
                 .map_err(|_| ResourceHistoryError::InvalidHistory)?;
         }
@@ -323,10 +375,7 @@ impl ResourceHistoryStore {
         if limit == 0 {
             return Err(ResourceHistoryError::InvalidLimit);
         }
-        if record.schema_version != RESOURCE_HISTORY_V2_SCHEMA_VERSION {
-            return Err(ResourceHistoryError::InvalidContext);
-        }
-        record.context.validate()?;
+        record.validate()?;
         ensure_directory(&self.root)?;
         let target = self.root.join(HISTORY_V2_FILE);
         reject_symlink_file(&target, MAX_HISTORY_V2_BYTES)?;
@@ -595,6 +644,20 @@ mod tests {
         .expect("record")
     }
 
+    fn tripped_record_v2(profile: &str, started: u64) -> ResourceHistoryRecordV2 {
+        let observation = ResourceObservation::new(snapshot(10_000));
+        observation.record(&snapshot(12_000));
+        ResourceHistoryRecordV2::from_summary(
+            context(profile),
+            started,
+            500,
+            ResourceRunOutcome::ResourcePressure,
+            Some(WatchdogTripReason::SoftPressure),
+            &observation.summary().expect("summary"),
+        )
+        .expect("tripped record")
+    }
+
     #[test]
     fn profile_is_bounded_and_machine_safe() {
         for valid in ["guard-exec", "matryca_ready", "A1"] {
@@ -700,6 +763,28 @@ mod tests {
     }
 
     #[test]
+    fn v2_history_records_the_exact_pressure_sample_without_identity_fields() {
+        let record = tripped_record_v2("ready", 7);
+        assert_eq!(
+            record.watchdog_trip_reason,
+            Some(ResourceTripReasonV1::SoftPressure)
+        );
+        assert_eq!(
+            record.trip_snapshot,
+            Some(ResourceTripSnapshotV2 {
+                available_percent: 60,
+                reclaimable_uncompressed_bytes: 12_000,
+                compressor_occupied_bytes: 12_000,
+                swap_used_bytes: 1_000,
+            })
+        );
+        let json = serde_json::to_string(&record).expect("json");
+        for excluded in ["command", "repository", "commit", "hostname", "username"] {
+            assert!(!json.contains(excluded));
+        }
+    }
+
+    #[test]
     #[cfg(unix)]
     fn append_v2_revalidates_caller_constructed_records() {
         let root = fixture_root("invalid-v2");
@@ -714,6 +799,22 @@ mod tests {
         invalid_context.context.workload_family = "repo/path".to_owned();
         assert!(matches!(
             store.append_v2(&invalid_context),
+            Err(ResourceHistoryError::InvalidContext)
+        ));
+        let mut invalid_trip = tripped_record_v2("ready", 3);
+        invalid_trip
+            .trip_snapshot
+            .as_mut()
+            .expect("trip snapshot")
+            .available_percent = 101;
+        assert!(matches!(
+            store.append_v2(&invalid_trip),
+            Err(ResourceHistoryError::InvalidContext)
+        ));
+        let mut invalid_probe_trip = tripped_record_v2("ready", 4);
+        invalid_probe_trip.watchdog_trip_reason = Some(ResourceTripReasonV1::ProbeFailure);
+        assert!(matches!(
+            store.append_v2(&invalid_probe_trip),
             Err(ResourceHistoryError::InvalidContext)
         ));
         assert!(!root.join(HISTORY_V2_FILE).exists());

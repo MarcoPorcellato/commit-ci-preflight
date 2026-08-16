@@ -42,7 +42,7 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 3. Acquire the host-wide admission slot for `run`, `benchmark`, or `guard exec`,
    immediately before heavy execution, waiting cooperatively with cancellation
    until the selected timeout.
-4. On macOS, take a fresh strict `macos-v3` host-memory sample after slot
+4. On macOS, take a fresh strict `macos-v4` host-memory sample after slot
    acquisition. Denied, malformed, contradictory, timed-out, or uncertain
    samples release the slot and stop without starting heavy work. Linux and
    Windows report resource protection as unsupported and not enforced.
@@ -58,7 +58,9 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 9. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
 10. For `run`, start the macOS watchdog before local check execution. It samples
     every two seconds, cancels through the existing process supervisor on a
-    hard trip or three consecutive soft trips, and joins before slot release.
+    hard trip or 15 consecutive compound soft samples (about 30 seconds), and
+    joins before slot release. Compressor occupancy alone never cancels an
+    otherwise healthy in-progress run.
     `benchmark` has no mid-workload watchdog in this tranche.
 11. Execute the `run` checks or benchmark workload with timeout, cancellation, and
     stale-generation guards.

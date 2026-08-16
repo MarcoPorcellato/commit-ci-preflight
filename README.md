@@ -108,12 +108,14 @@ exact container argv and mounts but does not execute project code.
 queue so independent local agents cannot start both heavy workloads at once.
 Use `--admission-timeout-seconds` to select the bounded wait and
 `admission status --json` to inspect only busy state, queue count, and opaque
-ticket identifiers. On macOS, the queue is followed by a strict `macos-v3`
+ticket identifiers. On macOS, the queue is followed by a strict `macos-v4`
 host-memory admission sample, and `run` has a two-second watchdog that cancels
-on sustained pressure. Admission requires at least 20% available memory and
+only on sustained compound or critical pressure. Admission requires at least 20% available memory and
 3 GiB reclaimable uncompressed memory, accepts compressor occupancy through
 40%, and caps swap at the smaller of 8 GiB and 30% of physical RAM. The
-watchdog keeps its stricter sustained-pressure and hard-stop thresholds.
+in-run watchdog treats compression alone as advisory: soft cancellation needs
+at least two converging signals for about 30 seconds, while critical available,
+reclaimable, swap, or compound-compression conditions remain immediate stops.
 `resource status --json` reports bounded metrics and
 capability; Linux and Windows report `unsupported_not_enforced`. Resource and
 admission evidence are not part of receipts yet.

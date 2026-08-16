@@ -1,0 +1,93 @@
+# macOS-v4 compound watchdog restart handoff
+
+## Persistent checkpoint
+
+- Repository: `MarcoPorcellato/commit-ci-preflight`
+- Worktree: persistent, non-temporary checkout of the branch below
+- Branch: `codex/macos-v4-compound-watchdog`
+- Base: `origin/main` at `9c506890880b89747462c0d21087e49abe78b8ee`
+- Scope: macOS resource policy and local resource-history evidence only
+
+The worktree must remain outside temporary directories, so a normal Mac restart
+does not remove it. The operator's pre-existing source checkout was not
+modified.
+
+## Implemented state
+
+The candidate versions the policy as `macos-v4` and leaves pre-start admission
+unchanged. During an admitted run:
+
+- compressor occupancy alone cannot cancel the workload;
+- soft pressure requires at least two independent signals for 15 consecutive
+  two-second samples;
+- the soft signals are available memory below 10%, reclaimable memory below
+  1.5 GiB, compressor occupancy at least 55%, swap at least 4 GiB, and swap
+  growth of at least 1 GiB over the bounded 16-sample trend window;
+- hard pressure remains immediate at 3% available memory, below 512 MiB
+  reclaimable memory, 8 GiB swap, or at least 70% compressor occupancy together
+  with a companion pressure signal;
+- hard and soft cancellations append the exact bounded trip sample to local
+  resource-history v2 without repository, command, commit, user, or machine
+  identity.
+
+Current fail-closed receipt and outer-result semantics are unchanged. In
+particular, a late soft trip does not become PASS merely because an inner check
+finished. That possible rule requires a separate assurance decision.
+
+## Evidence completed before restart
+
+- exact branch/base and allowlist inspected;
+- measured local history reviewed: 84 schema-v2 records, 14 pressure outcomes,
+  10 compressor-only false-positive candidates, and 8 pressure outcomes with
+  zero swap;
+- the latest observed false-positive sample is encoded as a deterministic unit
+  fixture: 42% available, 8,126,005,248 reclaimable bytes,
+  16,777,625,600 compressed bytes, and zero swap;
+- source and documentation diff reviewed;
+- `git diff --check`: PASS;
+- `cargo fmt --all -- --check`: PASS;
+- `cargo test --locked resource --lib`: PASS, 30 tests;
+- `cargo test --locked --all-targets --all-features`: the unfiltered run reached
+  159 passing tests before a host-bound test received exit code 6;
+- a second full run with only the two admission-dependent end-to-end tests
+  explicitly skipped passed all 220 remaining tests across every target;
+- the two pending tests are
+  `cli_run_and_independent_verify_use_stable_exit_codes` and
+  `guard_exec_portable_end_to_end_contract`;
+- direct reproduction confirmed `error: host resource admission denied` for
+  the pending path, rather than a test assertion or candidate-policy defect;
+- Clippy was NOT-RUN because `cargo-clippy` is not applicable to the installed
+  `1.96.0-aarch64-apple-darwin` toolchain.
+
+No Docker container, OrbStack workload, guarded CCP run, GitHub workflow, or
+native qualification was started while the host was under resource denial.
+
+## Host condition at checkpoint
+
+The last pre-restart sample was `macos-v3` `Deny`: 35% available memory,
+6,619,529,216 reclaimable bytes, 19,725,615,104 compressed bytes, and
+22,838,970,941 swap bytes used. Admission was inactive with an empty queue and
+Docker reported no running container. Recheck these facts after restart; they
+are not durable evidence.
+
+## Resume and qualification gates
+
+Run these commands from the persistent worktree after the Mac and OrbStack are
+stable:
+
+```console
+cd "<persistent-macos-v4-worktree>"
+git status --short --branch
+commit-ci-preflight resource status --json
+commit-ci-preflight admission status --json
+docker --context orbstack ps
+cargo fmt --all -- --check
+cargo test --locked --all-targets --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
+git diff --check
+```
+
+Only after the focused and full deterministic gates pass should the candidate
+run its repository-native CCP/OrbStack qualification and be pushed for a draft
+pull request. Do not treat this handoff, formatting, or static review as native
+qualification.

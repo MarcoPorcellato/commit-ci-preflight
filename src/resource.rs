@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +28,7 @@ use crate::process::{
 };
 
 pub const RESOURCE_SCHEMA_VERSION: &str = "1.0";
-pub const MACOS_POLICY_VERSION: &str = "macos-v3";
+pub const MACOS_POLICY_VERSION: &str = "macos-v4";
 pub const WATCHDOG_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 pub const RESOURCE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 pub const RESOURCE_CAPTURE_BYTES: usize = 65_536;
@@ -35,8 +36,19 @@ pub const MIN_PRESTART_AVAILABLE_PERCENT: u8 = 20;
 pub const MIN_PRESTART_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
 pub const MAX_PRESTART_COMPRESSOR_PERCENT: u8 = 40;
 pub const MAX_PRESTART_SWAP_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-pub const HARD_FREE_BYTES: u64 = 1024 * 1024 * 1024;
-pub const SOFT_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const HARD_AVAILABLE_PERCENT: u8 = 3;
+pub const HARD_RECLAIMABLE_BYTES: u64 = 512 * 1024 * 1024;
+pub const HARD_SWAP_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+pub const HARD_COMPRESSOR_PERCENT: u8 = 70;
+pub const HARD_COMPRESSOR_COMPANION_AVAILABLE_PERCENT: u8 = 8;
+pub const SOFT_AVAILABLE_PERCENT: u8 = 10;
+pub const SOFT_RECLAIMABLE_BYTES: u64 = 1536 * 1024 * 1024;
+pub const SOFT_COMPRESSOR_PERCENT: u8 = 55;
+pub const SOFT_SWAP_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub const SOFT_SWAP_GROWTH_BYTES: u64 = 1024 * 1024 * 1024;
+pub const SOFT_REQUIRED_SIGNALS: u8 = 2;
+pub const SOFT_CONSECUTIVE_SAMPLES: u8 = 15;
+pub const SOFT_TREND_WINDOW_SAMPLES: usize = 16;
 
 const MEMORY_PRESSURE: &str = "/usr/bin/memory_pressure";
 const VM_STAT: &str = "/usr/bin/vm_stat";
@@ -113,6 +125,7 @@ pub struct ResourceSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceObservationSummary {
     pub baseline: ResourceSnapshot,
+    pub last_snapshot: ResourceSnapshot,
     pub sample_count: u64,
     pub minimum_available_percent: u8,
     pub minimum_reclaimable_uncompressed_bytes: u64,
@@ -134,6 +147,7 @@ impl ResourceObservation {
                 minimum_reclaimable_uncompressed_bytes: baseline.reclaimable_uncompressed_bytes,
                 maximum_compressor_occupied_bytes: baseline.compressor_occupied_bytes,
                 maximum_swap_used_bytes: baseline.swap_used_bytes,
+                last_snapshot: baseline.clone(),
                 baseline,
             })),
         }
@@ -154,6 +168,7 @@ impl ResourceObservation {
             summary.maximum_swap_used_bytes = summary
                 .maximum_swap_used_bytes
                 .max(snapshot.swap_used_bytes);
+            summary.last_snapshot = snapshot.clone();
         }
     }
 
@@ -181,10 +196,6 @@ impl ResourceSnapshot {
             self.total_memory_bytes,
             percent,
         )
-    }
-
-    fn swap_percent_at_least(&self, percent: u8) -> bool {
-        ratio_at_least(self.swap_used_bytes, self.total_memory_bytes, percent)
     }
 }
 
@@ -234,6 +245,7 @@ pub enum WatchdogDecision {
 pub struct WatchdogState {
     consecutive_soft_samples: u8,
     first_trip: Option<WatchdogTripReason>,
+    swap_window: VecDeque<u64>,
 }
 
 impl WatchdogState {
@@ -245,21 +257,38 @@ impl WatchdogState {
         if let Some(reason) = self.first_trip {
             return Ok(WatchdogDecision::Tripped(reason));
         }
-        if snapshot.available_percent <= 5
-            || snapshot.reclaimable_uncompressed_bytes < HARD_FREE_BYTES
-            || snapshot.compressor_percent_at_least(45)
-            || snapshot.swap_percent_at_least(40)
+        self.swap_window.push_back(snapshot.swap_used_bytes);
+        if self.swap_window.len() > SOFT_TREND_WINDOW_SAMPLES {
+            self.swap_window.pop_front();
+        }
+        let swap_growth = self.swap_window.len() == SOFT_TREND_WINDOW_SAMPLES
+            && snapshot.swap_used_bytes.saturating_sub(
+                *self
+                    .swap_window
+                    .front()
+                    .expect("bounded trend window is non-empty"),
+            ) >= SOFT_SWAP_GROWTH_BYTES;
+        let hard_compressor_compound = snapshot
+            .compressor_percent_at_least(HARD_COMPRESSOR_PERCENT)
+            && (snapshot.available_percent <= HARD_COMPRESSOR_COMPANION_AVAILABLE_PERCENT
+                || snapshot.reclaimable_uncompressed_bytes < SOFT_RECLAIMABLE_BYTES
+                || snapshot.swap_used_bytes >= SOFT_SWAP_BYTES);
+        if snapshot.available_percent <= HARD_AVAILABLE_PERCENT
+            || snapshot.reclaimable_uncompressed_bytes < HARD_RECLAIMABLE_BYTES
+            || snapshot.swap_used_bytes >= HARD_SWAP_BYTES
+            || hard_compressor_compound
         {
             self.first_trip = Some(WatchdogTripReason::HardPressure);
             return Ok(WatchdogDecision::Tripped(WatchdogTripReason::HardPressure));
         }
-        let soft = snapshot.available_percent < 15
-            || snapshot.reclaimable_uncompressed_bytes < SOFT_FREE_BYTES
-            || snapshot.compressor_percent_at_least(40)
-            || snapshot.swap_percent_at_least(30);
-        if soft {
+        let soft_signals = u8::from(snapshot.available_percent < SOFT_AVAILABLE_PERCENT)
+            + u8::from(snapshot.reclaimable_uncompressed_bytes < SOFT_RECLAIMABLE_BYTES)
+            + u8::from(snapshot.compressor_percent_at_least(SOFT_COMPRESSOR_PERCENT))
+            + u8::from(snapshot.swap_used_bytes >= SOFT_SWAP_BYTES)
+            + u8::from(swap_growth);
+        if soft_signals >= SOFT_REQUIRED_SIGNALS {
             self.consecutive_soft_samples = self.consecutive_soft_samples.saturating_add(1);
-            if self.consecutive_soft_samples >= 3 {
+            if self.consecutive_soft_samples >= SOFT_CONSECUTIVE_SAMPLES {
                 self.first_trip = Some(WatchdogTripReason::SoftPressure);
                 return Ok(WatchdogDecision::Tripped(WatchdogTripReason::SoftPressure));
             }
@@ -848,6 +877,7 @@ mod tests {
             observation.summary().expect("observation summary"),
             ResourceObservationSummary {
                 baseline,
+                last_snapshot: second,
                 sample_count: 3,
                 minimum_available_percent: 42,
                 minimum_reclaimable_uncompressed_bytes: first.reclaimable_uncompressed_bytes,
@@ -859,10 +889,15 @@ mod tests {
 
     #[test]
     fn policy_boundaries_are_explicit() {
-        assert_eq!(MACOS_POLICY_VERSION, "macos-v3");
+        assert_eq!(MACOS_POLICY_VERSION, "macos-v4");
         assert_eq!(MIN_PRESTART_AVAILABLE_PERCENT, 20);
         assert_eq!(MAX_PRESTART_COMPRESSOR_PERCENT, 40);
         assert_eq!(MAX_PRESTART_SWAP_BYTES, 8 * 1024 * 1024 * 1024);
+        assert_eq!(SOFT_CONSECUTIVE_SAMPLES, 15);
+        assert_eq!(SOFT_REQUIRED_SIGNALS, 2);
+        assert_eq!(SOFT_COMPRESSOR_PERCENT, 55);
+        assert_eq!(HARD_COMPRESSOR_PERCENT, 70);
+        assert_eq!(HARD_SWAP_BYTES, 8 * 1024 * 1024 * 1024);
         assert_eq!(
             evaluate_pre_start(&snapshot()).expect("admit"),
             PreStartDecision::Admit
@@ -925,62 +960,52 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_requires_three_consecutive_soft_samples_and_resets() {
+    fn compressor_alone_never_cancels_a_healthy_run() {
         let mut state = WatchdogState::default();
-        let mut soft = snapshot();
-        soft.available_percent = 14;
-        assert_eq!(
-            state.observe(&soft).expect("first"),
-            WatchdogDecision::Continue
-        );
-        assert_eq!(
-            state.observe(&soft).expect("second"),
-            WatchdogDecision::Continue
-        );
-        let clear = snapshot();
-        assert_eq!(
-            state.observe(&clear).expect("reset"),
-            WatchdogDecision::Continue
-        );
-        assert_eq!(
-            state.observe(&soft).expect("first again"),
-            WatchdogDecision::Continue
-        );
-        assert_eq!(
-            state.observe(&soft).expect("second again"),
-            WatchdogDecision::Continue
-        );
-        assert_eq!(
-            state.observe(&soft).expect("trip"),
-            WatchdogDecision::Tripped(WatchdogTripReason::SoftPressure)
-        );
+        let mut compressed = snapshot();
+        compressed.compressor_occupied_bytes = percent_ceiling(compressed.total_memory_bytes, 80);
+        for _ in 0..(SOFT_CONSECUTIVE_SAMPLES * 2) {
+            assert_eq!(
+                state
+                    .observe(&compressed)
+                    .expect("healthy companion signals"),
+                WatchdogDecision::Continue
+            );
+        }
+        assert_eq!(state.consecutive_soft_samples(), 0);
     }
 
     #[test]
-    fn hard_pressure_wins_and_first_trip_is_preserved() {
+    fn observed_false_positive_fixture_remains_admitted_in_progress() {
         let mut state = WatchdogState::default();
-        let mut hard = snapshot();
-        hard.available_percent = 5;
-        assert_eq!(
-            state.observe(&hard).expect("hard"),
-            WatchdogDecision::Tripped(WatchdogTripReason::HardPressure)
-        );
-        let mut soft = snapshot();
-        soft.available_percent = 14;
-        assert_eq!(
-            state.observe(&soft).expect("preserved"),
-            WatchdogDecision::Tripped(WatchdogTripReason::HardPressure)
-        );
+        let observed = ResourceSnapshot {
+            available_percent: 42,
+            reclaimable_uncompressed_bytes: 8_126_005_248,
+            compressor_occupied_bytes: 16_777_625_600,
+            total_memory_bytes: 38_654_705_664,
+            swap_used_bytes: 0,
+            swap_total_bytes: 23_622_320_128,
+        };
+        for _ in 0..(SOFT_CONSECUTIVE_SAMPLES * 2) {
+            assert_eq!(
+                state.observe(&observed).expect("measured snapshot"),
+                WatchdogDecision::Continue
+            );
+        }
+    }
 
+    #[test]
+    fn hard_pressure_requires_a_critical_signal_or_compound_compression() {
         for pressure in [
+            |value: &mut ResourceSnapshot| value.available_percent = HARD_AVAILABLE_PERCENT,
             |value: &mut ResourceSnapshot| {
-                value.reclaimable_uncompressed_bytes = HARD_FREE_BYTES - 1
+                value.reclaimable_uncompressed_bytes = HARD_RECLAIMABLE_BYTES - 1
             },
+            |value: &mut ResourceSnapshot| value.swap_used_bytes = HARD_SWAP_BYTES,
             |value: &mut ResourceSnapshot| {
-                value.compressor_occupied_bytes = percent_ceiling(value.total_memory_bytes, 45)
-            },
-            |value: &mut ResourceSnapshot| {
-                value.swap_used_bytes = percent_ceiling(value.total_memory_bytes, 40)
+                value.compressor_occupied_bytes =
+                    percent_ceiling(value.total_memory_bytes, u64::from(HARD_COMPRESSOR_PERCENT));
+                value.available_percent = HARD_COMPRESSOR_COMPANION_AVAILABLE_PERCENT;
             },
         ] {
             let mut state = WatchdogState::default();
@@ -991,36 +1016,73 @@ mod tests {
                 WatchdogDecision::Tripped(WatchdogTripReason::HardPressure)
             );
         }
+
+        let mut state = WatchdogState::default();
+        let mut hard = snapshot();
+        hard.swap_used_bytes = HARD_SWAP_BYTES;
+        assert_eq!(
+            state.observe(&hard).expect("hard"),
+            WatchdogDecision::Tripped(WatchdogTripReason::HardPressure)
+        );
+        assert_eq!(
+            state.observe(&snapshot()).expect("first trip preserved"),
+            WatchdogDecision::Tripped(WatchdogTripReason::HardPressure)
+        );
     }
 
     #[test]
-    fn soft_pressure_trips_at_each_boundary_after_three_samples() {
-        for pressure in [
-            |value: &mut ResourceSnapshot| {
-                value.reclaimable_uncompressed_bytes = SOFT_FREE_BYTES - 1
-            },
-            |value: &mut ResourceSnapshot| {
-                value.compressor_occupied_bytes = percent_ceiling(value.total_memory_bytes, 40)
-            },
-            |value: &mut ResourceSnapshot| {
-                value.swap_used_bytes = percent_ceiling(value.total_memory_bytes, 30)
-            },
-        ] {
-            let mut state = WatchdogState::default();
-            let mut sample = snapshot();
-            pressure(&mut sample);
+    fn soft_pressure_requires_two_signals_for_thirty_seconds_and_resets() {
+        let mut state = WatchdogState::default();
+        let mut soft = snapshot();
+        soft.available_percent = SOFT_AVAILABLE_PERCENT - 1;
+        soft.reclaimable_uncompressed_bytes = SOFT_RECLAIMABLE_BYTES - 1;
+        for _ in 0..(SOFT_CONSECUTIVE_SAMPLES - 1) {
             assert_eq!(
-                state.observe(&sample).expect("soft first"),
+                state.observe(&soft).expect("sustained compound pressure"),
                 WatchdogDecision::Continue
             );
+        }
+        assert_eq!(
+            state.consecutive_soft_samples(),
+            SOFT_CONSECUTIVE_SAMPLES - 1
+        );
+        assert_eq!(
+            state.observe(&snapshot()).expect("healthy reset"),
+            WatchdogDecision::Continue
+        );
+        assert_eq!(state.consecutive_soft_samples(), 0);
+        for _ in 0..(SOFT_CONSECUTIVE_SAMPLES - 1) {
             assert_eq!(
-                state.observe(&sample).expect("soft second"),
+                state.observe(&soft).expect("compound pressure after reset"),
                 WatchdogDecision::Continue
             );
-            assert_eq!(
-                state.observe(&sample).expect("soft third"),
-                WatchdogDecision::Tripped(WatchdogTripReason::SoftPressure)
-            );
+        }
+        assert_eq!(
+            state.observe(&soft).expect("thirtieth second"),
+            WatchdogDecision::Tripped(WatchdogTripReason::SoftPressure)
+        );
+    }
+
+    #[test]
+    fn rapid_swap_growth_combines_with_compression_without_crossing_absolute_swap_limit() {
+        let mut state = WatchdogState::default();
+        let mut sample = snapshot();
+        sample.swap_used_bytes = 0;
+        sample.compressor_occupied_bytes = percent_ceiling(
+            sample.total_memory_bytes,
+            u64::from(SOFT_COMPRESSOR_PERCENT),
+        );
+        for index in 0..(SOFT_TREND_WINDOW_SAMPLES + usize::from(SOFT_CONSECUTIVE_SAMPLES) - 1) {
+            sample.swap_used_bytes = (index as u64) * 100 * 1024 * 1024;
+            let decision = state.observe(&sample).expect("bounded swap trend");
+            if index + 1 < SOFT_TREND_WINDOW_SAMPLES + usize::from(SOFT_CONSECUTIVE_SAMPLES) - 1 {
+                assert_eq!(decision, WatchdogDecision::Continue);
+            } else {
+                assert_eq!(
+                    decision,
+                    WatchdogDecision::Tripped(WatchdogTripReason::SoftPressure)
+                );
+            }
         }
     }
 

@@ -52,6 +52,12 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Version the macOS resource policy as `macos-v4`: preserve strict pre-start
+  admission, but prevent compressor occupancy alone from cancelling a healthy
+  in-progress run. Soft cancellation now requires two converging signals for
+  about 30 seconds; critical memory/swap and compound compressor pressure
+  remain immediate stops. Resource history v2 remains backward-compatible and
+  records the exact hard/soft trip snapshot.
 - Pin the repository's live CI contract to the official Rust 1.96.0 Bookworm
   image so Linux checks have Git while retaining immutable image verification.
 - Version macOS admission as `macos-v3`: require at least 20% available memory,
