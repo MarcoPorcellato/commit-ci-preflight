@@ -88,6 +88,14 @@ After the compound pre-start correction:
 No OrbStack qualification, GitHub workflow, push, pull request or merge is
 claimed by these local checks.
 
+The first OrbStack attempt on `ca58ac584c34b02fb0a1666aadfc84b819d47d54`
+failed only `format` because the repository-required Cargo/Rustup cache
+variables were not exported. The failed receipt was preserved locally. With
+the documented variables set, generation 2 passed all five required stages and
+independent verification returned integrity, policy and decision PASS. This
+receipt qualifies `ca58ac5` only; the documentation correction that records the
+operator prerequisite requires a fresh exact-head run after commit.
+
 Before restart, no Docker container, OrbStack workload, guarded CCP run, GitHub
 workflow, or native qualification was started under resource denial. After
 restart, only the two documented native CLI contracts ran while admission was

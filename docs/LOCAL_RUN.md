@@ -7,11 +7,21 @@ compatible runtime, managed workspace, cache, and receipt contracts. It runs
 only explicit argv from a clean Git checkout and never inserts a shell.
 
 ```console
+export CARGO_HOME=.ccp-mounts/cargo-home
+export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
+export RUSTUP_HOME=.ccp-mounts/rustup-home
 commit-ci-preflight run \
   --config .commit-ci-preflight.toml \
   --repository . \
   --generation 1
 ```
+
+The repository configuration allowlists these three variables and mounts the
+matching paths as writable managed caches. Set them before the run; otherwise
+Cargo or Rustup can fall back to a read-only image path and the first check can
+fail even though the same command passes on the host. CCP does not invent
+allowlisted environment values because they are part of the trusted operator
+input. `dry-run --json` reports names and mounts, never secret values.
 
 Use `--json` to print the canonical receipt. Raw stdout and stderr remain local
 bounded process state and are not emitted by default or stored in the receipt;

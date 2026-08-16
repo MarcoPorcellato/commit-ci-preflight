@@ -88,6 +88,24 @@ commit-ci-preflight dry-run --config .commit-ci-preflight.toml --repository . --
 Reproduce only the failing explicit check in a deliberate diagnostic context.
 Do not synthesize a receipt or reinterpret an absent receipt as PASS.
 
+## First Rust check fails only inside the read-only container
+
+The repository's own `.commit-ci-preflight.toml` allowlists `CARGO_HOME`,
+`CARGO_TARGET_DIR`, and `RUSTUP_HOME` and provides writable cache mounts at the
+matching relative paths. Export those reviewed values before invoking `run`:
+
+```console
+export CARGO_HOME=.ccp-mounts/cargo-home
+export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
+export RUSTUP_HOME=.ccp-mounts/rustup-home
+```
+
+If they are absent, Cargo or Rustup can select a read-only path from the image
+and an otherwise valid `format` check can exit `1`. Preserve that failed
+receipt, confirm the exact configuration and mounts with `dry-run --json`, and
+start a new monotonically higher generation only after correcting the operator
+environment. Do not make the repository mount writable.
+
 ## Workspace lock after a forced stop
 
 The run workspace lock and the admission queue are different mechanisms. If a
