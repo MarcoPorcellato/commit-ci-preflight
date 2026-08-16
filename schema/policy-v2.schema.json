@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MatrixVerificationPolicyV2",
+  "type": "object",
+  "properties": {
+    "configuration_digest": {
+      "type": "string"
+    },
+    "max_age_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "project": {
+      "type": "string"
+    },
+    "required_checks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MatrixRequiredCheckV2"
+      }
+    },
+    "runtimes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/MatrixRuntimePolicyV2"
+      }
+    },
+    "schema_version": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "configuration_digest",
+    "required_checks",
+    "max_age_seconds",
+    "runtimes"
+  ],
+  "$defs": {
+    "AcceptedPlatformV1": {
+      "type": "object",
+      "properties": {
+        "host_arch": {
+          "type": "string"
+        },
+        "host_os": {
+          "type": "string"
+        },
+        "runtime_kind": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host_os",
+        "host_arch",
+        "runtime_kind"
+      ]
+    },
+    "MatrixRequiredCheckV2": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "runtime_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "runtime_id"
+      ]
+    },
+    "MatrixRuntimePolicyV2": {
+      "type": "object",
+      "properties": {
+        "configuration_digest": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "image_reference": {
+          "type": "string"
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AcceptedPlatformV1"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "configuration_digest",
+        "image_reference",
+        "platforms"
+      ]
+    }
+  }
+}

@@ -163,6 +163,39 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
     barrier: &mut dyn CompletionBarrier,
     lifecycle: &mut dyn RunLifecycleObserver,
 ) -> Result<RunOutcome, RunError> {
+    let receipt = execute_local_receipt_with_barrier_and_lifecycle(
+        request,
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        barrier,
+        lifecycle,
+    )?;
+    let receipt_path = write_receipt_atomic(
+        request.repository,
+        &request.envelope.plan.receipt.output,
+        &receipt,
+    )?;
+    Ok(RunOutcome {
+        receipt,
+        receipt_path,
+    })
+}
+
+/// Execute one already-validated v1 plan and return sealed evidence without
+/// writing a receipt into the source checkout. Matrix orchestration uses this
+/// primitive so every runtime observes the same clean exact head before the
+/// single outer receipt is published.
+pub fn execute_local_receipt_with_barrier_and_lifecycle(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    barrier: &mut dyn CompletionBarrier,
+    lifecycle: &mut dyn RunLifecycleObserver,
+) -> Result<ReceiptEnvelopeV1, RunError> {
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
     }
@@ -374,12 +407,7 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
         redaction_policy_version: REDACTION_POLICY_VERSION.to_owned(),
     })
     .map_err(RunError::Receipt)?;
-    let receipt_path =
-        write_receipt_atomic(&repository, &request.envelope.plan.receipt.output, &receipt)?;
-    Ok(RunOutcome {
-        receipt,
-        receipt_path,
-    })
+    Ok(receipt)
 }
 
 fn inspect_repository(
@@ -623,6 +651,18 @@ pub fn write_receipt_atomic(
     relative_output: &str,
     receipt: &ReceiptEnvelopeV1,
 ) -> Result<PathBuf, RunError> {
+    let bytes = receipt.canonical_bytes().map_err(RunError::Receipt)?;
+    write_canonical_receipt_bytes_atomic(repository, relative_output, &bytes)
+}
+
+/// Create a receipt file exactly once from already canonical receipt bytes.
+/// This is shared by versioned outer receipt envelopes; it preserves the v1
+/// no-overwrite, path-isolation, fsync, and atomic-rename guarantees.
+pub fn write_canonical_receipt_bytes_atomic(
+    repository: &Path,
+    relative_output: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, RunError> {
     let repository = fs::canonicalize(repository).map_err(RunError::Io)?;
     let target = repository.join(relative_output);
     if !target.starts_with(&repository) {
@@ -637,14 +677,13 @@ pub fn write_receipt_atomic(
     }
     let sequence = RECEIPT_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(".receipt-tmp-{}-{sequence}", std::process::id()));
-    let bytes = receipt.canonical_bytes().map_err(RunError::Receipt)?;
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temporary)
             .map_err(RunError::Io)?;
-        file.write_all(&bytes).map_err(RunError::Io)?;
+        file.write_all(bytes).map_err(RunError::Io)?;
         file.sync_all().map_err(RunError::Io)?;
         fs::rename(&temporary, &target).map_err(RunError::Io)
     })();

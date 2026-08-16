@@ -519,7 +519,7 @@ fn validate_text(field: &'static str, value: &str) -> Result<(), ConfigError> {
     }
 }
 
-fn validate_identifier(field: &'static str, value: &str) -> Result<(), ConfigError> {
+pub(crate) fn validate_identifier(field: &'static str, value: &str) -> Result<(), ConfigError> {
     validate_text(field, value)?;
     if value.len() <= 64
         && value.chars().all(|character| {

@@ -16,6 +16,9 @@ use std::fs;
 use std::path::Path;
 
 use commit_ci_preflight::config::config_schema_json;
+use commit_ci_preflight::matrix::{
+    matrix_config_schema_json, matrix_policy_schema_json, matrix_receipt_schema_json,
+};
 use commit_ci_preflight::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, RECEIPT_SCHEMA_VERSION,
     ReceiptEnvelopeV1, ReceiptV1, RepositoryEvidence, RunEvidence, receipt_schema_json,
@@ -41,6 +44,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     write_exact(
         Path::new("schema/verification-report-v1.schema.json"),
         verification_report_schema_json()?.as_bytes(),
+    )?;
+    write_exact(
+        Path::new("schema/config-v2.schema.json"),
+        matrix_config_schema_json()?.as_bytes(),
+    )?;
+    write_exact(
+        Path::new("schema/receipt-v2.schema.json"),
+        matrix_receipt_schema_json()?.as_bytes(),
+    )?;
+    write_exact(
+        Path::new("schema/policy-v2.schema.json"),
+        matrix_policy_schema_json()?.as_bytes(),
     )?;
     write_exact(
         Path::new("tests/fixtures/receipt-v1-pass.json"),

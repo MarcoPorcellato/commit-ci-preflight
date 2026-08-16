@@ -18,6 +18,7 @@ pub mod cache;
 pub mod config;
 pub mod durable_fs;
 pub mod github_actions;
+pub mod matrix;
 pub mod process;
 pub mod receipt;
 pub mod resource;

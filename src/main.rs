@@ -30,9 +30,12 @@ use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
 };
 use commit_ci_preflight::cache::{CacheError, CacheRootOptions, ManagedCache, ResolvedCacheRoot};
-use commit_ci_preflight::config::{ConfigV1, ExecutionPlanEnvelopeV1};
+use commit_ci_preflight::config::{ConfigError, ConfigV1, ExecutionPlanEnvelopeV1};
 use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
+};
+use commit_ci_preflight::matrix::{
+    MatrixConfigV2, MatrixError, MatrixRunRequestV2, execute_matrix_run_v2,
 };
 use commit_ci_preflight::process::{
     CancellationReason, CancellationToken, GenerationGuard, OutputMode, ProcessRequest,
@@ -61,8 +64,8 @@ use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
 };
 use commit_ci_preflight::verify::{
-    VerificationDecision, VerificationError, VerificationPolicyV1, receipt_input_failure_report,
-    system_evaluated_at_utc, verify_receipt_document,
+    VerificationDecision, VerificationError, load_verification_policy_document,
+    receipt_input_failure_report, system_evaluated_at_utc, verify_receipt_document_for_policy,
 };
 use commit_ci_preflight::workspace::{WorkspaceError, WorkspacePlanV1};
 use serde::Serialize;
@@ -794,14 +797,16 @@ fn print_verify(
     evaluated_at_utc: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
-    let policy = VerificationPolicyV1::load(policy_path).map_err(CliError::usage)?;
+    let policy = load_verification_policy_document(policy_path).map_err(CliError::usage)?;
     let evaluated_at = evaluated_at_utc
         .map(str::to_owned)
         .map(Ok)
         .unwrap_or_else(system_evaluated_at_utc)
         .map_err(CliError::Verification)?;
     let report = match fs::read(receipt_path) {
-        Ok(receipt) => verify_receipt_document(&receipt, &policy, expected_commit, &evaluated_at),
+        Ok(receipt) => {
+            verify_receipt_document_for_policy(&receipt, &policy, expected_commit, &evaluated_at)
+        }
         Err(_) => receipt_input_failure_report(expected_commit, &evaluated_at),
     }
     .map_err(CliError::Verification)?;
@@ -833,6 +838,9 @@ fn print_run(
     admission_timeout_seconds: u64,
     json: bool,
 ) -> Result<(), CliError> {
+    if config_schema_version(path)?.as_deref() == Some("2.0") {
+        return print_matrix_run(path, location, generation, admission_timeout_seconds, json);
+    }
     let envelope = load_plan(path)?;
     let root = resolve_cache_root(location)?;
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
@@ -956,6 +964,154 @@ fn print_run(
     }
 }
 
+fn config_schema_version(path: &Path) -> Result<Option<String>, CliError> {
+    let source = fs::read_to_string(path).map_err(|source| {
+        CliError::usage(ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    })?;
+    let value: toml::Value = toml::from_str(&source).map_err(CliError::usage)?;
+    Ok(value
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned))
+}
+
+fn print_matrix_run(
+    path: &Path,
+    location: &CacheLocationArgs,
+    generation: u64,
+    admission_timeout_seconds: u64,
+    json: bool,
+) -> Result<(), CliError> {
+    let envelope = MatrixConfigV2::load(path)
+        .map_err(CliError::Matrix)?
+        .into_plan()
+        .map_err(CliError::Matrix)?;
+    let root = resolve_cache_root(location)?;
+    let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
+    let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
+    let journal_id = new_journal_id(&envelope.plan_digest, generation)?;
+    let journal_clock = SystemClock;
+    journal
+        .create_run(
+            &journal_id,
+            &journal_clock.now_utc().map_err(CliError::Run)?,
+        )
+        .map_err(CliError::RunJournal)?;
+    let mut lifecycle = JournalLifecycleObserver {
+        store: &journal,
+        run_id: &journal_id,
+        clock: &journal_clock,
+    };
+    let supervisor = Arc::new(ProcessSupervisor::standard());
+    let cancellation = CancellationToken::default();
+    install_cancellation_handler(&cancellation)?;
+    let admission =
+        AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
+    let guard = match admission.acquire(
+        Duration::from_secs(admission_timeout_seconds),
+        &cancellation,
+    ) {
+        Ok(guard) => guard,
+        Err(error) => {
+            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
+            return Err(CliError::Admission(error));
+        }
+    };
+    lifecycle.transition_state(RunJournalStateV1::Admitted, None)?;
+    if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
+        return match guard.release() {
+            Ok(()) => {
+                lifecycle.fail(cli_failure_kind(&error))?;
+                Err(error)
+            }
+            Err(release_error) => {
+                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
+                Err(CliError::Admission(release_error))
+            }
+        };
+    }
+    let watchdog = if ResourcePlatform::current() == ResourcePlatform::MacOs {
+        let current_dir = std::env::current_dir().map_err(CliError::internal)?;
+        Some(ResourceWatchdog::start(
+            ResourceProbe::new(SupervisorResourceRunner::new(
+                supervisor.clone(),
+                current_dir,
+                cancellation.clone(),
+            )),
+            cancellation.clone(),
+        ))
+    } else {
+        None
+    };
+    let mut completion_barrier = WatchdogCompletionBarrier::new(watchdog);
+    lifecycle
+        .transition(RunLifecyclePhase::Prepared)
+        .map_err(CliError::Run)?;
+    lifecycle
+        .transition(RunLifecyclePhase::Executing)
+        .map_err(CliError::Run)?;
+    let result = execute_matrix_run_v2(
+        &MatrixRunRequestV2 {
+            envelope: &envelope,
+            repository: &location.repository,
+            cache: &cache,
+            generation,
+        },
+        supervisor.as_ref(),
+        &cancellation,
+        &SystemClock,
+        &mut completion_barrier,
+    )
+    .map_err(CliError::Matrix);
+    completion_barrier.ensure_joined();
+    let result = if let Some(error) = completion_barrier.take_join_error() {
+        Err(CliError::Resource(ResourceGuardError::Watchdog(error)))
+    } else {
+        result
+    };
+    let outcome = match guard.release() {
+        Ok(()) => match result {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                lifecycle.fail(cli_failure_kind(&error))?;
+                return Err(error);
+            }
+        },
+        Err(error) => {
+            lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
+            return Err(CliError::Admission(error));
+        }
+    };
+    lifecycle
+        .transition(RunLifecyclePhase::Finalizing)
+        .map_err(CliError::Run)?;
+    lifecycle
+        .transition(RunLifecyclePhase::Sealed)
+        .map_err(CliError::Run)?;
+    if json {
+        let bytes = outcome
+            .receipt
+            .canonical_bytes()
+            .map_err(CliError::Matrix)?;
+        println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+    } else {
+        println!("Matrix receipt: {}", outcome.receipt.receipt_id);
+        println!(
+            "Runtimes: {}",
+            outcome.receipt.receipt.runtime_receipts.len()
+        );
+        println!("Receipt: {}", outcome.receipt_path.display());
+        println!("Status: {:?}", outcome.receipt.receipt.overall_status);
+    }
+    match outcome.receipt.receipt.overall_status {
+        EvidenceStatus::Pass => Ok(()),
+        status => Err(CliError::RunOutcome(status)),
+    }
+}
+
 #[derive(Serialize)]
 struct JournalIdInput<'a> {
     schema_version: &'static str,
@@ -1046,6 +1202,8 @@ fn run_failure_kind(error: &RunError) -> RunFailureKindV1 {
 fn cli_failure_kind(error: &CliError) -> RunFailureKindV1 {
     match error {
         CliError::Run(error) => run_failure_kind(error),
+        CliError::Matrix(MatrixError::Run(error)) => run_failure_kind(error),
+        CliError::Matrix(MatrixError::Runtime(_)) => RunFailureKindV1::ExecutionFailed,
         CliError::Resource(_) => RunFailureKindV1::ResourcePressure,
         CliError::Admission(_) => RunFailureKindV1::CleanupFailed,
         _ => RunFailureKindV1::Unknown,
@@ -1060,6 +1218,24 @@ fn load_plan(path: &Path) -> Result<ExecutionPlanEnvelopeV1, CliError> {
 }
 
 fn print_plan(path: &Path, json: bool) -> Result<(), CliError> {
+    if config_schema_version(path)?.as_deref() == Some("2.0") {
+        let envelope = MatrixConfigV2::load(path)
+            .map_err(CliError::Matrix)?
+            .into_plan()
+            .map_err(CliError::Matrix)?;
+        if json {
+            let bytes = envelope.canonical_bytes().map_err(CliError::Matrix)?;
+            println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+        } else {
+            println!("Matrix plan: {}", envelope.plan_digest);
+            println!("Project: {}", envelope.plan.project);
+            for runtime in &envelope.plan.runtimes {
+                println!("  - {}: {}", runtime.id, runtime.configuration_digest);
+            }
+            println!("Read-only: no command was executed.");
+        }
+        return Ok(());
+    }
     let envelope = load_plan(path)?;
     if json {
         let bytes = envelope.canonical_bytes().map_err(CliError::usage)?;
@@ -1826,6 +2002,7 @@ enum CliError {
     Run(RunError),
     RunJournal(RunJournalError),
     RunOutcome(EvidenceStatus),
+    Matrix(MatrixError),
     Verification(VerificationError),
     VerifyOutcome(VerificationDecision),
     GithubActions(GithubActionsError),
@@ -1858,6 +2035,11 @@ impl CliError {
             Self::RunOutcome(EvidenceStatus::Fail) => 1,
             Self::RunOutcome(EvidenceStatus::Pending | EvidenceStatus::NotRun) => 5,
             Self::RunOutcome(EvidenceStatus::Pass) => 0,
+            Self::Matrix(error) => match error {
+                MatrixError::Run(RunError::ResourcePressure) => 4,
+                MatrixError::Runtime(error) => error.exit_code(),
+                _ => 2,
+            },
             Self::VerifyOutcome(_) => 3,
             Self::GithubActions(_) => 2,
             Self::MigrationBlocked => 4,
@@ -1866,7 +2048,8 @@ impl CliError {
             Self::Guard(error) => error.exit_code(),
             Self::Verification(VerificationError::Policy(_))
             | Self::Verification(VerificationError::InvalidExpectedCommit)
-            | Self::Verification(VerificationError::InvalidEvaluationTime) => 2,
+            | Self::Verification(VerificationError::InvalidEvaluationTime)
+            | Self::Verification(VerificationError::Matrix(_)) => 2,
             Self::Verification(VerificationError::Receipt(_)) => 70,
             Self::Internal(_) => 70,
         }
@@ -1885,6 +2068,7 @@ impl fmt::Display for CliError {
             Self::Run(error) => write!(formatter, "{error}"),
             Self::RunJournal(error) => write!(formatter, "{error}"),
             Self::RunOutcome(status) => write!(formatter, "run completed with {status:?}"),
+            Self::Matrix(error) => write!(formatter, "{error}"),
             Self::Verification(error) => write!(formatter, "{error}"),
             Self::VerifyOutcome(decision) => {
                 write!(formatter, "verification completed with {decision:?}")
@@ -1915,6 +2099,7 @@ impl std::error::Error for CliError {
             Self::Run(error) => Some(error),
             Self::RunJournal(error) => Some(error),
             Self::RunOutcome(_) => None,
+            Self::Matrix(error) => Some(error),
             Self::Verification(error) => Some(error),
             Self::VerifyOutcome(_) => None,
             Self::GithubActions(error) => Some(error),
