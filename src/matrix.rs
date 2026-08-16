@@ -297,15 +297,22 @@ pub struct MatrixRunOutcomeV2 {
     pub receipt_path: PathBuf,
 }
 
+/// Inputs that are fixed for the complete matrix execution. Grouping these
+/// immutable values keeps the executor below Clippy's argument-count limit
+/// without obscuring the owned admission/watchdog dependencies.
+pub struct MatrixRunRequestV2<'a> {
+    pub envelope: &'a MatrixPlanEnvelopeV2,
+    pub repository: &'a Path,
+    pub cache: &'a ManagedCache,
+    pub generation: u64,
+}
+
 /// Execute every independently pinned runtime sequentially under one caller
 /// owned admission/watchdog session, then publish exactly one outer receipt.
 /// The inner v1 receipts stay in memory: no intermediate source-tree mutation
 /// can make a later runtime observe a different Git state.
 pub fn execute_matrix_run_v2(
-    envelope: &MatrixPlanEnvelopeV2,
-    repository: &Path,
-    cache: &ManagedCache,
-    generation: u64,
+    request: &MatrixRunRequestV2<'_>,
     supervisor: &dyn SupervisorPort,
     cancellation: &CancellationToken,
     clock: &dyn Clock,
@@ -314,7 +321,7 @@ pub fn execute_matrix_run_v2(
     let started_at_utc = clock.now_utc().map_err(MatrixError::Run)?;
     let mut runtime_receipts = Vec::new();
     let mut checks = Vec::new();
-    for (runtime_id, runtime_envelope) in envelope.runtime_envelopes()? {
+    for (runtime_id, runtime_envelope) in request.envelope.runtime_envelopes()? {
         let runtime =
             runtime_for(runtime_envelope.plan.runtime.kind).map_err(MatrixError::Runtime)?;
         let mut inner_barrier = NoopCompletionBarrier;
@@ -322,9 +329,9 @@ pub fn execute_matrix_run_v2(
         let receipt = execute_local_receipt_with_barrier_and_lifecycle(
             &RunRequest {
                 envelope: &runtime_envelope,
-                repository,
-                cache,
-                generation,
+                repository: request.repository,
+                cache: request.cache,
+                generation: request.generation,
             },
             runtime.as_ref(),
             supervisor,
@@ -356,10 +363,10 @@ pub fn execute_matrix_run_v2(
     let finished_at_utc = clock.now_utc().map_err(MatrixError::Run)?;
     let run_id = canonical_digest(&MatrixRunIdInput {
         schema_version: MATRIX_RECEIPT_SCHEMA_VERSION,
-        project: &envelope.plan.project,
+        project: &request.envelope.plan.project,
         commit: &repository_evidence.commit_sha,
-        configuration_digest: &envelope.plan_digest,
-        generation,
+        configuration_digest: &request.envelope.plan_digest,
+        generation: request.generation,
         started_at_utc: &started_at_utc,
     })
     .map_err(MatrixError::Receipt)?;
@@ -369,11 +376,11 @@ pub fn execute_matrix_run_v2(
         repository: repository_evidence,
         run: RunEvidence {
             run_id,
-            generation,
+            generation: request.generation,
             started_at_utc,
             finished_at_utc,
         },
-        configuration_digest: envelope.plan_digest.clone(),
+        configuration_digest: request.envelope.plan_digest.clone(),
         runtime_receipts,
         overall_status,
         incomplete_reason: (overall_status == EvidenceStatus::Pending)
@@ -381,9 +388,12 @@ pub fn execute_matrix_run_v2(
         redaction_policy_version,
     })?;
     let bytes = receipt.canonical_bytes()?;
-    let receipt_path =
-        write_canonical_receipt_bytes_atomic(repository, &envelope.plan.receipt.output, &bytes)
-            .map_err(MatrixError::Run)?;
+    let receipt_path = write_canonical_receipt_bytes_atomic(
+        request.repository,
+        &request.envelope.plan.receipt.output,
+        &bytes,
+    )
+    .map_err(MatrixError::Run)?;
     Ok(MatrixRunOutcomeV2 {
         receipt,
         receipt_path,

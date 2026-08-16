@@ -34,7 +34,9 @@ use commit_ci_preflight::config::{ConfigError, ConfigV1, ExecutionPlanEnvelopeV1
 use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
 };
-use commit_ci_preflight::matrix::{MatrixConfigV2, MatrixError, execute_matrix_run_v2};
+use commit_ci_preflight::matrix::{
+    MatrixConfigV2, MatrixError, MatrixRunRequestV2, execute_matrix_run_v2,
+};
 use commit_ci_preflight::process::{
     CancellationReason, CancellationToken, GenerationGuard, OutputMode, ProcessRequest,
     ProcessResult, ProcessSupervisor, ProcessTermination, RunIdentity, SupervisorPort,
@@ -1052,10 +1054,12 @@ fn print_matrix_run(
         .transition(RunLifecyclePhase::Executing)
         .map_err(CliError::Run)?;
     let result = execute_matrix_run_v2(
-        &envelope,
-        &location.repository,
-        &cache,
-        generation,
+        &MatrixRunRequestV2 {
+            envelope: &envelope,
+            repository: &location.repository,
+            cache: &cache,
+            generation,
+        },
         supervisor.as_ref(),
         &cancellation,
         &SystemClock,
