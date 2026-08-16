@@ -111,9 +111,11 @@ Use `--admission-timeout-seconds` to select the bounded wait and
 ticket identifiers. On macOS, the queue is followed by a strict `macos-v4`
 host-memory admission sample, and `run` has a two-second watchdog that cancels
 only on sustained compound or critical pressure. Admission requires at least 20% available memory and
-3 GiB reclaimable uncompressed memory, accepts compressor occupancy through
-40%, and caps swap at the smaller of 8 GiB and 30% of physical RAM. The
-in-run watchdog treats compression alone as advisory: soft cancellation needs
+3 GiB reclaimable uncompressed memory, and caps swap at the smaller of 8 GiB
+and 30% of physical RAM. Compression alone is advisory both before and during
+the run; at pre-start it denies only when at least 70% compression accompanies
+another pressure signal. The in-run watchdog treats compression the same way:
+soft cancellation needs
 at least two converging signals for about 30 seconds, while critical available,
 reclaimable, swap, or compound-compression conditions remain immediate stops.
 `resource status --json` reports bounded metrics and

@@ -47,9 +47,10 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
    samples release the slot and stop without starting heavy work. Linux and
    Windows report resource protection as unsupported and not enforced.
    Admission requires at least 20% available memory, 3 GiB reclaimable
-   uncompressed memory, compressor occupancy no higher than 40%, and swap no
-   higher than the smaller of 8 GiB and 30% of physical RAM. Boundaries are
-   inclusive and independently mandatory.
+   uncompressed memory, and swap no higher than the smaller of 8 GiB and 30%
+   of physical RAM. Boundaries are inclusive and independently mandatory.
+   Compression alone is advisory; it denies admission only at 70% or more
+   together with another pressure signal.
 5. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
    receipt output itself is excluded from this dirty check.
 6. For `run`, probe the Docker-compatible runtime with bounded output and deadline.

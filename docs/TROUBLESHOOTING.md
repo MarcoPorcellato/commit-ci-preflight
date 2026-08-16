@@ -103,10 +103,11 @@ explicit persistent cache root and retain the old one for review.
 ## macOS resource guard denies a run
 
 The `macos-v4` guard evaluates swap, available/reclaimable memory, compressor
-pressure, and sample certainty independently. Admission requires at least 20%
-available memory and 3 GiB reclaimable memory, accepts compressor occupancy
-through 40%, and permits swap through the smaller of 8 GiB and 30% of physical
-RAM. Satisfying one condition does not override the others.
+pressure, and sample certainty. Admission requires at least 20% available
+memory and 3 GiB reclaimable memory, and permits swap through the smaller of
+8 GiB and 30% of physical RAM. Those three limits are independently mandatory.
+Compression alone is advisory; even extreme compression denies only when it
+accompanies another pressure signal.
 
 ```console
 commit-ci-preflight resource status --json

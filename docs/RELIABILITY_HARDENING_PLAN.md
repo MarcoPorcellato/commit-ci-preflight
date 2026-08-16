@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **IN PROGRESS — T1 merged; urgent macOS-v4 watchdog correction in delivery; T2-T11 remain** |
+| Status | **IN PROGRESS — T1 merged; macOS-v4 compound pre-start/watchdog candidate locally verified; OrbStack qualification pending; T2-T11 remain** |
 | Baseline date | 2026-08-14 |
 | Baseline branch | `main` |
 | Baseline commit | `641a0eed29075696eec1e4e07f8de554f6ce9459` |
@@ -141,9 +141,11 @@ identity.
 
 Approved `macos-v4` invariants:
 
-- keep the reviewed `macos-v3` pre-start admission unchanged;
-- never cancel an otherwise healthy in-progress run for compressor occupancy
-  alone;
+- keep the reviewed `macos-v3` pre-start available, reclaimable and swap limits;
+- never deny an otherwise healthy pre-start sample or cancel an in-progress run
+  for compressor occupancy alone;
+- require at least 70% compressor occupancy plus another pressure signal for a
+  compressor-driven immediate pre-start denial;
 - require at least two converging soft signals for 15 consecutive two-second
   samples;
 - treat 8 GiB swap, critically low available/reclaimable memory, or 70%
@@ -168,7 +170,10 @@ running it after the deterministic suite could receive exit code 6 solely from
 the changed live compressor sample. To preserve the T0 invariant that the
 default suite is independent of host pressure, those two tests are explicit
 native opt-in gates with documented exact commands. An ignored default-suite
-result is not native PASS evidence.
+result is not native PASS evidence. That same sample motivated the approved
+compound pre-start correction: it retained 40% available memory,
+7,594,246,144 reclaimable bytes and zero swap, so compression alone was not a
+credible reason to discard the next run before the watchdog could observe it.
 
 ## 4. Reliability gap register
 

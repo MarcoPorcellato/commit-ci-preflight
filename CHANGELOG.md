@@ -52,8 +52,10 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
-- Version the macOS resource policy as `macos-v4`: preserve strict pre-start
-  admission, but prevent compressor occupancy alone from cancelling a healthy
+- Version the macOS resource policy as `macos-v4`: keep the 20% available,
+  3 GiB reclaimable and bounded-swap pre-start limits, but make compressor
+  occupancy advisory unless at least 70% compression accompanies another
+  pressure signal. Compressor occupancy alone also cannot cancel a healthy
   in-progress run. Soft cancellation now requires two converging signals for
   about 30 seconds; critical memory/swap and compound compressor pressure
   remain immediate stops. Resource history v2 remains backward-compatible and

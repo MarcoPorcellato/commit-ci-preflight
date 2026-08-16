@@ -14,8 +14,10 @@ modified.
 
 ## Implemented state
 
-The candidate versions the policy as `macos-v4` and leaves pre-start admission
-unchanged. During an admitted run:
+The candidate versions the policy as `macos-v4`. Pre-start retains the 20%
+available, 3 GiB reclaimable and bounded-swap limits, but compression alone is
+advisory. Compression can drive an immediate denial only at 70% or more with a
+companion pressure signal. During an admitted run:
 
 - compressor occupancy alone cannot cancel the workload;
 - soft pressure requires at least two independent signals for 15 consecutive
@@ -63,6 +65,28 @@ finished. That possible rule requires a separate assurance decision.
   tests PASS and the two native tests truthfully reported as ignored;
 - `cargo +stable clippy --locked --all-targets --all-features -- -D warnings`:
   PASS using the already-installed stable toolchain without downloads.
+- after the restart exposed the same false positive at pre-start, the policy
+  was further simplified so compression alone cannot deny admission; focused
+  resource tests pass 32/32, including the observed host fixture and a hard
+  compound-compression denial.
+
+## Current candidate evidence
+
+After the compound pre-start correction:
+
+- `cargo fmt --all -- --check`: PASS;
+- `cargo test --locked resource --lib`: PASS, 32 tests;
+- `cargo test --locked --all-targets --all-features`: PASS, 218 tests, with the
+  two native admission contracts explicitly ignored by the deterministic
+  default;
+- both documented native admission contracts: PASS when run individually;
+- `cargo +stable clippy --locked --all-targets --all-features -- -D warnings`:
+  PASS;
+- `cargo doc --locked --workspace --no-deps`: PASS;
+- `git diff --check`: PASS.
+
+No OrbStack qualification, GitHub workflow, push, pull request or merge is
+claimed by these local checks.
 
 Before restart, no Docker container, OrbStack workload, guarded CCP run, GitHub
 workflow, or native qualification was started under resource denial. After
@@ -94,7 +118,8 @@ cargo +stable clippy --locked --all-targets --all-features -- -D warnings
 git diff --check
 ```
 
-Only after the focused and full deterministic gates pass should the candidate
-run its repository-native CCP/OrbStack qualification and be pushed for a draft
-pull request. Do not treat this handoff, formatting, or static review as native
-qualification.
+The focused, full deterministic and native CLI gates now pass. The remaining
+qualification step is the repository-native CCP/OrbStack run on the exact
+committed candidate. Only a terminal outer PASS with complete exact-commit
+evidence qualifies that gate. Do not treat this handoff, formatting, or static
+review as OrbStack qualification.

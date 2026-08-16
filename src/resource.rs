@@ -34,7 +34,6 @@ pub const RESOURCE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 pub const RESOURCE_CAPTURE_BYTES: usize = 65_536;
 pub const MIN_PRESTART_AVAILABLE_PERCENT: u8 = 20;
 pub const MIN_PRESTART_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
-pub const MAX_PRESTART_COMPRESSOR_PERCENT: u8 = 40;
 pub const MAX_PRESTART_SWAP_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const HARD_AVAILABLE_PERCENT: u8 = 3;
 pub const HARD_RECLAIMABLE_BYTES: u64 = 512 * 1024 * 1024;
@@ -197,6 +196,13 @@ impl ResourceSnapshot {
             percent,
         )
     }
+
+    fn has_hard_compound_compression(&self) -> bool {
+        self.compressor_percent_at_least(HARD_COMPRESSOR_PERCENT)
+            && (self.available_percent <= HARD_COMPRESSOR_COMPANION_AVAILABLE_PERCENT
+                || self.reclaimable_uncompressed_bytes < SOFT_RECLAIMABLE_BYTES
+                || self.swap_used_bytes >= SOFT_SWAP_BYTES)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,12 +220,8 @@ pub fn evaluate_pre_start(
     Ok(
         if snapshot.available_percent >= MIN_PRESTART_AVAILABLE_PERCENT
             && snapshot.reclaimable_uncompressed_bytes >= MIN_PRESTART_FREE_BYTES
-            && !ratio_greater_than(
-                snapshot.compressor_occupied_bytes,
-                snapshot.total_memory_bytes,
-                MAX_PRESTART_COMPRESSOR_PERCENT,
-            )
             && snapshot.swap_used_bytes <= swap_limit
+            && !snapshot.has_hard_compound_compression()
         {
             PreStartDecision::Admit
         } else {
@@ -268,15 +270,10 @@ impl WatchdogState {
                     .front()
                     .expect("bounded trend window is non-empty"),
             ) >= SOFT_SWAP_GROWTH_BYTES;
-        let hard_compressor_compound = snapshot
-            .compressor_percent_at_least(HARD_COMPRESSOR_PERCENT)
-            && (snapshot.available_percent <= HARD_COMPRESSOR_COMPANION_AVAILABLE_PERCENT
-                || snapshot.reclaimable_uncompressed_bytes < SOFT_RECLAIMABLE_BYTES
-                || snapshot.swap_used_bytes >= SOFT_SWAP_BYTES);
         if snapshot.available_percent <= HARD_AVAILABLE_PERCENT
             || snapshot.reclaimable_uncompressed_bytes < HARD_RECLAIMABLE_BYTES
             || snapshot.swap_used_bytes >= HARD_SWAP_BYTES
-            || hard_compressor_compound
+            || snapshot.has_hard_compound_compression()
         {
             self.first_trip = Some(WatchdogTripReason::HardPressure);
             return Ok(WatchdogDecision::Tripped(WatchdogTripReason::HardPressure));
@@ -601,10 +598,6 @@ fn ratio_at_least(value: u64, total: u64, percent: u8) -> bool {
     u128::from(value) * 100 >= u128::from(total) * u128::from(percent)
 }
 
-fn ratio_greater_than(value: u64, total: u64, percent: u8) -> bool {
-    u128::from(value) * 100 > u128::from(total) * u128::from(percent)
-}
-
 fn parse_memory_pressure(input: &[u8]) -> Result<u8, ResourceProbeError> {
     let text = std::str::from_utf8(input).map_err(|_| ResourceProbeError::MalformedOutput)?;
     let mut found = None;
@@ -891,7 +884,6 @@ mod tests {
     fn policy_boundaries_are_explicit() {
         assert_eq!(MACOS_POLICY_VERSION, "macos-v4");
         assert_eq!(MIN_PRESTART_AVAILABLE_PERCENT, 20);
-        assert_eq!(MAX_PRESTART_COMPRESSOR_PERCENT, 40);
         assert_eq!(MAX_PRESTART_SWAP_BYTES, 8 * 1024 * 1024 * 1024);
         assert_eq!(SOFT_CONSECUTIVE_SAMPLES, 15);
         assert_eq!(SOFT_REQUIRED_SIGNALS, 2);
@@ -905,8 +897,6 @@ mod tests {
         let mut denied = snapshot();
         denied.available_percent = MIN_PRESTART_AVAILABLE_PERCENT;
         denied.reclaimable_uncompressed_bytes = MIN_PRESTART_FREE_BYTES;
-        denied.compressor_occupied_bytes =
-            u64::from(MAX_PRESTART_COMPRESSOR_PERCENT) * denied.total_memory_bytes / 100;
         denied.swap_used_bytes = MAX_PRESTART_SWAP_BYTES;
         assert_eq!(
             evaluate_pre_start(&denied).expect("boundary"),
@@ -918,13 +908,6 @@ mod tests {
             PreStartDecision::Deny
         );
 
-        denied = snapshot();
-        denied.compressor_occupied_bytes =
-            (u64::from(MAX_PRESTART_COMPRESSOR_PERCENT) + 1) * denied.total_memory_bytes / 100;
-        assert_eq!(
-            evaluate_pre_start(&denied).expect("compressor deny"),
-            PreStartDecision::Deny
-        );
         denied = snapshot();
         denied.swap_total_bytes = 12 * 1024 * 1024 * 1024;
         denied.swap_used_bytes = MAX_PRESTART_SWAP_BYTES;
@@ -955,6 +938,44 @@ mod tests {
         denied.reclaimable_uncompressed_bytes = MIN_PRESTART_FREE_BYTES - 1;
         assert_eq!(
             evaluate_pre_start(&denied).expect("free deny"),
+            PreStartDecision::Deny
+        );
+    }
+
+    #[test]
+    fn pre_start_compression_is_advisory_without_a_companion_signal() {
+        let mut compressed = snapshot();
+        compressed.compressor_occupied_bytes = percent_ceiling(compressed.total_memory_bytes, 90);
+        compressed.swap_used_bytes = 0;
+        assert_eq!(
+            evaluate_pre_start(&compressed).expect("healthy compressed host"),
+            PreStartDecision::Admit
+        );
+
+        let observed = ResourceSnapshot {
+            available_percent: 40,
+            reclaimable_uncompressed_bytes: 7_594_246_144,
+            compressor_occupied_bytes: 16_000_000_000,
+            total_memory_bytes: 38_654_705_664,
+            swap_used_bytes: 0,
+            swap_total_bytes: 6_442_450_944,
+        };
+        assert_eq!(
+            evaluate_pre_start(&observed).expect("observed false-positive sample"),
+            PreStartDecision::Admit
+        );
+    }
+
+    #[test]
+    fn pre_start_rejects_hard_compound_compression() {
+        let mut compound = snapshot();
+        compound.compressor_occupied_bytes = percent_ceiling(
+            compound.total_memory_bytes,
+            u64::from(HARD_COMPRESSOR_PERCENT),
+        );
+        compound.swap_used_bytes = SOFT_SWAP_BYTES;
+        assert_eq!(
+            evaluate_pre_start(&compound).expect("compound compressor pressure"),
             PreStartDecision::Deny
         );
     }

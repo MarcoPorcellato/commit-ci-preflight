@@ -84,9 +84,10 @@ those platforms. Resource status is read-only and bounded, and receipt schema
 changes are deferred.
 
 Policy `macos-v4` admits only with at least 20% available memory and 3 GiB
-reclaimable uncompressed memory. It accepts compressor occupancy through 40%
-and swap through the smaller of 8 GiB and 30% of physical RAM. These are
-independent pre-start conjuncts. In progress, compression alone is advisory.
+reclaimable uncompressed memory, and with swap through the smaller of 8 GiB
+and 30% of physical RAM. These are independent pre-start conjuncts.
+Compression is advisory by itself both before and during execution; at
+pre-start, 70% or more compression denies only with another pressure signal.
 Soft cancellation requires at least two converging pressure signals for 15
 consecutive two-second samples; critical available memory, reclaimable memory,
 or 8 GiB swap remain immediate stops. Compressor pressure becomes an immediate
