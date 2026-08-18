@@ -65,6 +65,9 @@ must not merely rename, ignore, or remove it.
 - Resource sampling uses `ResourceCommandRunner` and injected watchdog timing.
 - Run orchestration exposes `Clock` and `CompletionBarrier`.
 - Admission uses an explicit coordinator root in tests.
+- Admission tests include a separate-process activity that observes the slot
+  owner/run identifier, distinguishes queue and slot lock roles, and verifies
+  that an unlocked ticket without lease evidence is not quarantined.
 - Cache and workspace tests use CCP-owned fixture roots.
 
 T1 introduces the shared fault-injecting durable-filesystem seam. T2, T3, T5,

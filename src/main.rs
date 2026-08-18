@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
-    ADMISSION_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
+    ADMISSION_STATUS_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
     DEFAULT_QUEUE_TIMEOUT,
 };
 use commit_ci_preflight::benchmark::{
@@ -418,7 +418,7 @@ enum RecoverCommand {
 
 #[derive(Debug, Subcommand)]
 enum AdmissionCommand {
-    /// Report only bounded coordinator state and ticket identifiers.
+    /// Report bounded coordinator state, lock roles, and lease ownership.
     Status {
         /// Emit the versioned machine-readable status.
         #[arg(long)]
@@ -1427,12 +1427,17 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
                     serde_json::to_string(&status).map_err(CliError::internal)?
                 );
             } else {
-                println!("Admission schema: {ADMISSION_SCHEMA_VERSION}");
+                println!("Admission schema: {ADMISSION_STATUS_SCHEMA_VERSION}");
                 println!("Active: {}", status.active);
                 println!("Queued: {}", status.queue_count);
-                for ticket in status.ticket_ids {
+                println!("Slot lock: {}", status.slot.state);
+                println!("Slot owner/run: {:?}", status.slot.owner_run_id);
+                println!("Slot lease: {}", status.slot.lease_state);
+                println!("Queue lock: {}", status.queue_lock.state);
+                for ticket in &status.ticket_ids {
                     println!("  - {ticket}");
                 }
+                println!("Note: {}", status.process_visibility_note);
             }
             Ok(())
         }
