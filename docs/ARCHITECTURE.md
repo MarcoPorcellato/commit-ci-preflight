@@ -60,11 +60,16 @@ before heavy execution. The coordinator lives below the platform application
 cache in the dedicated `commit-ci-preflight-admission` sibling root. It never
 lives inside the independently managed `commit-ci-preflight` cache root. The
 coordinator uses advisory file locks whose ownership is released by the
-operating system on normal exit, crash, or reboot, and never guesses stale
-state from a PID or wall clock. `plan`, `doctor`, `dry-run`, `verify`, migration,
-and cache inventory remain unqueued. Admission state is operational
-coordination only; the receipt schema does not yet record queue or resource
-evidence.
+operating system on normal exit, crash, or reboot. The slot lock remains the
+authority; a separate CCP-owned lease record adds an opaque run identifier,
+acquisition timestamp, heartbeat, and bounded lease state for cross-activity
+inspection. A ticket can be reclaimed only when its OS lock is demonstrably
+unlocked and its valid lease is definitely expired. Missing, malformed,
+contradictory, or legacy lease metadata is `unknown` and remains blocking;
+CCP never infers global inactivity from a PID list or one activity's shell.
+`plan`, `doctor`, `dry-run`, `verify`, migration, and cache inventory remain
+unqueued. Admission state is operational coordination only; the receipt schema
+does not yet record queue or resource evidence.
 `guard exec` uses the same host-wide admission and macOS resource guard, but it
 executes exactly one explicit argv without a shell and does not write receipts.
 After admission, it can attach a bounded observation accumulator to the

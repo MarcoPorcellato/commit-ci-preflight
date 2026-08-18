@@ -106,9 +106,14 @@ exact container argv and mounts but does not execute project code.
 
 `run` and `benchmark` are serialized through a default-on host-wide single-slot
 queue so independent local agents cannot start both heavy workloads at once.
-Use `--admission-timeout-seconds` to select the bounded wait and
-`admission status --json` to inspect only busy state, queue count, and opaque
-ticket identifiers. On macOS, the queue is followed by a strict `macos-v4`
+Use `--admission-timeout-seconds` to select the bounded wait. The
+`admission status --json` result distinguishes the transient `queue_lock` from
+the heavy-work `slot_lock`, and reports the slot's opaque owner/run identifier,
+acquisition time, heartbeat time, and lease state when available. A missing
+owner record, a malformed lease, or a contradiction between the OS lock and
+the lease is reported as `unknown` and is never treated as inactivity. The
+status also states explicitly that absence of a process in one local shell
+does not prove global inactivity across Codex activities or users. On macOS, the queue is followed by a strict `macos-v4`
 host-memory admission sample, and `run` has a two-second watchdog that cancels
 only on sustained compound or critical pressure. Admission requires at least 20% available memory and
 3 GiB reclaimable uncompressed memory, and caps swap at the smaller of 8 GiB

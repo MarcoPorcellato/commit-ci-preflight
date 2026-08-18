@@ -16,8 +16,12 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -25,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::process::CancellationToken;
 
 pub const ADMISSION_SCHEMA_VERSION: &str = "1.0";
+pub const ADMISSION_STATUS_SCHEMA_VERSION: &str = "2.0";
 pub const DEFAULT_QUEUE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const MAX_QUEUE_TICKETS: usize = 1024;
 
@@ -38,7 +43,14 @@ const NEXT_TICKET: &str = "next-ticket-v1";
 const TICKETS_DIR: &str = "tickets";
 const TICKET_PREFIX: &str = "ticket-";
 const TICKET_SUFFIX: &str = ".json";
+const LEASES_DIR: &str = "leases";
+const LEASE_PREFIX: &str = "lease-";
+const LEASE_SUFFIX: &str = ".json";
+const LEASE_DURATION: Duration = Duration::from_secs(30);
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const WAIT_INTERVAL: Duration = Duration::from_millis(25);
+const PROCESS_VISIBILITY_NOTE: &str =
+    "No process visible in the local shell does not prove global inactivity.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AdmissionStatusV1 {
@@ -46,6 +58,19 @@ pub struct AdmissionStatusV1 {
     pub active: bool,
     pub queue_count: usize,
     pub ticket_ids: Vec<String>,
+    pub slot: AdmissionLockStatusV1,
+    pub queue_lock: AdmissionLockStatusV1,
+    pub process_visibility_note: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdmissionLockStatusV1 {
+    pub kind: String,
+    pub state: String,
+    pub owner_run_id: Option<String>,
+    pub acquired_at_unix_seconds: Option<u64>,
+    pub heartbeat_at_unix_seconds: Option<u64>,
+    pub lease_state: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -57,10 +82,73 @@ struct TicketMarker {
     ticket_id: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LeaseMarker {
+    owner: String,
+    purpose: String,
+    schema_version: String,
+    owner_run_id: String,
+    acquired_at_unix_seconds: u64,
+    heartbeat_at_unix_seconds: u64,
+    state: String,
+}
+
 #[derive(Debug)]
 struct TicketInfo {
     id: String,
     path: PathBuf,
+}
+
+#[derive(Debug)]
+struct HeartbeatHandle {
+    stop: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl HeartbeatHandle {
+    fn start(path: PathBuf, owner_run_id: String) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let join = thread::spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                thread::sleep(HEARTBEAT_INTERVAL);
+                if thread_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let Ok(mut lease) = read_lease(&path) else {
+                    break;
+                };
+                if lease.owner_run_id != owner_run_id || lease.state != "active" {
+                    break;
+                }
+                let Ok(now) = unix_seconds() else {
+                    break;
+                };
+                lease.heartbeat_at_unix_seconds = now;
+                if write_lease(&path, &lease).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for HeartbeatHandle {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }
 
 #[derive(Debug)]
@@ -155,6 +243,26 @@ impl AdmissionCoordinator {
                 .first()
                 .is_some_and(|ticket| Some(ticket.id.as_str()) == reservation.id.as_deref());
             if first_is_ours && let Some(slot) = self.try_lock_slot()? {
+                let ticket_id = reservation
+                    .id
+                    .as_deref()
+                    .expect("reservation id is present");
+                let lease_path = reservation
+                    .lease_path
+                    .as_ref()
+                    .expect("reservation lease path is present")
+                    .clone();
+                if let Err(error) = self.activate_lease(&lease_path, ticket_id) {
+                    let _ = FileExt::unlock(&slot);
+                    unlock(&mut queue)?;
+                    reservation.cleanup(self)?;
+                    return Err(error);
+                }
+                let lease_path = reservation
+                    .lease_path
+                    .take()
+                    .expect("reservation lease path is present");
+                let heartbeat = HeartbeatHandle::start(lease_path.clone(), ticket_id.to_owned());
                 unlock(&mut queue)?;
                 return Ok(AdmissionGuard {
                     coordinator: self.clone(),
@@ -170,6 +278,7 @@ impl AdmissionCoordinator {
                     ),
                     slot: Some(slot),
                     ticket_id: reservation.id.take().expect("reservation id is present"),
+                    heartbeat: Some(heartbeat),
                 });
             }
             unlock(&mut queue)?;
@@ -182,6 +291,7 @@ impl AdmissionCoordinator {
             return Ok(empty_status());
         }
         self.validate_layout(true)?;
+        let queue_lock = self.lock_status(QUEUE_LOCK, "queue_lock")?;
         let mut queue = self.open_queue(false)?;
         queue
             .lock_exclusive()
@@ -190,7 +300,8 @@ impl AdmissionCoordinator {
                 source,
             })?;
         let (live, _stale) = self.scan_tickets(None, false)?;
-        let active = self.slot_is_busy()?;
+        let slot = self.slot_status()?;
+        let active = slot.state == "held";
         unlock(&mut queue)?;
         let first = usize::from(active && !live.is_empty());
         let ticket_ids: Vec<String> = live
@@ -199,10 +310,13 @@ impl AdmissionCoordinator {
             .map(|ticket| ticket.id)
             .collect();
         Ok(AdmissionStatusV1 {
-            schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
+            schema_version: ADMISSION_STATUS_SCHEMA_VERSION.to_owned(),
             active,
             queue_count: ticket_ids.len(),
             ticket_ids,
+            slot,
+            queue_lock,
+            process_visibility_note: PROCESS_VISIBILITY_NOTE.to_owned(),
         })
     }
 
@@ -228,6 +342,17 @@ impl AdmissionCoordinator {
         } else {
             fs::create_dir(&tickets).map_err(|source| AdmissionError::Io {
                 path: tickets.clone(),
+                source,
+            })?;
+        }
+        let leases = self.root.join(LEASES_DIR);
+        if let Ok(metadata) = fs::symlink_metadata(&leases) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AdmissionError::UnsafeLayout(leases));
+            }
+        } else {
+            fs::create_dir(&leases).map_err(|source| AdmissionError::Io {
+                path: leases.clone(),
                 source,
             })?;
         }
@@ -311,10 +436,27 @@ impl AdmissionCoordinator {
             path: path.clone(),
             source,
         })?;
+        let now = unix_seconds()?;
+        let lease_path = self.lease_path(&id);
+        let lease = LeaseMarker {
+            owner: "commit-ci-preflight".to_owned(),
+            purpose: "host-admission-lease".to_owned(),
+            schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
+            owner_run_id: id.clone(),
+            acquired_at_unix_seconds: now,
+            heartbeat_at_unix_seconds: now,
+            state: "queued".to_owned(),
+        };
+        if let Err(error) = create_lease(&lease_path, &lease) {
+            let _ = FileExt::unlock(&file);
+            let _ = fs::remove_file(&path);
+            return Err(error);
+        }
         Ok(TicketReservation {
             id: Some(id),
             path: Some(path),
             file: Some(file),
+            lease_path: Some(lease_path),
         })
     }
 
@@ -434,13 +576,15 @@ impl AdmissionCoordinator {
                 })?;
             match file.try_lock_exclusive() {
                 Ok(()) => {
-                    if reclaim_stale {
+                    let lease = self.read_lease(&ticket.id)?;
+                    if reclaim_stale && lease.as_ref().is_some_and(lease_is_expired) {
                         stale.push(StaleTicket { ticket, file });
                     } else {
                         FileExt::unlock(&file).map_err(|source| AdmissionError::Lock {
                             path: ticket.path.clone(),
                             source,
                         })?;
+                        live.push(ticket);
                     }
                 }
                 Err(source) if source.kind() == io::ErrorKind::WouldBlock => live.push(ticket),
@@ -464,11 +608,61 @@ impl AdmissionCoordinator {
                 source,
             })?;
             FileExt::unlock(&stale.file).map_err(|source| AdmissionError::Lock {
-                path: stale.ticket.path,
+                path: stale.ticket.path.clone(),
                 source,
             })?;
+            self.remove_lease(&stale.ticket.id)?;
         }
         Ok(())
+    }
+
+    fn lease_path(&self, ticket_id: &str) -> PathBuf {
+        self.root
+            .join(LEASES_DIR)
+            .join(format!("{LEASE_PREFIX}{ticket_id}{LEASE_SUFFIX}"))
+    }
+
+    fn read_lease(&self, ticket_id: &str) -> Result<Option<LeaseMarker>, AdmissionError> {
+        let path = self.lease_path(ticket_id);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(AdmissionError::UnsafeLayout(path));
+                }
+                let lease = read_lease(&path)?;
+                if lease.owner != "commit-ci-preflight"
+                    || lease.purpose != "host-admission-lease"
+                    || lease.schema_version != ADMISSION_SCHEMA_VERSION
+                    || lease.owner_run_id != ticket_id
+                {
+                    return Err(AdmissionError::ForeignLease(path));
+                }
+                Ok(Some(lease))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(AdmissionError::Io { path, source }),
+        }
+    }
+
+    fn activate_lease(&self, path: &Path, ticket_id: &str) -> Result<(), AdmissionError> {
+        let mut lease = read_lease(path)?;
+        if lease.owner_run_id != ticket_id || lease.state != "queued" {
+            return Err(AdmissionError::ForeignLease(path.to_path_buf()));
+        }
+        let now = unix_seconds()?;
+        lease.state = "active".to_owned();
+        lease.acquired_at_unix_seconds = now;
+        lease.heartbeat_at_unix_seconds = now;
+        write_lease(path, &lease)
+    }
+
+    fn remove_lease(&self, ticket_id: &str) -> Result<(), AdmissionError> {
+        let path = self.lease_path(ticket_id);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(AdmissionError::Io { path, source }),
+        }
     }
 
     fn try_lock_slot(&self) -> Result<Option<File>, AdmissionError> {
@@ -481,19 +675,107 @@ impl AdmissionCoordinator {
         }
     }
 
-    fn slot_is_busy(&self) -> Result<bool, AdmissionError> {
-        let path = self.root.join(SLOT_LOCK);
-        let Some(file) = open_existing_lock_file(&path)? else {
-            return Ok(false);
+    fn lock_status(&self, name: &str, kind: &str) -> Result<AdmissionLockStatusV1, AdmissionError> {
+        let path = self.root.join(name);
+        let state = match open_existing_lock_file(&path)? {
+            None => "unknown".to_owned(),
+            Some(file) => match file.try_lock_exclusive() {
+                Ok(()) => {
+                    FileExt::unlock(&file).map_err(|source| AdmissionError::Lock {
+                        path: path.clone(),
+                        source,
+                    })?;
+                    "free".to_owned()
+                }
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => "held".to_owned(),
+                Err(source) => return Err(AdmissionError::Lock { path, source }),
+            },
         };
-        match file.try_lock_exclusive() {
-            Ok(()) => {
-                FileExt::unlock(&file).map_err(|source| AdmissionError::Lock { path, source })?;
-                Ok(false)
+        Ok(AdmissionLockStatusV1 {
+            kind: kind.to_owned(),
+            state,
+            owner_run_id: None,
+            acquired_at_unix_seconds: None,
+            heartbeat_at_unix_seconds: None,
+            lease_state: "not_applicable".to_owned(),
+        })
+    }
+
+    fn slot_status(&self) -> Result<AdmissionLockStatusV1, AdmissionError> {
+        let lock = self.lock_status(SLOT_LOCK, "slot_lock")?;
+        let leases = self.active_leases()?;
+        let candidate = if leases.len() == 1 {
+            Some(&leases[0])
+        } else {
+            None
+        };
+        let lease_state = match candidate {
+            Some(lease) if lease_is_expired(lease) => "expired",
+            Some(_) => "active",
+            None if leases.is_empty() => "absent",
+            None => "unknown",
+        };
+        let contradictory = lock.state == "free" && !leases.is_empty();
+        Ok(AdmissionLockStatusV1 {
+            kind: "slot_lock".to_owned(),
+            state: if contradictory {
+                "unknown".to_owned()
+            } else {
+                lock.state
+            },
+            owner_run_id: candidate.map(|lease| lease.owner_run_id.clone()),
+            acquired_at_unix_seconds: candidate.map(|lease| lease.acquired_at_unix_seconds),
+            heartbeat_at_unix_seconds: candidate.map(|lease| lease.heartbeat_at_unix_seconds),
+            lease_state: lease_state.to_owned(),
+        })
+    }
+
+    fn active_leases(&self) -> Result<Vec<LeaseMarker>, AdmissionError> {
+        let directory = self.root.join(LEASES_DIR);
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(AdmissionError::Io {
+                    path: directory,
+                    source,
+                });
             }
-            Err(source) if source.kind() == io::ErrorKind::WouldBlock => Ok(true),
-            Err(source) => Err(AdmissionError::Lock { path, source }),
+        };
+        let mut leases = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(AdmissionError::ReadDir)?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|source| AdmissionError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(AdmissionError::UnsafeLayout(path));
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| AdmissionError::MalformedLease(path.clone()))?;
+            if !name.starts_with(LEASE_PREFIX) || !name.ends_with(LEASE_SUFFIX) {
+                return Err(AdmissionError::MalformedLease(path));
+            }
+            let lease = read_lease(&path)?;
+            if lease.owner != "commit-ci-preflight"
+                || lease.purpose != "host-admission-lease"
+                || lease.schema_version != ADMISSION_SCHEMA_VERSION
+            {
+                return Err(AdmissionError::ForeignLease(path));
+            }
+            if lease.state == "queued" {
+                continue;
+            }
+            if lease.state != "active" {
+                return Err(AdmissionError::ForeignLease(path));
+            }
+            leases.push(lease);
         }
+        Ok(leases)
     }
 
     fn open_queue(&self, create: bool) -> Result<File, AdmissionError> {
@@ -554,6 +836,16 @@ impl AdmissionCoordinator {
                     }
                     tickets = true;
                 }
+                Some(LEASES_DIR) => {
+                    let metadata =
+                        fs::symlink_metadata(&path).map_err(|source| AdmissionError::Io {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(AdmissionError::UnsafeLayout(path));
+                    }
+                }
                 _ => return Err(AdmissionError::UnsafeLayout(path)),
             }
         }
@@ -573,6 +865,7 @@ pub struct AdmissionGuard {
     ticket: Option<File>,
     slot: Option<File>,
     ticket_id: String,
+    heartbeat: Option<HeartbeatHandle>,
 }
 
 impl AdmissionGuard {
@@ -592,23 +885,50 @@ impl AdmissionGuard {
                 path: self.coordinator.root.join(QUEUE_LOCK),
                 source,
             })?;
+        let mut cleanup_error = None;
+        if let Some(mut heartbeat) = self.heartbeat.take() {
+            heartbeat.stop();
+        }
+        if let Err(error) = self.coordinator.remove_lease(&self.ticket_id) {
+            keep_first_error(&mut cleanup_error, error);
+        }
         if let Some(slot) = self.slot.take() {
-            FileExt::unlock(&slot).map_err(|source| AdmissionError::Lock {
-                path: self.coordinator.root.join(SLOT_LOCK),
-                source,
-            })?;
+            if let Err(source) = FileExt::unlock(&slot) {
+                keep_first_error(
+                    &mut cleanup_error,
+                    AdmissionError::Lock {
+                        path: self.coordinator.root.join(SLOT_LOCK),
+                        source,
+                    },
+                );
+            }
         }
         if let Some(ticket) = self.ticket.take() {
-            FileExt::unlock(&ticket).map_err(|source| AdmissionError::Lock {
-                path: self.ticket_path.clone(),
-                source,
-            })?;
+            if let Err(source) = FileExt::unlock(&ticket) {
+                keep_first_error(
+                    &mut cleanup_error,
+                    AdmissionError::Lock {
+                        path: self.ticket_path.clone(),
+                        source,
+                    },
+                );
+            }
         }
-        fs::remove_file(&self.ticket_path).map_err(|source| AdmissionError::Io {
-            path: self.ticket_path.clone(),
-            source,
-        })?;
-        unlock(&mut queue)
+        if let Err(source) = fs::remove_file(&self.ticket_path)
+            && source.kind() != io::ErrorKind::NotFound
+        {
+            keep_first_error(
+                &mut cleanup_error,
+                AdmissionError::Io {
+                    path: self.ticket_path.clone(),
+                    source,
+                },
+            );
+        }
+        if let Err(error) = unlock(&mut queue) {
+            keep_first_error(&mut cleanup_error, error);
+        }
+        cleanup_error.map_or(Ok(()), Err)
     }
 }
 
@@ -622,6 +942,7 @@ struct TicketReservation {
     id: Option<String>,
     path: Option<PathBuf>,
     file: Option<File>,
+    lease_path: Option<PathBuf>,
 }
 
 impl TicketReservation {
@@ -639,18 +960,47 @@ impl TicketReservation {
                 path: coordinator.root.join(QUEUE_LOCK),
                 source,
             })?;
-        FileExt::unlock(file).map_err(|source| AdmissionError::Lock {
-            path: path.clone(),
-            source,
-        })?;
-        fs::remove_file(&path).map_err(|source| AdmissionError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let mut cleanup_error = None;
+        if let Err(source) = FileExt::unlock(file) {
+            keep_first_error(
+                &mut cleanup_error,
+                AdmissionError::Lock {
+                    path: path.clone(),
+                    source,
+                },
+            );
+        }
+        if let Some(lease_path) = self.lease_path.take() {
+            if let Err(source) = fs::remove_file(&lease_path)
+                && source.kind() != io::ErrorKind::NotFound
+            {
+                keep_first_error(
+                    &mut cleanup_error,
+                    AdmissionError::Io {
+                        path: lease_path,
+                        source,
+                    },
+                );
+            }
+        }
+        if let Err(source) = fs::remove_file(&path)
+            && source.kind() != io::ErrorKind::NotFound
+        {
+            keep_first_error(
+                &mut cleanup_error,
+                AdmissionError::Io {
+                    path: path.clone(),
+                    source,
+                },
+            );
+        }
         self.file = None;
         self.path = None;
         self.id = None;
-        unlock(&mut queue)
+        if let Err(error) = unlock(&mut queue) {
+            keep_first_error(&mut cleanup_error, error);
+        }
+        cleanup_error.map_or(Ok(()), Err)
     }
 }
 
@@ -662,15 +1012,35 @@ impl Drop for TicketReservation {
         if let Some(path) = &self.path {
             let _ = fs::remove_file(path);
         }
+        if let Some(path) = &self.lease_path {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
 fn empty_status() -> AdmissionStatusV1 {
     AdmissionStatusV1 {
-        schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
+        schema_version: ADMISSION_STATUS_SCHEMA_VERSION.to_owned(),
         active: false,
         queue_count: 0,
         ticket_ids: Vec::new(),
+        slot: AdmissionLockStatusV1 {
+            kind: "slot_lock".to_owned(),
+            state: "free".to_owned(),
+            owner_run_id: None,
+            acquired_at_unix_seconds: None,
+            heartbeat_at_unix_seconds: None,
+            lease_state: "absent".to_owned(),
+        },
+        queue_lock: AdmissionLockStatusV1 {
+            kind: "queue_lock".to_owned(),
+            state: "free".to_owned(),
+            owner_run_id: None,
+            acquired_at_unix_seconds: None,
+            heartbeat_at_unix_seconds: None,
+            lease_state: "not_applicable".to_owned(),
+        },
+        process_visibility_note: PROCESS_VISIBILITY_NOTE.to_owned(),
     }
 }
 
@@ -687,6 +1057,12 @@ fn unlock(file: &mut File) -> Result<(), AdmissionError> {
         path: PathBuf::from("admission lock"),
         source,
     })
+}
+
+fn keep_first_error(target: &mut Option<AdmissionError>, error: AdmissionError) {
+    if target.is_none() {
+        *target = Some(error);
+    }
 }
 
 fn open_lock_file(path: &Path, create: bool) -> Result<File, AdmissionError> {
@@ -752,6 +1128,78 @@ fn read_ticket(path: &Path) -> Result<TicketMarker, AdmissionError> {
         source,
     })?;
     serde_json::from_slice(&bytes).map_err(|_| AdmissionError::MalformedTicket(path.to_path_buf()))
+}
+
+fn read_lease(path: &Path) -> Result<LeaseMarker, AdmissionError> {
+    let bytes = fs::read(path).map_err(|source| AdmissionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| AdmissionError::MalformedLease(path.to_path_buf()))
+}
+
+fn create_lease(path: &Path, lease: &LeaseMarker) -> Result<(), AdmissionError> {
+    let bytes = serde_json::to_vec(lease).map_err(AdmissionError::Json)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|source| AdmissionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(&bytes)
+        .map_err(|source| AdmissionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(b"\n").map_err(|source| AdmissionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.sync_all().map_err(|source| AdmissionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_lease(path: &Path, lease: &LeaseMarker) -> Result<(), AdmissionError> {
+    let bytes = serde_json::to_vec(lease).map_err(AdmissionError::Json)?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|source| AdmissionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(&bytes)
+        .map_err(|source| AdmissionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.write_all(b"\n").map_err(|source| AdmissionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.sync_all().map_err(|source| AdmissionError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn unix_seconds() -> Result<u64, AdmissionError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| AdmissionError::Clock)
+}
+
+fn lease_is_expired(lease: &LeaseMarker) -> bool {
+    let Ok(now) = unix_seconds() else {
+        return false;
+    };
+    now.saturating_sub(lease.heartbeat_at_unix_seconds) >= LEASE_DURATION.as_secs()
 }
 
 fn parse_ticket_name(path: &Path) -> Result<String, AdmissionError> {
@@ -900,8 +1348,11 @@ pub enum AdmissionError {
     ForeignOwner(PathBuf),
     ForeignTicket(PathBuf),
     MalformedTicket(PathBuf),
+    ForeignLease(PathBuf),
+    MalformedLease(PathBuf),
     MalformedCounter(PathBuf),
     TicketCounterExhausted,
+    Clock,
     CurrentDirectory(io::Error),
     ReadDir(io::Error),
     Io { path: PathBuf, source: io::Error },
@@ -921,8 +1372,11 @@ impl AdmissionError {
             | Self::ForeignOwner(_)
             | Self::ForeignTicket(_)
             | Self::MalformedTicket(_)
+            | Self::ForeignLease(_)
+            | Self::MalformedLease(_)
             | Self::MalformedCounter(_)
             | Self::TicketCounterExhausted
+            | Self::Clock
             | Self::CurrentDirectory(_)
             | Self::ReadDir(_)
             | Self::Io { .. }
@@ -964,6 +1418,16 @@ impl fmt::Display for AdmissionError {
                 "malformed admission ticket rejected at {}",
                 path.display()
             ),
+            Self::ForeignLease(path) => write!(
+                formatter,
+                "foreign admission lease rejected at {}",
+                path.display()
+            ),
+            Self::MalformedLease(path) => write!(
+                formatter,
+                "malformed admission lease rejected at {}",
+                path.display()
+            ),
             Self::MalformedCounter(path) => write!(
                 formatter,
                 "malformed admission ticket counter at {}",
@@ -971,6 +1435,9 @@ impl fmt::Display for AdmissionError {
             ),
             Self::TicketCounterExhausted => {
                 formatter.write_str("admission ticket counter exhausted")
+            }
+            Self::Clock => {
+                formatter.write_str("system clock could not be read for admission lease")
             }
             Self::CurrentDirectory(_) => {
                 formatter.write_str("current directory could not be resolved for admission safety")
@@ -1044,6 +1511,13 @@ mod tests {
             }
         }
 
+        fn acquired_id(&mut self) -> String {
+            self.acquired()
+                .strip_prefix("ACQUIRED ")
+                .expect("admission marker")
+                .to_owned()
+        }
+
         fn finish(mut self) {
             let status = self.child.wait().expect("child exit");
             assert!(status.success(), "child failed: {status}");
@@ -1076,11 +1550,16 @@ mod tests {
         println!("ACQUIRED {}", guard.ticket_id());
         std::io::stdout().flush().expect("flush child output");
         if mode == "hold" {
-            thread::sleep(Duration::from_millis(250));
+            thread::sleep(Duration::from_secs(5));
         } else {
             thread::sleep(Duration::from_millis(50));
         }
-        assert_eq!(test_name, "two_processes_serialize_and_preserve_fifo_order");
+        assert!(matches!(
+            test_name,
+            "two_processes_serialize_and_preserve_fifo_order"
+                | "cross_activity_status_reports_slot_owner_and_lock_roles"
+                | "status_is_bounded_and_excludes_sensitive_paths"
+        ));
         true
     }
 
@@ -1153,10 +1632,14 @@ mod tests {
             "hold",
             "two_processes_serialize_and_preserve_fifo_order",
         );
-        crashed.acquired();
+        let crashed_id = crashed.acquired_id();
         crashed.child.kill().expect("kill child");
         let _ = crashed.child.wait().expect("wait crashed child");
         let coordinator = AdmissionCoordinator::test_at(root.clone());
+        let lease_path = coordinator.lease_path(&crashed_id);
+        let mut lease = read_lease(&lease_path).expect("crashed lease");
+        lease.heartbeat_at_unix_seconds = 0;
+        write_lease(&lease_path, &lease).expect("expire crashed lease");
         let guard = coordinator
             .acquire(Duration::from_secs(2), &CancellationToken::default())
             .expect("reclaim after released locks");
@@ -1217,10 +1700,16 @@ mod tests {
 
     #[test]
     fn status_is_bounded_and_excludes_sensitive_paths() {
+        if child_mode("status_is_bounded_and_excludes_sensitive_paths") {
+            return;
+        }
         let coordinator = coordinator("status");
-        let holder = coordinator
-            .acquire(Duration::from_secs(2), &CancellationToken::default())
-            .expect("holder");
+        let mut holder = child(
+            coordinator.root(),
+            "hold",
+            "status_is_bounded_and_excludes_sensitive_paths",
+        );
+        let _holder_id = holder.acquired_id();
         let cancellation = CancellationToken::default();
         let waiter_coordinator = coordinator.clone();
         let waiter_cancellation = cancellation.clone();
@@ -1229,11 +1718,22 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(60));
         let status = coordinator.status().expect("status");
-        assert_eq!(status.schema_version, ADMISSION_SCHEMA_VERSION);
+        assert_eq!(status.schema_version, ADMISSION_STATUS_SCHEMA_VERSION);
         assert!(status.active);
         assert_eq!(status.queue_count, 1);
         assert_eq!(status.ticket_ids.len(), 1);
         assert!(status.ticket_ids[0].starts_with("000"));
+        assert_eq!(status.slot.kind, "slot_lock");
+        assert_eq!(status.slot.state, "held");
+        assert_eq!(status.slot.lease_state, "active");
+        assert!(status.slot.owner_run_id.is_some());
+        assert_eq!(status.queue_lock.kind, "queue_lock");
+        assert_eq!(status.queue_lock.lease_state, "not_applicable");
+        assert!(
+            status
+                .process_visibility_note
+                .contains("does not prove global inactivity")
+        );
         let json = serde_json::to_string(&status).expect("status JSON");
         assert!(!json.contains(coordinator.root().to_str().expect("UTF-8 root")));
         assert!(!json.contains("commit-ci-preflight"));
@@ -1243,7 +1743,75 @@ mod tests {
             waiter.join().expect("waiter"),
             Err(AdmissionError::Cancelled)
         ));
-        drop(holder);
+        holder.finish();
+        fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
+    }
+
+    #[test]
+    fn cross_activity_status_reports_slot_owner_and_lock_roles() {
+        if child_mode("cross_activity_status_reports_slot_owner_and_lock_roles") {
+            return;
+        }
+        let root = test_root("cross-activity");
+        let _ = fs::remove_dir_all(&root);
+        let observer_activity = AdmissionCoordinator::test_at(root.clone());
+        let mut owner_activity = child(
+            &root,
+            "hold",
+            "cross_activity_status_reports_slot_owner_and_lock_roles",
+        );
+        let owner_id = owner_activity.acquired_id();
+
+        let status = observer_activity.status().expect("observer status");
+        assert!(status.active);
+        assert_eq!(status.slot.state, "held");
+        assert_eq!(status.slot.owner_run_id.as_deref(), Some(owner_id.as_str()));
+        assert!(status.slot.acquired_at_unix_seconds.is_some());
+        assert!(status.slot.heartbeat_at_unix_seconds.is_some());
+        assert_eq!(status.slot.lease_state, "active");
+        assert_eq!(status.queue_lock.state, "free");
+        assert!(
+            status
+                .process_visibility_note
+                .contains("does not prove global inactivity")
+        );
+
+        owner_activity.finish();
+        fs::remove_dir_all(root).expect("remove test coordinator");
+    }
+
+    #[test]
+    fn unlocked_ticket_without_lease_is_not_quarantined() {
+        let coordinator = coordinator("unknown-lease");
+        coordinator.initialize().expect("initialize coordinator");
+        let path = coordinator
+            .root()
+            .join(TICKETS_DIR)
+            .join("ticket-00000000000000000001.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("legacy ticket");
+        let marker = TicketMarker {
+            owner: "commit-ci-preflight".to_owned(),
+            purpose: "host-admission-ticket".to_owned(),
+            schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
+            ticket_id: "00000000000000000001".to_owned(),
+        };
+        file.write_all(&serde_json::to_vec(&marker).expect("marker JSON"))
+            .expect("write marker");
+        file.sync_all().expect("sync marker");
+        FileExt::unlock(&file).expect("unlock legacy ticket");
+        drop(file);
+        fs::write(coordinator.root().join(NEXT_TICKET), b"2\n").expect("next ticket");
+
+        let result = coordinator.acquire(Duration::from_millis(80), &CancellationToken::default());
+        assert!(matches!(result, Err(AdmissionError::Timeout)));
+        assert!(
+            path.exists(),
+            "unknown lease must remain for operator review"
+        );
         fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
     }
 
@@ -1259,8 +1827,16 @@ mod tests {
     fn status_schema_contains_only_bounded_safe_fields() {
         let status = empty_status();
         let value = serde_json::to_value(status).expect("status JSON");
-        assert_eq!(value.as_object().expect("object").len(), 4);
+        assert_eq!(value.as_object().expect("object").len(), 7);
         assert!(value.get("ticket_ids").expect("ticket ids").is_array());
+        assert!(value.get("slot").expect("slot").is_object());
+        assert!(value.get("queue_lock").expect("queue lock").is_object());
+        assert!(
+            value
+                .get("process_visibility_note")
+                .expect("visibility note")
+                .is_string()
+        );
         assert!(value.to_string().find("/").is_none());
     }
 

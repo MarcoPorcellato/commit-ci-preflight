@@ -34,6 +34,10 @@ Semantic Versioning after its first public release.
 - Default-on host-wide single-slot admission for heavy `run` and `benchmark`
   commands with persistent advisory-lock tickets, cancellation, bounded
   timeout, stale-ticket recovery, and read-only status reporting.
+- Cross-activity admission status now reports separate queue/slot lock state,
+  opaque slot ownership, acquisition and heartbeat timestamps, lease state,
+  and an explicit local-process visibility warning. Stale-ticket recovery is
+  fail-closed unless an unlocked ticket has a valid definitely-expired lease.
 - New `guard exec` shell-free wrapper for one explicit argv, with separate
   admission and child timeouts and live tee output for long local workflows.
 - Pinned offline `fs2` 0.4.3 dependency for cross-process advisory locks.
