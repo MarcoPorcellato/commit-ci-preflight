@@ -205,37 +205,39 @@ impl ReceiptEnvelopeV2 {
 
 impl ReceiptV1 {
     pub fn validate(&self) -> Result<(), ReceiptError> {
-        validate_receipt_common(
-            RECEIPT_SCHEMA_VERSION,
-            &self.schema_version,
-            &self.producer,
-            &self.repository,
-            &self.run,
-            &self.platform,
-            &self.configuration_digest,
-            &self.checks,
-            self.overall_status,
-            self.incomplete_reason.as_deref(),
-            &self.redaction_policy_version,
-        )
+        ReceiptCommon {
+            expected_schema_version: RECEIPT_SCHEMA_VERSION,
+            schema_version: &self.schema_version,
+            producer: &self.producer,
+            repository: &self.repository,
+            run: &self.run,
+            platform: &self.platform,
+            configuration_digest: &self.configuration_digest,
+            checks: &self.checks,
+            overall_status: self.overall_status,
+            incomplete_reason: self.incomplete_reason.as_deref(),
+            redaction_policy_version: &self.redaction_policy_version,
+        }
+        .validate()
     }
 }
 
 impl ReceiptV2 {
     pub fn validate(&self) -> Result<(), ReceiptError> {
-        validate_receipt_common(
-            RECEIPT_V2_SCHEMA_VERSION,
-            &self.schema_version,
-            &self.producer,
-            &self.repository,
-            &self.run,
-            &self.platform,
-            &self.configuration_digest,
-            &self.checks,
-            self.overall_status,
-            self.incomplete_reason.as_deref(),
-            &self.redaction_policy_version,
-        )?;
+        ReceiptCommon {
+            expected_schema_version: RECEIPT_V2_SCHEMA_VERSION,
+            schema_version: &self.schema_version,
+            producer: &self.producer,
+            repository: &self.repository,
+            run: &self.run,
+            platform: &self.platform,
+            configuration_digest: &self.configuration_digest,
+            checks: &self.checks,
+            overall_status: self.overall_status,
+            incomplete_reason: self.incomplete_reason.as_deref(),
+            redaction_policy_version: &self.redaction_policy_version,
+        }
+        .validate()?;
         self.source_snapshot.validate()
     }
 }
@@ -303,85 +305,90 @@ impl CheckEvidence {
     }
 }
 
-fn validate_receipt_common(
+struct ReceiptCommon<'a> {
     expected_schema_version: &'static str,
-    schema_version: &str,
-    producer: &ProducerEvidence,
-    repository: &RepositoryEvidence,
-    run: &RunEvidence,
-    platform: &PlatformEvidence,
-    configuration_digest: &str,
-    checks: &[CheckEvidence],
+    schema_version: &'a str,
+    producer: &'a ProducerEvidence,
+    repository: &'a RepositoryEvidence,
+    run: &'a RunEvidence,
+    platform: &'a PlatformEvidence,
+    configuration_digest: &'a str,
+    checks: &'a [CheckEvidence],
     overall_status: EvidenceStatus,
-    incomplete_reason: Option<&str>,
-    redaction_policy_version: &str,
-) -> Result<(), ReceiptError> {
-    if schema_version != expected_schema_version {
-        return Err(ReceiptError::UnsupportedSchemaVersion(
-            schema_version.to_owned(),
-        ));
-    }
+    incomplete_reason: Option<&'a str>,
+    redaction_policy_version: &'a str,
+}
 
-    require_text("producer.name", &producer.name)?;
-    require_text("producer.version", &producer.version)?;
-    validate_repository_identity(&repository.repository)?;
-    validate_commit_sha(&repository.commit_sha)?;
-    require_text("run.run_id", &run.run_id)?;
-    require_timestamp("run.started_at_utc", &run.started_at_utc)?;
-    require_timestamp("run.finished_at_utc", &run.finished_at_utc)?;
-    if run.finished_at_utc < run.started_at_utc {
-        return Err(ReceiptError::InvalidRunWindow);
-    }
-    require_text("platform.host_os", &platform.host_os)?;
-    require_text("platform.host_arch", &platform.host_arch)?;
-    require_text("platform.runtime_kind", &platform.runtime_kind)?;
-    require_text("platform.runtime_version", &platform.runtime_version)?;
-    require_text("platform.image_reference", &platform.image_reference)?;
-    validate_sha256("platform.image_digest", &platform.image_digest)?;
-    let image_reference_digest = platform
-        .image_reference
-        .rsplit_once('@')
-        .map(|(_, digest)| digest);
-    if image_reference_digest != Some(platform.image_digest.as_str()) {
-        return Err(ReceiptError::ImageDigestMismatch);
-    }
-    validate_sha256("configuration_digest", configuration_digest)?;
-    require_text("redaction_policy_version", redaction_policy_version)?;
-
-    if checks.is_empty() {
-        return Err(ReceiptError::NoChecks);
-    }
-
-    let mut check_ids = BTreeSet::new();
-    let mut required_statuses = Vec::new();
-    for check in checks {
-        check.validate()?;
-        if !check_ids.insert(check.id.as_str()) {
-            return Err(ReceiptError::DuplicateCheckId(check.id.clone()));
+impl ReceiptCommon<'_> {
+    fn validate(self) -> Result<(), ReceiptError> {
+        if self.schema_version != self.expected_schema_version {
+            return Err(ReceiptError::UnsupportedSchemaVersion(
+                self.schema_version.to_owned(),
+            ));
         }
-        if check.required {
-            required_statuses.push(check.status);
+
+        require_text("producer.name", &self.producer.name)?;
+        require_text("producer.version", &self.producer.version)?;
+        validate_repository_identity(&self.repository.repository)?;
+        validate_commit_sha(&self.repository.commit_sha)?;
+        require_text("run.run_id", &self.run.run_id)?;
+        require_timestamp("run.started_at_utc", &self.run.started_at_utc)?;
+        require_timestamp("run.finished_at_utc", &self.run.finished_at_utc)?;
+        if self.run.finished_at_utc < self.run.started_at_utc {
+            return Err(ReceiptError::InvalidRunWindow);
         }
-    }
+        require_text("platform.host_os", &self.platform.host_os)?;
+        require_text("platform.host_arch", &self.platform.host_arch)?;
+        require_text("platform.runtime_kind", &self.platform.runtime_kind)?;
+        require_text("platform.runtime_version", &self.platform.runtime_version)?;
+        require_text("platform.image_reference", &self.platform.image_reference)?;
+        validate_sha256("platform.image_digest", &self.platform.image_digest)?;
+        let image_reference_digest = self
+            .platform
+            .image_reference
+            .rsplit_once('@')
+            .map(|(_, digest)| digest);
+        if image_reference_digest != Some(self.platform.image_digest.as_str()) {
+            return Err(ReceiptError::ImageDigestMismatch);
+        }
+        validate_sha256("configuration_digest", self.configuration_digest)?;
+        require_text("redaction_policy_version", self.redaction_policy_version)?;
 
-    if required_statuses.is_empty() {
-        return Err(ReceiptError::NoRequiredChecks);
-    }
+        if self.checks.is_empty() {
+            return Err(ReceiptError::NoChecks);
+        }
 
-    let expected_status = derive_overall_status(&required_statuses);
-    if overall_status != expected_status {
-        return Err(ReceiptError::OverallStatusMismatch {
-            expected: expected_status,
-            actual: overall_status,
-        });
-    }
+        let mut check_ids = BTreeSet::new();
+        let mut required_statuses = Vec::new();
+        for check in self.checks {
+            check.validate()?;
+            if !check_ids.insert(check.id.as_str()) {
+                return Err(ReceiptError::DuplicateCheckId(check.id.clone()));
+            }
+            if check.required {
+                required_statuses.push(check.status);
+            }
+        }
 
-    validate_incomplete_reason(
-        "receipt.incomplete_reason",
-        overall_status,
-        incomplete_reason,
-    )?;
-    Ok(())
+        if required_statuses.is_empty() {
+            return Err(ReceiptError::NoRequiredChecks);
+        }
+
+        let expected_status = derive_overall_status(&required_statuses);
+        if self.overall_status != expected_status {
+            return Err(ReceiptError::OverallStatusMismatch {
+                expected: expected_status,
+                actual: self.overall_status,
+            });
+        }
+
+        validate_incomplete_reason(
+            "receipt.incomplete_reason",
+            self.overall_status,
+            self.incomplete_reason,
+        )?;
+        Ok(())
+    }
 }
 
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ReceiptError> {
