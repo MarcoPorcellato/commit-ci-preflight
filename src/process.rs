@@ -29,6 +29,7 @@ use process_wrap::std::JobObject;
 use process_wrap::std::ProcessGroup;
 use process_wrap::std::{ChildWrapper, CommandWrap};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_GRACE_PERIOD: Duration = Duration::from_millis(500);
@@ -190,7 +191,26 @@ impl From<ExitStatus> for ExitOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedStream {
     pub bytes: Vec<u8>,
+    pub byte_count: u64,
+    pub full_digest: String,
     pub truncated: bool,
+}
+
+impl CapturedStream {
+    pub fn from_captured(bytes: Vec<u8>, truncated: bool) -> Self {
+        let byte_count = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let full_digest = sha256_digest(&bytes);
+        Self {
+            bytes,
+            byte_count,
+            full_digest,
+            truncated,
+        }
+    }
+
+    fn empty() -> Self {
+        Self::from_captured(Vec::new(), false)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -474,14 +494,8 @@ fn empty_result(
         termination,
         cleanup,
         exit: None,
-        stdout: CapturedStream {
-            bytes: Vec::new(),
-            truncated: false,
-        },
-        stderr: CapturedStream {
-            bytes: Vec::new(),
-            truncated: false,
-        },
+        stdout: CapturedStream::empty(),
+        stderr: CapturedStream::empty(),
         elapsed_millis: started.elapsed().as_millis(),
     }
 }
@@ -576,6 +590,8 @@ fn spawn_reader<R: Read + Send + 'static>(
 ) -> JoinHandle<io::Result<CapturedStream>> {
     thread::spawn(move || {
         let mut captured = Vec::with_capacity(limit.min(8192));
+        let mut byte_count = 0_u64;
+        let mut hasher = Sha256::new();
         let mut buffer = [0_u8; 8192];
         let mut truncated = false;
         let mut write_error = None;
@@ -584,6 +600,8 @@ fn spawn_reader<R: Read + Send + 'static>(
             if read == 0 {
                 break;
             }
+            byte_count = byte_count.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+            hasher.update(&buffer[..read]);
             if let Some(writer) = writer.as_mut() {
                 if let Err(error) = writer
                     .write_all(&buffer[..read])
@@ -604,9 +622,26 @@ fn spawn_reader<R: Read + Send + 'static>(
         }
         Ok(CapturedStream {
             bytes: captured,
+            byte_count,
+            full_digest: digest_from_hasher(hasher),
             truncated,
         })
     })
+}
+
+fn sha256_digest(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    digest_from_hasher(hasher)
+}
+
+fn digest_from_hasher(hasher: Sha256) -> String {
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256:{hex}")
 }
 
 fn join_reader(reader: JoinHandle<io::Result<CapturedStream>>) -> io::Result<CapturedStream> {
@@ -850,10 +885,7 @@ mod tests {
         }
 
         fn collect_output(self: Box<Self>) -> io::Result<(CapturedStream, CapturedStream)> {
-            let stream = CapturedStream {
-                bytes: b"fixture".to_vec(),
-                truncated: false,
-            };
+            let stream = CapturedStream::from_captured(b"fixture".to_vec(), false);
             Ok((stream.clone(), stream))
         }
     }
@@ -1114,5 +1146,32 @@ mod tests {
         assert!(stderr.truncated);
         assert_eq!(stdout_sink.bytes(), b"stdout-bytes".to_vec());
         assert_eq!(stderr_sink.bytes(), b"stderr-bytes".to_vec());
+    }
+
+    #[test]
+    fn full_stream_digest_and_byte_count_include_data_beyond_preview() {
+        let first = spawn_reader(
+            Cursor::new(b"shared-prefix-first-suffix".to_vec()),
+            13,
+            None,
+        )
+        .join()
+        .expect("first reader thread")
+        .expect("first stream");
+        let second = spawn_reader(
+            Cursor::new(b"shared-prefix-second-suffix".to_vec()),
+            13,
+            None,
+        )
+        .join()
+        .expect("second reader thread")
+        .expect("second stream");
+
+        assert_eq!(first.bytes, second.bytes);
+        assert!(first.truncated);
+        assert!(second.truncated);
+        assert_eq!(first.byte_count, 26);
+        assert_eq!(second.byte_count, 27);
+        assert_ne!(first.full_digest, second.full_digest);
     }
 }

@@ -518,6 +518,14 @@ Exit gate:
 
 ### PR T4 — Supervisor and output evidence hardening
 
+Status (candidate slice 2026-08-19): process readers now retain only a bounded
+preview while hashing and counting the complete stdout/stderr streams. Receipt
+output digests bind those full-stream digests and byte counts, so equal previews
+with different suffixes cannot collide. Deterministic tests cover the invariant
+and all existing contracts pass. This does **not** yet close T4: total wall
+deadlines, interruptible reader joins, RAII finalization, and native fault-path
+qualification remain pending.
+
 Deliverables:
 
 - RAII containment/finalization object;
