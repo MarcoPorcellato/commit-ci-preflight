@@ -332,6 +332,7 @@ pub fn execute_matrix_run_v2(
                 repository: request.repository,
                 cache: request.cache,
                 generation: request.generation,
+                source_snapshot: None,
             },
             runtime.as_ref(),
             supervisor,
