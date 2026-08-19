@@ -396,20 +396,27 @@ impl ManagedCache {
         })
     }
 
-    pub fn promote_entry(&self, prepared: &PreparedCacheEntry) -> Result<(), CacheError> {
+    pub fn promote_entry(
+        &self,
+        prepared: &PreparedCacheEntry,
+    ) -> Result<CachePromotionOutcome, CacheError> {
         self.promote_entries(std::slice::from_ref(prepared))
     }
 
-    pub fn promote_entries(&self, prepared: &[PreparedCacheEntry]) -> Result<(), CacheError> {
+    pub fn promote_entries(
+        &self,
+        prepared: &[PreparedCacheEntry],
+    ) -> Result<CachePromotionOutcome, CacheError> {
         if prepared.is_empty() {
-            return Ok(());
+            return Ok(CachePromotionOutcome::NotAttempted);
         }
         validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
         let _promotion_lock = acquire_promotion_lock(&self.root.path)?;
         self.recover_promotion_locked()?;
         let journal = self.create_promotion_journal(prepared)?;
         self.execute_promotion(prepared, &journal)?;
-        self.finalize_promotion(&journal)
+        self.finalize_promotion(&journal)?;
+        Ok(CachePromotionOutcome::Promoted)
     }
 
     fn create_promotion_journal(
@@ -1310,6 +1317,13 @@ pub enum CacheEntryStatus {
     Incomplete,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CachePromotionOutcome {
+    NotAttempted,
+    Promoted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CacheEntryInventory {
     pub directory: String,
@@ -1827,7 +1841,10 @@ timeout_seconds = 60
             .expect("prepare");
         assert!(!prepared.was_complete);
         assert!(prepared.data_path.is_dir());
-        cache.promote_entry(&prepared).expect("promote");
+        assert_eq!(
+            cache.promote_entry(&prepared).expect("promote"),
+            CachePromotionOutcome::Promoted
+        );
         assert_eq!(
             read_generation_manifest(&cache.entry_path(&key).join(GENERATION_MANIFEST_FILE))
                 .expect("generation manifest")
@@ -1857,7 +1874,10 @@ timeout_seconds = 60
             .expect("prepare");
         let payload = prepared.data_path.join("payload.bin");
         fs::write(&payload, b"known-good").expect("write known-good payload");
-        cache.promote_entry(&prepared).expect("promote known-good");
+        assert_eq!(
+            cache.promote_entry(&prepared).expect("promote known-good"),
+            CachePromotionOutcome::Promoted
+        );
         drop(prepared);
 
         let failed = cache

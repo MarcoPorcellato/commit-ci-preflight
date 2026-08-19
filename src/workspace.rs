@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 
-use crate::cache::{CacheError, CacheKey, ManagedCache, ResolvedCacheRoot};
+use crate::cache::{CacheError, CacheKey, CachePromotionOutcome, ManagedCache, ResolvedCacheRoot};
 use crate::config::ExecutionPlanEnvelopeV1;
 
 const CONTAINER_WORKSPACE: &str = "/workspace";
@@ -236,7 +236,10 @@ impl PreparedWorkspace {
         Ok(prepared)
     }
 
-    pub fn mark_caches_complete(&self, cache: &ManagedCache) -> Result<(), WorkspaceError> {
+    pub fn mark_caches_complete(
+        &self,
+        cache: &ManagedCache,
+    ) -> Result<CachePromotionOutcome, WorkspaceError> {
         cache
             .promote_entries(&self.cache_entries)
             .map_err(WorkspaceError::Cache)

@@ -588,6 +588,11 @@ place. This is still a candidate slice: durable manifest replacement,
 reflink/clonefile optimization, and a public cache-promotion outcome remain
 pending.
 
+The public cache API now returns `CachePromotionOutcome` separately from check
+evidence. Empty cache plans report `not_attempted`, successful promotion
+reports `promoted`, and promotion uncertainty remains an error; no cache
+failure is converted into a passing check result.
+
 Deliverables:
 
 - immutable last-known-good generations;
