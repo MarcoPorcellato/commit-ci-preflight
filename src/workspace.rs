@@ -237,10 +237,9 @@ impl PreparedWorkspace {
     }
 
     pub fn mark_caches_complete(&self, cache: &ManagedCache) -> Result<(), WorkspaceError> {
-        for entry in &self.cache_entries {
-            cache.promote_entry(entry).map_err(WorkspaceError::Cache)?;
-        }
-        Ok(())
+        cache
+            .promote_entries(&self.cache_entries)
+            .map_err(WorkspaceError::Cache)
     }
 
     pub fn lock_path(&self) -> &Path {

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -44,6 +45,8 @@ const GENERATION_MANIFEST_FILE: &str = ".generation-v1.json";
 const GENERATION_SCHEMA_VERSION: &str = "1.0";
 const ENTRY_LOCK_FILE: &str = ".entry-lock-v1";
 const PROMOTION_LOCK_FILE: &str = ".promotion-lock-v1";
+const PROMOTION_JOURNAL_FILE: &str = ".promotion-journal-v1.json";
+const PROMOTION_SCHEMA_VERSION: &str = "1.0";
 const MAX_INVENTORY_NODES: usize = 100_000;
 const INIT_RETRIES: usize = 40;
 const INIT_RETRY_DELAY: Duration = Duration::from_millis(5);
@@ -394,8 +397,86 @@ impl ManagedCache {
     }
 
     pub fn promote_entry(&self, prepared: &PreparedCacheEntry) -> Result<(), CacheError> {
+        self.promote_entries(std::slice::from_ref(prepared))
+    }
+
+    pub fn promote_entries(&self, prepared: &[PreparedCacheEntry]) -> Result<(), CacheError> {
+        if prepared.is_empty() {
+            return Ok(());
+        }
         validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
         let _promotion_lock = acquire_promotion_lock(&self.root.path)?;
+        self.recover_promotion_locked()?;
+        let journal = self.create_promotion_journal(prepared)?;
+        self.execute_promotion(prepared, &journal)?;
+        self.finalize_promotion(&journal)
+    }
+
+    fn create_promotion_journal(
+        &self,
+        prepared: &[PreparedCacheEntry],
+    ) -> Result<CachePromotionJournalV1, CacheError> {
+        let mut entries = Vec::with_capacity(prepared.len());
+        let mut paths = BTreeSet::new();
+        for entry in prepared {
+            if !paths.insert(entry.path.clone()) {
+                return Err(CacheError::GenerationMismatch);
+            }
+            self.validate_prepared_entry(entry)?;
+            let staging_name = entry
+                .staging_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or(CacheError::GenerationMismatch)?
+                .to_owned();
+            validate_owned_name(&staging_name, ".staging-")?;
+            if entry.staging_path.parent() != Some(entry.path.as_path()) {
+                return Err(CacheError::GenerationMismatch);
+            }
+            let current = entry.path.join("data");
+            let had_current = match fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(CacheError::SymlinkInManagedRoot(current));
+                }
+                Ok(metadata) if metadata.is_dir() => true,
+                Ok(_) => return Err(CacheError::UnexpectedEntry(current)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+                Err(error) => return Err(CacheError::Io(error)),
+            };
+            let backup_name = format!(
+                ".backup-{}-{}",
+                std::process::id(),
+                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            );
+            if entry.path.join(&backup_name).exists() {
+                return Err(CacheError::PromotionUncertain);
+            }
+            entries.push(CachePromotionJournalEntryV1 {
+                key_digest: entry.key_digest.clone(),
+                plan_digest: entry.plan_digest.clone(),
+                generation: entry.generation,
+                staging_name,
+                backup_name,
+                had_current,
+                previous_marker: read_optional_file(&entry.path.join(COMPLETE_FILE))?,
+                previous_manifest: read_optional_file(&entry.path.join(GENERATION_MANIFEST_FILE))?,
+            });
+        }
+        let journal = CachePromotionJournalV1 {
+            schema_version: PROMOTION_SCHEMA_VERSION.to_owned(),
+            operation_id: format!(
+                "{}-{}",
+                std::process::id(),
+                TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ),
+            state: "prepared".to_owned(),
+            entries,
+        };
+        write_promotion_journal(&self.root.path, &journal)?;
+        Ok(journal)
+    }
+
+    fn validate_prepared_entry(&self, prepared: &PreparedCacheEntry) -> Result<(), CacheError> {
         validate_plain_directory(&prepared.path)?;
         validate_plain_directory(&prepared.staging_path)?;
         validate_plain_directory(&prepared.data_path)?;
@@ -408,71 +489,110 @@ impl ManagedCache {
         {
             return Err(CacheError::GenerationMismatch);
         }
-        let mut complete_manifest = manifest;
-        complete_manifest.state = "complete".to_owned();
-        write_generation_manifest_replacing(&manifest_path, &complete_manifest)?;
+        Ok(())
+    }
 
-        let current = prepared.path.join("data");
-        let backup = prepared.path.join(format!(
-            ".backup-{}-{}",
-            std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let marker = prepared.path.join(COMPLETE_FILE);
-        let previous_marker = read_optional_file(&marker)?;
-        let previous_manifest_path = prepared.path.join(GENERATION_MANIFEST_FILE);
-        let previous_manifest = read_optional_file(&previous_manifest_path)?;
-
-        let had_current = match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(CacheError::SymlinkInManagedRoot(current));
+    fn execute_promotion(
+        &self,
+        prepared: &[PreparedCacheEntry],
+        journal: &CachePromotionJournalV1,
+    ) -> Result<(), CacheError> {
+        for (prepared, journal_entry) in prepared.iter().zip(&journal.entries) {
+            let manifest_path = prepared.staging_path.join(GENERATION_MANIFEST_FILE);
+            let mut complete_manifest = read_generation_manifest(&manifest_path)?;
+            complete_manifest.state = "complete".to_owned();
+            write_generation_manifest_replacing(&manifest_path, &complete_manifest)?;
+            let current = prepared.path.join("data");
+            let backup = prepared.path.join(&journal_entry.backup_name);
+            let marker = prepared.path.join(COMPLETE_FILE);
+            let previous_manifest_path = prepared.path.join(GENERATION_MANIFEST_FILE);
+            if journal_entry.had_current {
+                fs::rename(&current, &backup).map_err(CacheError::Io)?;
             }
-            Ok(metadata) if metadata.is_dir() => true,
-            Ok(_) => return Err(CacheError::UnexpectedEntry(current)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(error) => return Err(CacheError::Io(error)),
-        };
-        remove_if_present(&marker)?;
-        remove_if_present(&previous_manifest_path)?;
-        if had_current {
-            fs::rename(&current, &backup).map_err(CacheError::Io)?;
-        }
-
-        let result = (|| {
+            remove_if_present(&marker)?;
+            remove_if_present(&previous_manifest_path)?;
             fs::rename(&prepared.data_path, &current).map_err(CacheError::Io)?;
             fs::rename(&manifest_path, &previous_manifest_path).map_err(CacheError::Io)?;
             write_complete_marker(&marker)?;
-            Ok::<(), CacheError>(())
-        })();
+        }
+        Ok(())
+    }
 
-        match result {
-            Ok(()) => {
-                if had_current {
-                    fs::remove_dir_all(&backup).map_err(CacheError::Io)?;
-                }
-                remove_if_present(&prepared.staging_path)?;
-                Ok(())
+    fn finalize_promotion(&self, journal: &CachePromotionJournalV1) -> Result<(), CacheError> {
+        for entry in &journal.entries {
+            let path = self.entry_path(&journal_key(entry)?);
+            validate_plain_directory(&path)?;
+            remove_if_present(&path.join(&entry.backup_name))?;
+            remove_if_present(&path.join(&entry.staging_name))?;
+        }
+        remove_if_present(&self.root.path.join(PROMOTION_JOURNAL_FILE))
+    }
+
+    fn recover_promotion_locked(&self) -> Result<(), CacheError> {
+        let path = self.root.path.join(PROMOTION_JOURNAL_FILE);
+        let Some(bytes) = read_optional_file(&path)? else {
+            return Ok(());
+        };
+        if bytes.len() > 1_048_576 {
+            return Err(CacheError::PromotionUncertain);
+        }
+        let journal: CachePromotionJournalV1 = serde_json::from_slice(&bytes).map_err(|error| {
+            CacheError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                error.to_string(),
+            ))
+        })?;
+        if journal.schema_version != PROMOTION_SCHEMA_VERSION
+            || journal.state != "prepared"
+            || journal.entries.is_empty()
+            || journal.operation_id.is_empty()
+        {
+            return Err(CacheError::PromotionUncertain);
+        }
+        let mut locks = Vec::with_capacity(journal.entries.len());
+        for entry in &journal.entries {
+            validate_owned_name(&entry.staging_name, ".staging-")?;
+            validate_owned_name(&entry.backup_name, ".backup-")?;
+            let path = self.entry_path(&journal_key(entry)?);
+            validate_plain_directory(&path)?;
+            locks.push(acquire_entry_lock(&path)?);
+        }
+        for entry in &journal.entries {
+            let path = self.entry_path(&journal_key(entry)?);
+            let current = path.join("data");
+            let marker = path.join(COMPLETE_FILE);
+            let manifest = path.join(GENERATION_MANIFEST_FILE);
+            let backup = path.join(&entry.backup_name);
+            let staging = path.join(&entry.staging_name);
+            if current_generation_is_complete(&current, &marker, &manifest, entry)? {
+                remove_if_present(&backup)?;
+                remove_if_present(&staging)?;
+                continue;
             }
-            Err(error) => {
-                let rollback = (|| {
+            if entry.had_current {
+                if backup.exists() {
                     remove_if_present(&current)?;
-                    if had_current {
-                        fs::rename(&backup, &current).map_err(CacheError::Io)?;
-                    }
-                    if let Some(bytes) = previous_manifest {
-                        fs::write(&previous_manifest_path, bytes).map_err(CacheError::Io)?;
-                    }
-                    if let Some(bytes) = previous_marker {
-                        fs::write(&marker, bytes).map_err(CacheError::Io)?;
-                    }
-                    Ok::<(), CacheError>(())
-                })();
-                if rollback.is_err() {
+                    remove_if_present(&marker)?;
+                    remove_if_present(&manifest)?;
+                    fs::rename(&backup, &current).map_err(CacheError::Io)?;
+                    restore_optional_file(&manifest, entry.previous_manifest.as_deref())?;
+                    restore_optional_file(&marker, entry.previous_marker.as_deref())?;
+                    remove_if_present(&staging)?;
+                } else if current_matches_previous(&current, &marker, &manifest, entry)? {
+                    remove_if_present(&staging)?;
+                } else {
                     return Err(CacheError::PromotionUncertain);
                 }
-                Err(error)
+            } else if !backup.exists() && !current.exists() {
+                remove_if_present(&marker)?;
+                remove_if_present(&manifest)?;
+                remove_if_present(&staging)?;
+            } else {
+                return Err(CacheError::PromotionUncertain);
             }
         }
+        drop(locks);
+        remove_if_present(&path)
     }
 
     pub fn mark_entry_complete(&self, key: &CacheKey) -> Result<(), CacheError> {
@@ -628,6 +748,136 @@ pub struct CacheGenerationManifestV1 {
     pub plan_digest: String,
     pub generation: u64,
     pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CachePromotionJournalV1 {
+    schema_version: String,
+    operation_id: String,
+    state: String,
+    entries: Vec<CachePromotionJournalEntryV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CachePromotionJournalEntryV1 {
+    key_digest: String,
+    plan_digest: String,
+    generation: u64,
+    staging_name: String,
+    backup_name: String,
+    had_current: bool,
+    previous_marker: Option<Vec<u8>>,
+    previous_manifest: Option<Vec<u8>>,
+}
+
+fn write_promotion_journal(
+    root: &Path,
+    journal: &CachePromotionJournalV1,
+) -> Result<(), CacheError> {
+    let bytes = canonical_json(journal).map_err(CacheError::Canonical)?;
+    let path = root.join(PROMOTION_JOURNAL_FILE);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(CacheError::Io)?;
+    file.write_all(&bytes).map_err(CacheError::Io)?;
+    file.write_all(b"\n").map_err(CacheError::Io)?;
+    file.sync_all().map_err(CacheError::Io)
+}
+
+fn validate_owned_name(name: &str, prefix: &str) -> Result<(), CacheError> {
+    if name.len() <= prefix.len()
+        || name.len() > 128
+        || !name.starts_with(prefix)
+        || name.contains(['/', '\\'])
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".-".contains(&byte))
+    {
+        return Err(CacheError::GenerationMismatch);
+    }
+    Ok(())
+}
+
+fn journal_key(entry: &CachePromotionJournalEntryV1) -> Result<CacheKey, CacheError> {
+    validated_digest_hex(&entry.key_digest)?;
+    Ok(CacheKey {
+        digest: entry.key_digest.clone(),
+    })
+}
+
+fn current_generation_is_complete(
+    current: &Path,
+    marker: &Path,
+    manifest_path: &Path,
+    journal: &CachePromotionJournalEntryV1,
+) -> Result<bool, CacheError> {
+    match fs::symlink_metadata(current) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CacheError::SymlinkInManagedRoot(current.to_path_buf()));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(CacheError::UnexpectedEntry(current.to_path_buf()));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(CacheError::Io(error)),
+        Ok(_) => {}
+    }
+    if read_optional_file(marker)?.as_deref() != Some(COMPLETE_BYTES) {
+        return Ok(false);
+    }
+    let Some(bytes) = read_optional_file(manifest_path)? else {
+        return Ok(false);
+    };
+    let manifest: CacheGenerationManifestV1 = serde_json::from_slice(&bytes).map_err(|error| {
+        CacheError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))
+    })?;
+    Ok(manifest.schema_version == GENERATION_SCHEMA_VERSION
+        && manifest.key_digest == journal.key_digest
+        && manifest.plan_digest == journal.plan_digest
+        && manifest.generation == journal.generation
+        && manifest.state == "complete")
+}
+
+fn current_matches_previous(
+    current: &Path,
+    marker: &Path,
+    manifest: &Path,
+    journal: &CachePromotionJournalEntryV1,
+) -> Result<bool, CacheError> {
+    match fs::symlink_metadata(current) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CacheError::SymlinkInManagedRoot(current.to_path_buf()));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(CacheError::UnexpectedEntry(current.to_path_buf()));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(CacheError::Io(error)),
+        Ok(_) => {}
+    }
+    Ok(read_optional_file(marker)? == journal.previous_marker
+        && read_optional_file(manifest)? == journal.previous_manifest)
+}
+
+fn restore_optional_file(path: &Path, bytes: Option<&[u8]>) -> Result<(), CacheError> {
+    remove_if_present(path)?;
+    let Some(bytes) = bytes else {
+        return Ok(());
+    };
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(CacheError::Io)?;
+    file.write_all(bytes).map_err(CacheError::Io)?;
+    file.sync_all().map_err(CacheError::Io)
 }
 
 fn write_generation_manifest(
@@ -1651,6 +1901,93 @@ timeout_seconds = 60
             .expect("preparation after release");
         drop(second);
 
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn multi_entry_promotion_is_journaled_and_cleans_only_after_success() {
+        let (repo, resolved) = resolved_fixture("multi-entry-promotion");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let envelope = ConfigV1::parse(
+            r#"
+schema_version = "1.0"
+project = "owner/repository"
+
+[runtime]
+kind = "docker_compatible"
+image = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+
+[[caches]]
+id = "cargo"
+mount_path = ".cache/cargo"
+
+[[caches]]
+id = "target"
+mount_path = ".cache/target"
+
+[[checks]]
+id = "test"
+required = true
+argv = ["cargo", "test"]
+working_directory = "."
+timeout_seconds = 60
+"#,
+        )
+        .expect("config")
+        .into_plan()
+        .expect("plan");
+        let first_key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
+        let second_key =
+            CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[1]).expect("key");
+        let first = cache
+            .prepare_entry(&first_key, &envelope.plan_digest, 1)
+            .expect("first");
+        let second = cache
+            .prepare_entry(&second_key, &envelope.plan_digest, 1)
+            .expect("second");
+        fs::write(first.data_path.join("first"), b"one").expect("first data");
+        fs::write(second.data_path.join("second"), b"two").expect("second data");
+        cache
+            .promote_entries(&[first, second])
+            .expect("promote both");
+
+        assert!(!resolved.path.join(PROMOTION_JOURNAL_FILE).exists());
+        assert_eq!(
+            fs::read(cache.entry_data_path(&first_key).join("first")).expect("first current"),
+            b"one"
+        );
+        assert_eq!(
+            fs::read(cache.entry_data_path(&second_key).join("second")).expect("second current"),
+            b"two"
+        );
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn interrupted_prepared_journal_is_recovered_without_adopting_data() {
+        let (repo, resolved) = resolved_fixture("recover-prepared-journal");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let envelope = envelope();
+        let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
+        let prepared = cache
+            .prepare_entry(&key, &envelope.plan_digest, 1)
+            .expect("prepare");
+        let journal = cache
+            .create_promotion_journal(std::slice::from_ref(&prepared))
+            .expect("journal");
+        drop(prepared);
+        let lock = acquire_promotion_lock(&resolved.path).expect("promotion lock");
+        cache.recover_promotion_locked().expect("recover");
+        drop(lock);
+
+        assert!(!resolved.path.join(PROMOTION_JOURNAL_FILE).exists());
+        assert!(!cache.entry_path(&key).join("data").exists());
+        assert_eq!(journal.entries.len(), 1);
         clean(&resolved.path);
         clean(&repo);
     }
