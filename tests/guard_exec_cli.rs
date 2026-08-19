@@ -84,12 +84,20 @@ fn run_guard_exec(
     command.output().expect("guard exec")
 }
 
+fn native_fixture_base() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/private/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 #[test]
 #[ignore = "requires native host resource admission; run explicitly"]
 fn native_guard_exec_portable_end_to_end_contract() {
     let base = std::env::var_os("CCP_TEST_ROOT")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+        .unwrap_or_else(native_fixture_base);
     let root = base.join(format!(
         "commit-ci-preflight-guard-exec-fixture-{}",
         std::process::id()
@@ -123,6 +131,21 @@ fn native_guard_exec_portable_end_to_end_contract() {
     let nonzero = run_guard_exec(&fixture, "exit", "sentinel-2", Some("255"), "10", &[]);
     assert_eq!(nonzero.status.code(), Some(255));
     assert!(String::from_utf8_lossy(&nonzero.stdout).contains("stdout:sentinel-2"));
+    let history = fs::read_to_string(
+        root.join("resource-history")
+            .join("resource-history-v2.jsonl"),
+    )
+    .expect("read guard history");
+    let latest: serde_json::Value = serde_json::from_str(
+        history
+            .lines()
+            .last()
+            .expect("guard history has a nonzero-child record"),
+    )
+    .expect("parse guard history record");
+    assert_eq!(latest["outcome"], "failed");
+    assert_eq!(latest["terminal_detail"]["kind"], "child_exit");
+    assert_eq!(latest["terminal_detail"]["exit_code"], 255);
 
     let timeout = run_guard_exec(&fixture, "sleep", "sentinel-3", None, "1", &[]);
     assert_eq!(timeout.status.code(), Some(124));
