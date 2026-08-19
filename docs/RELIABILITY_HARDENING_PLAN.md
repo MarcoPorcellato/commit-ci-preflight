@@ -470,6 +470,23 @@ Exit gate:
 
 ### PR T3 — Daemon-owned Docker lifecycle
 
+Status (candidate 2026-08-19): the isolated T3 branch implements the shell-free
+Docker lifecycle adapter and deterministic command/ownership fixtures. The
+adapter refuses broad cleanup, uses a fresh cleanup token after cancellation,
+and returns a typed non-PASS result unless final not-found inspection succeeds.
+Native Docker/OrbStack integration and exact-head qualification are **NOT RUN**.
+Receipt-v2 runtime evidence, total lifecycle deadlines, and admission/journal
+release coupling remain explicit follow-up gates before T3 acceptance.
+
+Local verification checkpoint (2026-08-19): `cargo fmt --all -- --check`,
+`cargo check --locked --all-targets --all-features`, the focused runtime suite
+(11 tests), and the full serial locked suite (157 library tests plus all
+repository test targets) passed. One pre-existing native benchmark test and one
+guard-exec test remain ignored by their repository admission contract. Clippy
+was **NOT RUN** because the installed Rust toolchain does not provide the
+`cargo-clippy` component. These results do not qualify native Docker/OrbStack
+behavior or the exact T3 head.
+
 Deliverables:
 
 - ADR for structured Docker CLI lifecycle versus Docker Engine API;

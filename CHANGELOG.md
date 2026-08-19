@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T3 candidate daemon-owned Docker lifecycle contract with deterministic
+  container naming, exact CCP ownership labels, explicit create/start/attach/
+  wait/inspect/stop/kill/remove sequencing, and fail-closed final absence
+  verification. Native Docker/OrbStack qualification remains pending.
 - T2 immutable Git-object source materialization with a canonical path/mode/OID
   manifest, fail-closed LFS/submodule/symlink policy, pre-admission snapshot
   preparation, read-only runtime binding, post-run byte revalidation, and

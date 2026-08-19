@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::config::{ExecutionPlanEnvelopeV1, NormalizedCheck, NormalizedRuntime, RuntimeKind};
 use crate::process::{
@@ -30,6 +31,7 @@ use crate::workspace::{MountAccess, WorkspaceError, WorkspacePlanV1, validate_ho
 
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
 const DOCTOR_CAPTURE_BYTES: usize = 65_536;
+const LIFECYCLE_CAPTURE_BYTES: usize = 1_048_576;
 
 pub trait RuntimePort: Send + Sync {
     fn kind(&self) -> RuntimeKind;
@@ -48,6 +50,24 @@ pub trait RuntimePort: Send + Sync {
         envelope: &ExecutionPlanEnvelopeV1,
         workspace: &WorkspacePlanV1,
     ) -> Result<DryRunPlan, RuntimeError>;
+
+    fn execute_check(
+        &self,
+        _envelope: &ExecutionPlanEnvelopeV1,
+        _check: &NormalizedCheck,
+        _rendered: &DryRunCheck,
+        _execution_root: &Path,
+        _environment: &BTreeMap<OsString, OsString>,
+        _identity: &RunIdentity,
+        _run_id: &str,
+        _supervisor: &dyn SupervisorPort,
+        _cancellation: &CancellationToken,
+        _generation: &GenerationGuard,
+    ) -> Result<ProcessResult, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime lifecycle execution is not qualified",
+        ))
+    }
 }
 
 pub fn runtime_for(kind: RuntimeKind) -> Result<Box<dyn RuntimePort>, RuntimeError> {
@@ -129,6 +149,317 @@ impl RuntimePort for DockerCompatibleRuntime {
             workspace_mount_policy: WorkspaceMountPolicy::ExplicitBindings,
             executed: false,
         })
+    }
+
+    fn execute_check(
+        &self,
+        _envelope: &ExecutionPlanEnvelopeV1,
+        check: &NormalizedCheck,
+        rendered: &DryRunCheck,
+        execution_root: &Path,
+        environment: &BTreeMap<OsString, OsString>,
+        identity: &RunIdentity,
+        run_id: &str,
+        supervisor: &dyn SupervisorPort,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+    ) -> Result<ProcessResult, RuntimeError> {
+        let lifecycle = DockerLifecyclePlan::build(run_id, check, rendered)?;
+        let cleanup_cancellation = CancellationToken::default();
+        let create = self.execute_cli(
+            &lifecycle.create_argv,
+            execution_root,
+            environment,
+            identity,
+            check.timeout_seconds,
+            supervisor,
+            cancellation,
+            generation,
+        )?;
+        if !completed_success(&create) {
+            return Ok(create);
+        }
+        if !valid_container_id(&create.stdout.bytes) {
+            self.cleanup_container(
+                &lifecycle,
+                execution_root,
+                environment,
+                identity,
+                check.timeout_seconds,
+                supervisor,
+                &cleanup_cancellation,
+                generation,
+            )?;
+            return Err(RuntimeError::LifecycleFailure(
+                "docker create did not return a valid container id",
+            ));
+        }
+
+        let start = self.execute_cli(
+            &lifecycle.start_argv,
+            execution_root,
+            environment,
+            identity,
+            check.timeout_seconds,
+            supervisor,
+            cancellation,
+            generation,
+        );
+        let start = match start {
+            Ok(result) => result,
+            Err(error) => {
+                self.cleanup_container(
+                    &lifecycle,
+                    execution_root,
+                    environment,
+                    identity,
+                    check.timeout_seconds,
+                    supervisor,
+                    &cleanup_cancellation,
+                    generation,
+                )?;
+                return Err(error);
+            }
+        };
+        if !completed_success(&start) {
+            self.cleanup_container(
+                &lifecycle,
+                execution_root,
+                environment,
+                identity,
+                check.timeout_seconds,
+                supervisor,
+                &cleanup_cancellation,
+                generation,
+            )?;
+            return Ok(start);
+        }
+
+        let attach = match self.execute_cli(
+            &lifecycle.attach_argv,
+            execution_root,
+            environment,
+            identity,
+            check.timeout_seconds,
+            supervisor,
+            cancellation,
+            generation,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                self.cleanup_container(
+                    &lifecycle,
+                    execution_root,
+                    environment,
+                    identity,
+                    check.timeout_seconds,
+                    supervisor,
+                    &cleanup_cancellation,
+                    generation,
+                )?;
+                return Err(error);
+            }
+        };
+        if attach.termination != ProcessTermination::Completed {
+            self.cleanup_container(
+                &lifecycle,
+                execution_root,
+                environment,
+                identity,
+                check.timeout_seconds,
+                supervisor,
+                &cleanup_cancellation,
+                generation,
+            )?;
+            return Ok(attach);
+        }
+
+        let wait = self.execute_cli(
+            &lifecycle.wait_argv,
+            execution_root,
+            environment,
+            identity,
+            check.timeout_seconds,
+            supervisor,
+            cancellation,
+            generation,
+        )?;
+        if !completed_success(&wait) {
+            self.cleanup_container(
+                &lifecycle,
+                execution_root,
+                environment,
+                identity,
+                check.timeout_seconds,
+                supervisor,
+                &cleanup_cancellation,
+                generation,
+            )?;
+            return Err(RuntimeError::LifecycleFailure(
+                "docker wait did not return the container exit code",
+            ));
+        }
+        let exit_code = parse_wait_exit_code(&wait.stdout.bytes)?;
+        self.cleanup_container(
+            &lifecycle,
+            execution_root,
+            environment,
+            identity,
+            check.timeout_seconds,
+            supervisor,
+            &cleanup_cancellation,
+            generation,
+        )?;
+        let mut result = attach;
+        result.exit = Some(crate::process::ExitOutcome {
+            success: exit_code == 0,
+            code: Some(exit_code),
+        });
+        Ok(result)
+    }
+}
+
+impl DockerCompatibleRuntime {
+    fn execute_cli(
+        &self,
+        argv: &[String],
+        current_dir: &Path,
+        environment: &BTreeMap<OsString, OsString>,
+        identity: &RunIdentity,
+        timeout_seconds: u64,
+        supervisor: &dyn SupervisorPort,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+    ) -> Result<ProcessResult, RuntimeError> {
+        let request = ProcessRequest {
+            identity: identity.clone(),
+            program: OsString::from("docker"),
+            argv: argv.iter().map(OsString::from).collect(),
+            current_dir: current_dir.to_path_buf(),
+            environment: environment.clone(),
+            timeout: Duration::from_secs(timeout_seconds),
+            max_capture_bytes: LIFECYCLE_CAPTURE_BYTES,
+        };
+        supervisor
+            .execute(&request, cancellation, generation)
+            .map_err(RuntimeError::Process)
+    }
+
+    fn execute_cleanup_cli(
+        &self,
+        argv: &[String],
+        current_dir: &Path,
+        environment: &BTreeMap<OsString, OsString>,
+        identity: &RunIdentity,
+        timeout_seconds: u64,
+        supervisor: &dyn SupervisorPort,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+    ) -> Result<ProcessResult, RuntimeError> {
+        self.execute_cli(
+            argv,
+            current_dir,
+            environment,
+            identity,
+            timeout_seconds,
+            supervisor,
+            cancellation,
+            generation,
+        )
+        .map_err(|_| RuntimeError::LifecycleFailure("daemon cleanup command failed"))
+    }
+
+    fn cleanup_container(
+        &self,
+        lifecycle: &DockerLifecyclePlan,
+        current_dir: &Path,
+        environment: &BTreeMap<OsString, OsString>,
+        identity: &RunIdentity,
+        timeout_seconds: u64,
+        supervisor: &dyn SupervisorPort,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+    ) -> Result<(), RuntimeError> {
+        let inspect = self.execute_cleanup_cli(
+            &lifecycle.inspect_argv,
+            current_dir,
+            environment,
+            identity,
+            timeout_seconds,
+            supervisor,
+            cancellation,
+            generation,
+        )?;
+        if !completed_success(&inspect) {
+            return Err(RuntimeError::LifecycleFailure(
+                "daemon inspection failed before cleanup",
+            ));
+        }
+        let state = parse_container_state(&inspect.stdout.bytes, lifecycle)?;
+        if matches!(
+            state.as_str(),
+            "created" | "running" | "restarting" | "paused"
+        ) {
+            let stop = self.execute_cleanup_cli(
+                &lifecycle.stop_argv,
+                current_dir,
+                environment,
+                identity,
+                timeout_seconds,
+                supervisor,
+                cancellation,
+                generation,
+            );
+            if !stop.as_ref().is_ok_and(completed_success) {
+                let kill = self.execute_cleanup_cli(
+                    &lifecycle.kill_argv,
+                    current_dir,
+                    environment,
+                    identity,
+                    timeout_seconds,
+                    supervisor,
+                    cancellation,
+                    generation,
+                )?;
+                if !completed_success(&kill) {
+                    return Err(RuntimeError::LifecycleFailure(
+                        "daemon stop and kill both failed",
+                    ));
+                }
+            }
+        }
+        let remove = self.execute_cleanup_cli(
+            &lifecycle.remove_argv,
+            current_dir,
+            environment,
+            identity,
+            timeout_seconds,
+            supervisor,
+            cancellation,
+            generation,
+        )?;
+        if !completed_success(&remove) {
+            return Err(RuntimeError::LifecycleFailure("daemon removal failed"));
+        }
+        let final_inspect = self.execute_cleanup_cli(
+            &lifecycle.inspect_argv,
+            current_dir,
+            environment,
+            identity,
+            timeout_seconds,
+            supervisor,
+            cancellation,
+            generation,
+        )?;
+        if final_inspect.termination != ProcessTermination::Completed
+            || final_inspect.cleanup != CleanupStatus::Verified
+            || final_inspect.exit.is_none_or(|exit| exit.success)
+        {
+            return Err(RuntimeError::LifecycleFailure(
+                "daemon removal was not proven by final not-found inspection",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -396,6 +727,186 @@ pub struct DryRunCheck {
     pub depends_on: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerLifecyclePlan {
+    pub container_name: String,
+    pub owner_label: String,
+    pub run_label: String,
+    pub check_label: String,
+    pub create_argv: Vec<String>,
+    pub start_argv: Vec<String>,
+    pub attach_argv: Vec<String>,
+    pub wait_argv: Vec<String>,
+    pub inspect_argv: Vec<String>,
+    pub stop_argv: Vec<String>,
+    pub kill_argv: Vec<String>,
+    pub remove_argv: Vec<String>,
+}
+
+impl DockerLifecyclePlan {
+    pub fn build(
+        run_id: &str,
+        check: &NormalizedCheck,
+        rendered: &DryRunCheck,
+    ) -> Result<Self, RuntimeError> {
+        if run_id.is_empty() || check.id.is_empty() || rendered.program != "docker" {
+            return Err(RuntimeError::LifecycleFailure(
+                "lifecycle identity or rendered runtime is invalid",
+            ));
+        }
+        if rendered.argv.first().map(String::as_str) != Some("run") {
+            return Err(RuntimeError::LifecycleFailure(
+                "lifecycle requires a docker run plan",
+            ));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"commit-ci-preflight-container-v1\0");
+        hasher.update(run_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(check.id.as_bytes());
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let container_name = format!("ccp-{}", &digest[..24]);
+        let owner_label = "com.commit-ci-preflight.owner=commit-ci-preflight".to_owned();
+        let run_label = format!("com.commit-ci-preflight.run-id={run_id}");
+        let check_label = format!("com.commit-ci-preflight.check-id={}", check.id);
+
+        let mut create_argv = vec![
+            "create".to_owned(),
+            "--name".to_owned(),
+            container_name.clone(),
+            "--label".to_owned(),
+            owner_label.clone(),
+            "--label".to_owned(),
+            run_label.clone(),
+            "--label".to_owned(),
+            check_label.clone(),
+        ];
+        create_argv.extend(
+            rendered
+                .argv
+                .iter()
+                .skip(1)
+                .filter(|argument| argument.as_str() != "--rm")
+                .cloned(),
+        );
+
+        Ok(Self {
+            start_argv: vec!["start".to_owned(), container_name.clone()],
+            attach_argv: vec![
+                "attach".to_owned(),
+                "--sig-proxy=false".to_owned(),
+                container_name.clone(),
+            ],
+            wait_argv: vec!["wait".to_owned(), container_name.clone()],
+            inspect_argv: vec![
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                "{{json .}}".to_owned(),
+                container_name.clone(),
+            ],
+            stop_argv: vec![
+                "stop".to_owned(),
+                "--time".to_owned(),
+                "5".to_owned(),
+                container_name.clone(),
+            ],
+            kill_argv: vec!["kill".to_owned(), container_name.clone()],
+            remove_argv: vec![
+                "rm".to_owned(),
+                "--force".to_owned(),
+                container_name.clone(),
+            ],
+            container_name,
+            owner_label,
+            run_label,
+            check_label,
+            create_argv,
+        })
+    }
+}
+
+fn completed_success(result: &ProcessResult) -> bool {
+    result.termination == ProcessTermination::Completed
+        && result.cleanup == CleanupStatus::Verified
+        && result.exit.is_some_and(|exit| exit.success)
+}
+
+fn valid_container_id(bytes: &[u8]) -> bool {
+    let value = String::from_utf8_lossy(bytes).trim().to_owned();
+    (12..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn parse_wait_exit_code(bytes: &[u8]) -> Result<i32, RuntimeError> {
+    let value = std::str::from_utf8(bytes)
+        .map_err(|_| RuntimeError::LifecycleFailure("docker wait output is not UTF-8"))?
+        .trim();
+    let code = value
+        .parse::<i32>()
+        .map_err(|_| RuntimeError::LifecycleFailure("docker wait output is not an exit code"))?;
+    if !(0..=255).contains(&code) {
+        return Err(RuntimeError::LifecycleFailure(
+            "docker wait returned an invalid exit code",
+        ));
+    }
+    Ok(code)
+}
+
+fn parse_container_state(
+    bytes: &[u8],
+    lifecycle: &DockerLifecyclePlan,
+) -> Result<String, RuntimeError> {
+    let value: Value = serde_json::from_slice(bytes)
+        .map_err(|_| RuntimeError::LifecycleFailure("docker inspect output is not JSON"))?;
+    let name = value
+        .get("Name")
+        .and_then(Value::as_str)
+        .map(|name| name.trim_start_matches('/'));
+    if name != Some(lifecycle.container_name.as_str()) {
+        return Err(RuntimeError::LifecycleFailure(
+            "docker inspect returned an unexpected container name",
+        ));
+    }
+    let labels = value
+        .get("Config")
+        .and_then(|config| config.get("Labels"))
+        .and_then(Value::as_object)
+        .ok_or(RuntimeError::LifecycleFailure(
+            "docker inspect omitted container labels",
+        ))?;
+    if !label_matches(labels, &lifecycle.owner_label)
+        || !label_matches(labels, &lifecycle.run_label)
+        || !label_matches(labels, &lifecycle.check_label)
+    {
+        return Err(RuntimeError::LifecycleFailure(
+            "docker inspect returned non-CCP ownership labels",
+        ));
+    }
+    let state = value
+        .get("State")
+        .and_then(|state| state.get("Status"))
+        .and_then(Value::as_str)
+        .ok_or(RuntimeError::LifecycleFailure(
+            "docker inspect omitted container state",
+        ))?;
+    match state {
+        "created" | "running" | "restarting" | "paused" | "exited" | "dead" => Ok(state.to_owned()),
+        _ => Err(RuntimeError::LifecycleFailure(
+            "docker inspect returned an unknown container state",
+        )),
+    }
+}
+
+fn label_matches(labels: &serde_json::Map<String, Value>, key_value: &str) -> bool {
+    let Some((key, value)) = key_value.split_once('=') else {
+        return false;
+    };
+    labels.get(key).and_then(Value::as_str) == Some(value)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceMountPolicy {
@@ -410,6 +921,7 @@ pub enum RuntimeError {
     Cancelled,
     CleanupUncertain,
     InvalidProbe(&'static str),
+    LifecycleFailure(&'static str),
     Workspace(WorkspaceError),
     Process(ProcessError),
 }
@@ -420,7 +932,9 @@ impl RuntimeError {
             Self::Unsupported(_) | Self::Unavailable | Self::InvalidProbe(_) => 4,
             Self::TimedOut | Self::Cancelled => 5,
             Self::Workspace(_) => 2,
-            Self::CleanupUncertain | Self::Process(ProcessError::CleanupUncertain { .. }) => 70,
+            Self::CleanupUncertain
+            | Self::LifecycleFailure(_)
+            | Self::Process(ProcessError::CleanupUncertain { .. }) => 70,
             Self::Process(ProcessError::StaleGeneration) => 5,
             Self::Process(_) => 70,
         }
@@ -436,6 +950,9 @@ impl fmt::Display for RuntimeError {
             Self::Cancelled => formatter.write_str("runtime probe was cancelled"),
             Self::CleanupUncertain => formatter.write_str("runtime probe cleanup is uncertain"),
             Self::InvalidProbe(message) => write!(formatter, "invalid runtime probe: {message}"),
+            Self::LifecycleFailure(message) => {
+                write!(formatter, "runtime lifecycle failed: {message}")
+            }
             Self::Workspace(error) => write!(formatter, "invalid workspace plan: {error}"),
             Self::Process(error) => write!(formatter, "{error}"),
         }
@@ -452,7 +969,8 @@ impl std::error::Error for RuntimeError {
             | Self::TimedOut
             | Self::Cancelled
             | Self::CleanupUncertain
-            | Self::InvalidProbe(_) => None,
+            | Self::InvalidProbe(_)
+            | Self::LifecycleFailure(_) => None,
         }
     }
 }
@@ -463,7 +981,9 @@ mod tests {
     use crate::cache::{CacheRootSource, ResolvedCacheRoot};
     use crate::config::ConfigV1;
     use crate::process::{CapturedStream, ExitOutcome};
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     const CONFIG: &str = r#"
 schema_version = "1.0"
@@ -765,6 +1285,184 @@ timeout_seconds = 60
             .collect();
         assert_eq!(tmpdir_values.last(), Some(&"TMPDIR=/tmp"));
         assert!(!argv.iter().any(|part| part.contains("secret-value")));
+    }
+
+    #[test]
+    fn lifecycle_plan_is_deterministic_and_replaces_rm_with_owned_commands() {
+        let envelope = envelope();
+        let workspace = workspace(&envelope);
+        let dry_run = DockerCompatibleRuntime
+            .dry_run(&envelope, &workspace)
+            .expect("dry run");
+        let check = &envelope.plan.checks[0];
+        let first = DockerLifecyclePlan::build("sha256:run", check, &dry_run.checks[0])
+            .expect("lifecycle plan");
+        let second = DockerLifecyclePlan::build("sha256:run", check, &dry_run.checks[0])
+            .expect("lifecycle replay");
+
+        assert_eq!(first, second);
+        assert!(first.container_name.starts_with("ccp-"));
+        assert_eq!(first.container_name.len(), 28);
+        assert_eq!(
+            first.create_argv.first().map(String::as_str),
+            Some("create")
+        );
+        assert!(!first.create_argv.iter().any(|argument| argument == "--rm"));
+        assert!(first.create_argv.windows(2).any(|pair| {
+            pair == [
+                "--label",
+                "com.commit-ci-preflight.owner=commit-ci-preflight",
+            ]
+        }));
+        assert!(
+            first
+                .create_argv
+                .iter()
+                .any(|argument| { argument == "com.commit-ci-preflight.run-id=sha256:run" })
+        );
+        assert!(
+            first
+                .create_argv
+                .iter()
+                .any(|argument| { argument == "com.commit-ci-preflight.check-id=test" })
+        );
+        assert_eq!(first.start_argv[0], "start");
+        assert_eq!(first.attach_argv[0], "attach");
+        assert_eq!(first.wait_argv[0], "wait");
+        assert_eq!(first.stop_argv[0], "stop");
+        assert_eq!(first.kill_argv[0], "kill");
+        assert_eq!(first.remove_argv[0], "rm");
+        assert!(first.remove_argv.contains(&"--force".to_owned()));
+    }
+
+    #[test]
+    fn lifecycle_plan_rejects_non_run_and_helpers_fail_closed() {
+        let envelope = envelope();
+        let workspace = workspace(&envelope);
+        let dry_run = DockerCompatibleRuntime
+            .dry_run(&envelope, &workspace)
+            .expect("dry run");
+        let lifecycle =
+            DockerLifecyclePlan::build("run", &envelope.plan.checks[0], &dry_run.checks[0])
+                .expect("lifecycle");
+        let mut rendered = dry_run.checks[0].clone();
+        rendered.argv[0] = "exec".to_owned();
+        assert!(matches!(
+            DockerLifecyclePlan::build("run", &envelope.plan.checks[0], &rendered),
+            Err(RuntimeError::LifecycleFailure(_))
+        ));
+        assert!(parse_wait_exit_code(b"256\n").is_err());
+        assert!(parse_container_state(b"{}", &lifecycle).is_err());
+        assert!(!valid_container_id(b"not-an-id\n"));
+    }
+
+    struct LifecycleSupervisor {
+        calls: Arc<Mutex<Vec<String>>>,
+        inspect_calls: AtomicUsize,
+    }
+
+    impl LifecycleSupervisor {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(Mutex::new(Vec::new())),
+                inspect_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SupervisorPort for LifecycleSupervisor {
+        fn execute(
+            &self,
+            request: &ProcessRequest,
+            _cancellation: &CancellationToken,
+            generation: &GenerationGuard,
+        ) -> Result<ProcessResult, ProcessError> {
+            generation.ensure_current(&request.identity)?;
+            let command = request
+                .argv
+                .first()
+                .and_then(|value| value.to_str())
+                .expect("command");
+            self.calls.lock().expect("calls").push(command.to_owned());
+            let (success, code, stdout) = match command {
+                "create" => (true, 0, format!("{}\n", "a".repeat(64)).into_bytes()),
+                "start" => (true, 0, Vec::new()),
+                "attach" => (true, 0, b"check output\n".to_vec()),
+                "wait" => (true, 0, b"17\n".to_vec()),
+                "inspect" if self.inspect_calls.fetch_add(1, Ordering::SeqCst) == 0 => {
+                    let name = request
+                        .argv
+                        .last()
+                        .and_then(|value| value.to_str())
+                        .expect("container name");
+                    let inspect = format!(
+                        r#"{{"Name":"/{name}","Config":{{"Labels":{{"com.commit-ci-preflight.owner":"commit-ci-preflight","com.commit-ci-preflight.run-id":"sha256:run","com.commit-ci-preflight.check-id":"test"}}}},"State":{{"Status":"running"}}}}"#
+                    );
+                    (true, 0, inspect.into_bytes())
+                }
+                "inspect" => (false, 1, b"Error: No such container\n".to_vec()),
+                "stop" | "kill" | "rm" => (true, 0, Vec::new()),
+                _ => (false, 1, Vec::new()),
+            };
+            Ok(ProcessResult {
+                identity: request.identity.clone(),
+                termination: ProcessTermination::Completed,
+                cleanup: CleanupStatus::Verified,
+                exit: Some(ExitOutcome {
+                    success,
+                    code: Some(code),
+                }),
+                stdout: CapturedStream {
+                    bytes: stdout,
+                    truncated: false,
+                },
+                stderr: CapturedStream {
+                    bytes: Vec::new(),
+                    truncated: false,
+                },
+                elapsed_millis: 1,
+            })
+        }
+    }
+
+    #[test]
+    fn lifecycle_executes_owned_sequence_and_proves_final_absence() {
+        let envelope = envelope();
+        let workspace = workspace(&envelope);
+        let dry_run = DockerCompatibleRuntime
+            .dry_run(&envelope, &workspace)
+            .expect("dry run");
+        let identity = RunIdentity {
+            project: envelope.plan.project.clone(),
+            commit: Some("a".repeat(40)),
+            config_digest: envelope.plan_digest.clone(),
+            generation: "1".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let supervisor = LifecycleSupervisor::new();
+        let result = DockerCompatibleRuntime
+            .execute_check(
+                &envelope,
+                &envelope.plan.checks[0],
+                &dry_run.checks[0],
+                std::path::Path::new("/workspace"),
+                &BTreeMap::new(),
+                &identity,
+                "sha256:run",
+                &supervisor,
+                &CancellationToken::default(),
+                &generation,
+            )
+            .expect("lifecycle execution");
+
+        assert_eq!(result.exit.expect("exit").code, Some(17));
+        assert_eq!(result.stdout.bytes, b"check output\n");
+        assert_eq!(
+            *supervisor.calls.lock().expect("calls"),
+            vec![
+                "create", "start", "attach", "wait", "inspect", "stop", "rm", "inspect"
+            ]
+        );
     }
 
     #[test]
