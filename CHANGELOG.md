@@ -19,7 +19,9 @@ Semantic Versioning after its first public release.
   strict v1/v2 verifier dispatch, snapshot-digest tamper detection, and a
   privacy-minimized journal binding for commit, manifest digest, entry count,
   and the fixed CCP-owned resource identifier.
-
+- Reconciled the reliability-hardening plan with live `origin/main` and the
+  still-conflicting T2 PR, preserving exact anchors and qualification
+  boundaries for the next milestone.
 - Durable filesystem primitives with deterministic operation-failure tests,
   append-only run-journal v1 state transitions, and bounded `recover status`
   / `recover apply <run-id>` commands. Recovery status is read-only; apply
