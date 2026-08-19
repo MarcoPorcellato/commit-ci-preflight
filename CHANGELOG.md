@@ -69,6 +69,10 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Refreshed the reliability-hardening checkpoint after T2 conflict resolution:
+  draft PR #40 is stacked on PR #39, its exact-head qualification remains
+  pending when the local CCP control plane reports `unknown`, and the previous
+  exact-head receipt is retained only as historical evidence.
 - Version the macOS resource policy as `macos-v4`: keep the 20% available,
   3 GiB reclaimable and bounded-swap pre-start limits, but make compressor
   occupancy advisory unless at least 70% compression accompanies another
