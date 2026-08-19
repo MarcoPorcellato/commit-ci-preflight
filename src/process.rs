@@ -1280,38 +1280,49 @@ mod tests {
     #[test]
     fn blocked_reader_join_is_bounded_and_worker_can_finish_after_release() {
         struct GateReader {
+            entered: Arc<AtomicBool>,
             released: Arc<AtomicBool>,
             finished: Arc<AtomicBool>,
         }
 
         impl Read for GateReader {
             fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                self.entered.store(true, Ordering::Release);
                 while !self.released.load(Ordering::Acquire) {
-                    thread::yield_now();
+                    thread::sleep(Duration::from_millis(1));
                 }
                 self.finished.store(true, Ordering::Release);
                 Ok(0)
             }
         }
 
+        let entered = Arc::new(AtomicBool::new(false));
         let released = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
-        let error = spawn_reader(
+        let reader = spawn_reader(
             GateReader {
+                entered: Arc::clone(&entered),
                 released: Arc::clone(&released),
                 finished: Arc::clone(&finished),
             },
             32,
             None,
-        )
-        .join_within(Duration::from_millis(2))
-        .expect_err("blocked reader must respect the join deadline");
+        );
+        let start_deadline = Instant::now() + Duration::from_secs(1);
+        while !entered.load(Ordering::Acquire) && Instant::now() < start_deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(entered.load(Ordering::Acquire));
+
+        let error = reader
+            .join_within(Duration::from_millis(20))
+            .expect_err("blocked reader must respect the join deadline");
 
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         released.store(true, Ordering::Release);
-        let deadline = Instant::now() + Duration::from_millis(100);
+        let deadline = Instant::now() + Duration::from_secs(1);
         while !finished.load(Ordering::Acquire) && Instant::now() < deadline {
-            thread::yield_now();
+            thread::sleep(Duration::from_millis(1));
         }
         assert!(finished.load(Ordering::Acquire));
     }
