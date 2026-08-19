@@ -86,10 +86,7 @@ fn shared_v2_schema_accepts_both_receipt_families() {
         .filter_map(|alternative| alternative["$ref"].as_str())
         .collect();
 
-    assert_eq!(
-        refs,
-        vec!["#/$defs/MatrixReceiptV2", "#/$defs/ReceiptV2"]
-    );
+    assert_eq!(refs, vec!["#/$defs/MatrixReceiptV2", "#/$defs/ReceiptV2"]);
     assert!(schema["$defs"]["MatrixReceiptV2"].is_object());
     assert!(schema["$defs"]["ReceiptV2"].is_object());
 }

@@ -396,8 +396,7 @@ pub fn receipt_schema_json() -> Result<String, ReceiptError> {
 }
 
 pub fn receipt_v2_schema_json() -> Result<String, ReceiptError> {
-    crate::schema_contract::combined_receipt_v2_schema_json()
-        .map_err(ReceiptError::Serialization)
+    crate::schema_contract::combined_receipt_v2_schema_json().map_err(ReceiptError::Serialization)
 }
 
 pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String, ReceiptError> {
