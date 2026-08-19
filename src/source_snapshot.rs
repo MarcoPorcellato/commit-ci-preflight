@@ -86,6 +86,10 @@ impl SourceSnapshot {
         generation: &GenerationGuard,
         identity: &RunIdentity,
     ) -> Result<Self, SourceSnapshotError> {
+        let repository = fs::canonicalize(repository).map_err(SourceSnapshotError::Io)?;
+        if !repository.is_dir() {
+            return Err(SourceSnapshotError::RepositoryNotDirectory);
+        }
         validate_commit(commit_sha)?;
         if fs::symlink_metadata(resource_root).is_ok() {
             return Err(SourceSnapshotError::DestinationExists);
@@ -99,7 +103,7 @@ impl SourceSnapshot {
 
         let result = (|| {
             let tree = execute_git(
-                repository,
+                &repository,
                 &["ls-tree", "--full-tree", "-r", "-z", commit_sha],
                 TREE_CAPTURE_LIMIT,
                 supervisor,
@@ -125,7 +129,7 @@ impl SourceSnapshot {
                     .as_deref()
                     .ok_or(SourceSnapshotError::InvalidTree)?;
                 let bytes = execute_git(
-                    repository,
+                    &repository,
                     &["cat-file", "blob", oid],
                     BLOB_CAPTURE_LIMIT,
                     supervisor,
@@ -285,8 +289,12 @@ pub fn resolve_clean_head(
     generation: &GenerationGuard,
     identity: &RunIdentity,
 ) -> Result<String, SourceSnapshotError> {
+    let repository = fs::canonicalize(repository).map_err(SourceSnapshotError::Io)?;
+    if !repository.is_dir() {
+        return Err(SourceSnapshotError::RepositoryNotDirectory);
+    }
     let output = execute_git(
-        repository,
+        &repository,
         &["rev-parse", "--verify", "HEAD"],
         256,
         supervisor,
@@ -300,7 +308,7 @@ pub fn resolve_clean_head(
     validate_commit(commit)?;
     let exclusion = format!(":(exclude){receipt_output}");
     let status = execute_git(
-        repository,
+        &repository,
         &[
             "status",
             "--porcelain=v1",
@@ -549,6 +557,7 @@ pub enum SourceSnapshotError {
     ManifestSerialization,
     SnapshotChanged,
     DirtyRepository,
+    RepositoryNotDirectory,
 }
 
 impl fmt::Display for SourceSnapshotError {
@@ -579,6 +588,9 @@ impl fmt::Display for SourceSnapshotError {
                 formatter.write_str("source snapshot changed after materialization")
             }
             Self::DirtyRepository => formatter.write_str("source repository is dirty"),
+            Self::RepositoryNotDirectory => {
+                formatter.write_str("source repository is not a directory")
+            }
         }
     }
 }
@@ -616,6 +628,8 @@ mod tests {
                 b"hello\n".to_vec()
             } else if argv.first().is_some_and(|part| part == "hash-object") {
                 format!("{OID}\n").into_bytes()
+            } else if argv.first().is_some_and(|part| part == "rev-parse") {
+                format!("{COMMIT}\n").into_bytes()
             } else {
                 Vec::new()
             };
@@ -710,6 +724,23 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn clean_head_canonicalizes_relative_repository_paths() {
+        let identity = identity();
+        let generation = GenerationGuard::new(identity.clone());
+        let commit = resolve_clean_head(
+            Path::new("."),
+            ".ccp/receipt.json",
+            &FakeGit,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("relative repository path is canonicalized");
+
+        assert_eq!(commit, COMMIT);
     }
 
     #[test]
