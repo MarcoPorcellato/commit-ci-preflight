@@ -53,21 +53,25 @@ pub trait RuntimePort: Send + Sync {
 
     fn execute_check(
         &self,
-        _envelope: &ExecutionPlanEnvelopeV1,
         _check: &NormalizedCheck,
         _rendered: &DryRunCheck,
-        _execution_root: &Path,
-        _environment: &BTreeMap<OsString, OsString>,
-        _identity: &RunIdentity,
-        _run_id: &str,
-        _supervisor: &dyn SupervisorPort,
-        _cancellation: &CancellationToken,
-        _generation: &GenerationGuard,
+        _context: &RuntimeExecutionContext<'_>,
     ) -> Result<ProcessResult, RuntimeError> {
         Err(RuntimeError::Unsupported(
             "runtime lifecycle execution is not qualified",
         ))
     }
+}
+
+pub struct RuntimeExecutionContext<'a> {
+    pub execution_root: &'a Path,
+    pub environment: &'a BTreeMap<OsString, OsString>,
+    pub identity: &'a RunIdentity,
+    pub run_id: &'a str,
+    pub supervisor: &'a dyn SupervisorPort,
+    pub cancellation: &'a CancellationToken,
+    pub generation: &'a GenerationGuard,
+    pub timeout_seconds: u64,
 }
 
 pub fn runtime_for(kind: RuntimeKind) -> Result<Box<dyn RuntimePort>, RuntimeError> {
@@ -153,163 +157,57 @@ impl RuntimePort for DockerCompatibleRuntime {
 
     fn execute_check(
         &self,
-        _envelope: &ExecutionPlanEnvelopeV1,
         check: &NormalizedCheck,
         rendered: &DryRunCheck,
-        execution_root: &Path,
-        environment: &BTreeMap<OsString, OsString>,
-        identity: &RunIdentity,
-        run_id: &str,
-        supervisor: &dyn SupervisorPort,
-        cancellation: &CancellationToken,
-        generation: &GenerationGuard,
+        context: &RuntimeExecutionContext<'_>,
     ) -> Result<ProcessResult, RuntimeError> {
-        let lifecycle = DockerLifecyclePlan::build(run_id, check, rendered)?;
+        let lifecycle = DockerLifecyclePlan::build(context.run_id, check, rendered)?;
         let cleanup_cancellation = CancellationToken::default();
-        let create = self.execute_cli(
-            &lifecycle.create_argv,
-            execution_root,
-            environment,
-            identity,
-            check.timeout_seconds,
-            supervisor,
-            cancellation,
-            generation,
-        )?;
+        let create = self.execute_cli(&lifecycle.create_argv, context, context.cancellation)?;
         if !completed_success(&create) {
             return Ok(create);
         }
         if !valid_container_id(&create.stdout.bytes) {
-            self.cleanup_container(
-                &lifecycle,
-                execution_root,
-                environment,
-                identity,
-                check.timeout_seconds,
-                supervisor,
-                &cleanup_cancellation,
-                generation,
-            )?;
+            self.cleanup_container(&lifecycle, context, &cleanup_cancellation)?;
             return Err(RuntimeError::LifecycleFailure(
                 "docker create did not return a valid container id",
             ));
         }
 
-        let start = self.execute_cli(
-            &lifecycle.start_argv,
-            execution_root,
-            environment,
-            identity,
-            check.timeout_seconds,
-            supervisor,
-            cancellation,
-            generation,
-        );
+        let start = self.execute_cli(&lifecycle.start_argv, context, context.cancellation);
         let start = match start {
             Ok(result) => result,
             Err(error) => {
-                self.cleanup_container(
-                    &lifecycle,
-                    execution_root,
-                    environment,
-                    identity,
-                    check.timeout_seconds,
-                    supervisor,
-                    &cleanup_cancellation,
-                    generation,
-                )?;
+                self.cleanup_container(&lifecycle, context, &cleanup_cancellation)?;
                 return Err(error);
             }
         };
         if !completed_success(&start) {
-            self.cleanup_container(
-                &lifecycle,
-                execution_root,
-                environment,
-                identity,
-                check.timeout_seconds,
-                supervisor,
-                &cleanup_cancellation,
-                generation,
-            )?;
+            self.cleanup_container(&lifecycle, context, &cleanup_cancellation)?;
             return Ok(start);
         }
 
-        let attach = match self.execute_cli(
-            &lifecycle.attach_argv,
-            execution_root,
-            environment,
-            identity,
-            check.timeout_seconds,
-            supervisor,
-            cancellation,
-            generation,
-        ) {
+        let attach = match self.execute_cli(&lifecycle.attach_argv, context, context.cancellation) {
             Ok(result) => result,
             Err(error) => {
-                self.cleanup_container(
-                    &lifecycle,
-                    execution_root,
-                    environment,
-                    identity,
-                    check.timeout_seconds,
-                    supervisor,
-                    &cleanup_cancellation,
-                    generation,
-                )?;
+                self.cleanup_container(&lifecycle, context, &cleanup_cancellation)?;
                 return Err(error);
             }
         };
         if attach.termination != ProcessTermination::Completed {
-            self.cleanup_container(
-                &lifecycle,
-                execution_root,
-                environment,
-                identity,
-                check.timeout_seconds,
-                supervisor,
-                &cleanup_cancellation,
-                generation,
-            )?;
+            self.cleanup_container(&lifecycle, context, &cleanup_cancellation)?;
             return Ok(attach);
         }
 
-        let wait = self.execute_cli(
-            &lifecycle.wait_argv,
-            execution_root,
-            environment,
-            identity,
-            check.timeout_seconds,
-            supervisor,
-            cancellation,
-            generation,
-        )?;
+        let wait = self.execute_cli(&lifecycle.wait_argv, context, context.cancellation)?;
         if !completed_success(&wait) {
-            self.cleanup_container(
-                &lifecycle,
-                execution_root,
-                environment,
-                identity,
-                check.timeout_seconds,
-                supervisor,
-                &cleanup_cancellation,
-                generation,
-            )?;
+            self.cleanup_container(&lifecycle, context, &cleanup_cancellation)?;
             return Err(RuntimeError::LifecycleFailure(
                 "docker wait did not return the container exit code",
             ));
         }
         let exit_code = parse_wait_exit_code(&wait.stdout.bytes)?;
-        self.cleanup_container(
-            &lifecycle,
-            execution_root,
-            environment,
-            identity,
-            check.timeout_seconds,
-            supervisor,
-            &cleanup_cancellation,
-            generation,
-        )?;
+        self.cleanup_container(&lifecycle, context, &cleanup_cancellation)?;
         let mut result = attach;
         result.exit = Some(crate::process::ExitOutcome {
             success: exit_code == 0,
@@ -323,73 +221,41 @@ impl DockerCompatibleRuntime {
     fn execute_cli(
         &self,
         argv: &[String],
-        current_dir: &Path,
-        environment: &BTreeMap<OsString, OsString>,
-        identity: &RunIdentity,
-        timeout_seconds: u64,
-        supervisor: &dyn SupervisorPort,
+        context: &RuntimeExecutionContext<'_>,
         cancellation: &CancellationToken,
-        generation: &GenerationGuard,
     ) -> Result<ProcessResult, RuntimeError> {
         let request = ProcessRequest {
-            identity: identity.clone(),
+            identity: context.identity.clone(),
             program: OsString::from("docker"),
             argv: argv.iter().map(OsString::from).collect(),
-            current_dir: current_dir.to_path_buf(),
-            environment: environment.clone(),
-            timeout: Duration::from_secs(timeout_seconds),
+            current_dir: context.execution_root.to_path_buf(),
+            environment: context.environment.clone(),
+            timeout: Duration::from_secs(context.timeout_seconds),
             max_capture_bytes: LIFECYCLE_CAPTURE_BYTES,
         };
-        supervisor
-            .execute(&request, cancellation, generation)
+        context
+            .supervisor
+            .execute(&request, cancellation, context.generation)
             .map_err(RuntimeError::Process)
     }
 
     fn execute_cleanup_cli(
         &self,
         argv: &[String],
-        current_dir: &Path,
-        environment: &BTreeMap<OsString, OsString>,
-        identity: &RunIdentity,
-        timeout_seconds: u64,
-        supervisor: &dyn SupervisorPort,
+        context: &RuntimeExecutionContext<'_>,
         cancellation: &CancellationToken,
-        generation: &GenerationGuard,
     ) -> Result<ProcessResult, RuntimeError> {
-        self.execute_cli(
-            argv,
-            current_dir,
-            environment,
-            identity,
-            timeout_seconds,
-            supervisor,
-            cancellation,
-            generation,
-        )
-        .map_err(|_| RuntimeError::LifecycleFailure("daemon cleanup command failed"))
+        self.execute_cli(argv, context, cancellation)
+            .map_err(|_| RuntimeError::LifecycleFailure("daemon cleanup command failed"))
     }
 
     fn cleanup_container(
         &self,
         lifecycle: &DockerLifecyclePlan,
-        current_dir: &Path,
-        environment: &BTreeMap<OsString, OsString>,
-        identity: &RunIdentity,
-        timeout_seconds: u64,
-        supervisor: &dyn SupervisorPort,
+        context: &RuntimeExecutionContext<'_>,
         cancellation: &CancellationToken,
-        generation: &GenerationGuard,
     ) -> Result<(), RuntimeError> {
-        let inspect = self.execute_cleanup_cli(
-            &lifecycle.inspect_argv,
-            current_dir,
-            environment,
-            identity,
-            timeout_seconds,
-            supervisor,
-            cancellation,
-            generation,
-        )?;
+        let inspect = self.execute_cleanup_cli(&lifecycle.inspect_argv, context, cancellation)?;
         if !completed_success(&inspect) {
             return Err(RuntimeError::LifecycleFailure(
                 "daemon inspection failed before cleanup",
@@ -400,27 +266,9 @@ impl DockerCompatibleRuntime {
             state.as_str(),
             "created" | "running" | "restarting" | "paused"
         ) {
-            let stop = self.execute_cleanup_cli(
-                &lifecycle.stop_argv,
-                current_dir,
-                environment,
-                identity,
-                timeout_seconds,
-                supervisor,
-                cancellation,
-                generation,
-            );
+            let stop = self.execute_cleanup_cli(&lifecycle.stop_argv, context, cancellation);
             if !stop.as_ref().is_ok_and(completed_success) {
-                let kill = self.execute_cleanup_cli(
-                    &lifecycle.kill_argv,
-                    current_dir,
-                    environment,
-                    identity,
-                    timeout_seconds,
-                    supervisor,
-                    cancellation,
-                    generation,
-                )?;
+                let kill = self.execute_cleanup_cli(&lifecycle.kill_argv, context, cancellation)?;
                 if !completed_success(&kill) {
                     return Err(RuntimeError::LifecycleFailure(
                         "daemon stop and kill both failed",
@@ -428,29 +276,12 @@ impl DockerCompatibleRuntime {
                 }
             }
         }
-        let remove = self.execute_cleanup_cli(
-            &lifecycle.remove_argv,
-            current_dir,
-            environment,
-            identity,
-            timeout_seconds,
-            supervisor,
-            cancellation,
-            generation,
-        )?;
+        let remove = self.execute_cleanup_cli(&lifecycle.remove_argv, context, cancellation)?;
         if !completed_success(&remove) {
             return Err(RuntimeError::LifecycleFailure("daemon removal failed"));
         }
-        let final_inspect = self.execute_cleanup_cli(
-            &lifecycle.inspect_argv,
-            current_dir,
-            environment,
-            identity,
-            timeout_seconds,
-            supervisor,
-            cancellation,
-            generation,
-        )?;
+        let final_inspect =
+            self.execute_cleanup_cli(&lifecycle.inspect_argv, context, cancellation)?;
         if final_inspect.termination != ProcessTermination::Completed
             || final_inspect.cleanup != CleanupStatus::Verified
             || final_inspect.exit.is_none_or(|exit| exit.success)
@@ -1440,19 +1271,21 @@ timeout_seconds = 60
         };
         let generation = GenerationGuard::new(identity.clone());
         let supervisor = LifecycleSupervisor::new();
+        let cancellation = CancellationToken::default();
+        let execution_root = std::path::Path::new("/workspace");
+        let environment = BTreeMap::new();
+        let context = RuntimeExecutionContext {
+            execution_root,
+            environment: &environment,
+            identity: &identity,
+            run_id: "sha256:run",
+            supervisor: &supervisor,
+            cancellation: &cancellation,
+            generation: &generation,
+            timeout_seconds: envelope.plan.checks[0].timeout_seconds,
+        };
         let result = DockerCompatibleRuntime
-            .execute_check(
-                &envelope,
-                &envelope.plan.checks[0],
-                &dry_run.checks[0],
-                std::path::Path::new("/workspace"),
-                &BTreeMap::new(),
-                &identity,
-                "sha256:run",
-                &supervisor,
-                &CancellationToken::default(),
-                &generation,
-            )
+            .execute_check(&envelope.plan.checks[0], &dry_run.checks[0], &context)
             .expect("lifecycle execution");
 
         assert_eq!(result.exit.expect("exit").code, Some(17));

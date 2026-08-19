@@ -34,7 +34,9 @@ use crate::receipt::{
     ReceiptEnvelopeV2, ReceiptError, ReceiptV1, ReceiptV2, RepositoryEvidence, RunEvidence,
     SourceSnapshotEvidence, SourceSnapshotStrategy, canonical_digest,
 };
-use crate::runtime::{RuntimeError, RuntimePort, docker_execution_environment, doctor_guard};
+use crate::runtime::{
+    RuntimeError, RuntimeExecutionContext, RuntimePort, docker_execution_environment, doctor_guard,
+};
 use crate::source_snapshot::{SourceSnapshot, SourceSnapshotError};
 use crate::workspace::{PreparedWorkspace, WorkspaceError};
 
@@ -345,18 +347,17 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         {
             not_run(declared, "dependency did not pass in this run")
         } else {
-            match runtime.execute_check(
-                request.envelope,
-                declared,
-                rendered,
+            let execution_context = RuntimeExecutionContext {
                 execution_root,
-                &environment,
-                &identity,
-                &run_id,
+                environment: &environment,
+                identity: &identity,
+                run_id: &run_id,
                 supervisor,
                 cancellation,
-                &generation,
-            ) {
+                generation: &generation,
+                timeout_seconds: declared.timeout_seconds,
+            };
+            match runtime.execute_check(declared, rendered, &execution_context) {
                 Ok(result)
                     if result.termination == ProcessTermination::Cancelled
                         && cancellation.reason() == Some(CancellationReason::ResourcePressure) =>
