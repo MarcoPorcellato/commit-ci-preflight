@@ -18,7 +18,8 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -252,9 +253,12 @@ pub trait ProcessSpawner: Send + Sync {
 pub trait ManagedProcess: Send {
     fn try_wait(&mut self) -> io::Result<Option<ExitOutcome>>;
     fn request_graceful_stop(&mut self) -> io::Result<GracefulStop>;
-    fn force_stop_and_wait(&mut self) -> io::Result<Option<ExitOutcome>>;
+    fn force_stop_and_wait(&mut self, deadline: Duration) -> io::Result<Option<ExitOutcome>>;
     fn seal_descendants(&mut self, deadline: Duration) -> io::Result<()>;
-    fn collect_output(self: Box<Self>) -> io::Result<(CapturedStream, CapturedStream)>;
+    fn collect_output(
+        self: Box<Self>,
+        deadline: Duration,
+    ) -> io::Result<(CapturedStream, CapturedStream)>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,6 +328,35 @@ pub struct ProcessSupervisor<S = StdProcessSpawner> {
     grace_period: Duration,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProcessDeadline {
+    started: Instant,
+    total: Duration,
+    execution_budget: Duration,
+    cleanup_budget: Duration,
+}
+
+impl ProcessDeadline {
+    fn new(started: Instant, total: Duration, cleanup_cap: Duration) -> Self {
+        let cleanup_budget = cleanup_cap.min(total / 2);
+        Self {
+            started,
+            total,
+            execution_budget: total.saturating_sub(cleanup_budget),
+            cleanup_budget,
+        }
+    }
+
+    fn execution_expired(self) -> bool {
+        self.started.elapsed() >= self.execution_budget
+    }
+
+    fn cleanup_remaining(self) -> Duration {
+        self.cleanup_budget
+            .min(self.total.saturating_sub(self.started.elapsed()))
+    }
+}
+
 impl ProcessSupervisor<StdProcessSpawner> {
     pub fn standard() -> Self {
         Self::new(StdProcessSpawner)
@@ -369,6 +402,7 @@ impl<S: ProcessSpawner> ProcessSupervisor<S> {
         request.validate()?;
         generation.ensure_current(&request.identity)?;
         let started = Instant::now();
+        let deadline = ProcessDeadline::new(started, request.timeout, self.grace_period);
 
         if cancellation.is_cancelled() {
             return Ok(empty_result(
@@ -382,7 +416,13 @@ impl<S: ProcessSpawner> ProcessSupervisor<S> {
         let mut child = self.spawner.spawn_with_output(request, output_mode)?;
         loop {
             if generation.ensure_current(&request.identity).is_err() {
-                self.stop_and_collect(child, request, ProcessTermination::Cancelled, started)?;
+                self.stop_and_collect(
+                    child,
+                    request,
+                    ProcessTermination::Cancelled,
+                    started,
+                    deadline,
+                )?;
                 return Err(ProcessError::StaleGeneration);
             }
             if cancellation.is_cancelled() {
@@ -391,24 +431,44 @@ impl<S: ProcessSpawner> ProcessSupervisor<S> {
                     request,
                     ProcessTermination::Cancelled,
                     started,
+                    deadline,
                 );
             }
-            if started.elapsed() >= request.timeout {
+            if deadline.execution_expired() {
                 return self.stop_and_collect(
                     child,
                     request,
                     ProcessTermination::TimedOut,
                     started,
+                    deadline,
                 );
             }
-            if let Some(exit) = child.try_wait().map_err(ProcessError::Monitor)? {
+            let observed = match child.try_wait() {
+                Ok(observed) => observed,
+                Err(error) => {
+                    let cleanup = self.stop_and_collect(
+                        child,
+                        request,
+                        ProcessTermination::Cancelled,
+                        started,
+                        deadline,
+                    );
+                    return match cleanup {
+                        Ok(_) => Err(ProcessError::Monitor(error)),
+                        Err(cleanup_error) => Err(cleanup_error),
+                    };
+                }
+            };
+            if let Some(exit) = observed {
                 child
-                    .seal_descendants(self.grace_period)
+                    .seal_descendants(deadline.cleanup_remaining())
                     .map_err(|source| ProcessError::CleanupUncertain {
                         stage: "completed descendant seal",
                         source,
                     })?;
-                let (stdout, stderr) = child.collect_output().map_err(ProcessError::Output)?;
+                let (stdout, stderr) = child
+                    .collect_output(deadline.cleanup_remaining())
+                    .map_err(ProcessError::Output)?;
                 generation.ensure_current(&request.identity)?;
                 return Ok(ProcessResult {
                     identity: request.identity.clone(),
@@ -430,19 +490,29 @@ impl<S: ProcessSpawner> ProcessSupervisor<S> {
         request: &ProcessRequest,
         termination: ProcessTermination,
         started: Instant,
+        deadline: ProcessDeadline,
     ) -> Result<ProcessResult, ProcessError> {
         let graceful = child.request_graceful_stop();
         if matches!(graceful, Ok(GracefulStop::Requested)) {
             let grace_started = Instant::now();
-            while grace_started.elapsed() < self.grace_period {
-                if let Some(exit) = child.try_wait().map_err(ProcessError::Monitor)? {
+            while grace_started.elapsed() < deadline.cleanup_remaining() {
+                let observed =
                     child
-                        .seal_descendants(self.grace_period)
+                        .try_wait()
+                        .map_err(|source| ProcessError::CleanupUncertain {
+                            stage: "graceful stop monitoring",
+                            source,
+                        })?;
+                if let Some(exit) = observed {
+                    child
+                        .seal_descendants(deadline.cleanup_remaining())
                         .map_err(|source| ProcessError::CleanupUncertain {
                             stage: "graceful descendant seal",
                             source,
                         })?;
-                    let (stdout, stderr) = child.collect_output().map_err(ProcessError::Output)?;
+                    let (stdout, stderr) = child
+                        .collect_output(deadline.cleanup_remaining())
+                        .map_err(ProcessError::Output)?;
                     return Ok(ProcessResult {
                         identity: request.identity.clone(),
                         termination,
@@ -457,20 +527,30 @@ impl<S: ProcessSpawner> ProcessSupervisor<S> {
             }
         }
 
-        let exit =
-            child
-                .force_stop_and_wait()
-                .map_err(|source| ProcessError::CleanupUncertain {
+        let exit = match child.force_stop_and_wait(deadline.cleanup_remaining()) {
+            Ok(exit) => exit,
+            Err(source) => {
+                child
+                    .seal_descendants(deadline.cleanup_remaining())
+                    .map_err(|seal_source| ProcessError::CleanupUncertain {
+                        stage: "forced descendant seal after force-stop failure",
+                        source: seal_source,
+                    })?;
+                return Err(ProcessError::CleanupUncertain {
                     stage: "force stop",
                     source,
-                })?;
+                });
+            }
+        };
         child
-            .seal_descendants(self.grace_period)
+            .seal_descendants(deadline.cleanup_remaining())
             .map_err(|source| ProcessError::CleanupUncertain {
                 stage: "forced descendant seal",
                 source,
             })?;
-        let (stdout, stderr) = child.collect_output().map_err(ProcessError::Output)?;
+        let (stdout, stderr) = child
+            .collect_output(deadline.cleanup_remaining())
+            .map_err(ProcessError::Output)?;
         Ok(ProcessResult {
             identity: request.identity.clone(),
             termination,
@@ -503,8 +583,8 @@ fn empty_result(
 struct StdManagedProcess {
     child: Box<dyn ChildWrapper>,
     pid: u32,
-    stdout: Option<JoinHandle<io::Result<CapturedStream>>>,
-    stderr: Option<JoinHandle<io::Result<CapturedStream>>>,
+    stdout: Option<ReaderHandle>,
+    stderr: Option<ReaderHandle>,
     last_exit: Option<ExitOutcome>,
 }
 
@@ -539,15 +619,25 @@ impl ManagedProcess for StdManagedProcess {
         }
     }
 
-    fn force_stop_and_wait(&mut self) -> io::Result<Option<ExitOutcome>> {
+    fn force_stop_and_wait(&mut self, deadline: Duration) -> io::Result<Option<ExitOutcome>> {
         match self.child.start_kill() {
             Ok(()) => {}
             Err(_) if self.try_wait()?.is_some() => {}
             Err(error) => return Err(error),
         }
-        let exit = ExitOutcome::from(self.child.wait()?);
-        self.last_exit = Some(exit);
-        Ok(Some(exit))
+        let started = Instant::now();
+        loop {
+            if let Some(exit) = self.try_wait()? {
+                return Ok(Some(exit));
+            }
+            if started.elapsed() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "child did not exit within the force-stop deadline",
+                ));
+            }
+            thread::sleep(GROUP_EXIT_POLL);
+        }
     }
 
     fn seal_descendants(&mut self, deadline: Duration) -> io::Result<()> {
@@ -568,18 +658,66 @@ impl ManagedProcess for StdManagedProcess {
         }
     }
 
-    fn collect_output(mut self: Box<Self>) -> io::Result<(CapturedStream, CapturedStream)> {
-        let stdout = join_reader(
-            self.stdout
-                .take()
-                .ok_or_else(|| io::Error::other("stdout reader is missing"))?,
-        )?;
-        let stderr = join_reader(
-            self.stderr
-                .take()
-                .ok_or_else(|| io::Error::other("stderr reader is missing"))?,
-        )?;
+    fn collect_output(
+        mut self: Box<Self>,
+        deadline: Duration,
+    ) -> io::Result<(CapturedStream, CapturedStream)> {
+        let started = Instant::now();
+        let stdout = self
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("stdout reader is missing"))?;
+        let stderr = self
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("stderr reader is missing"))?;
+        let stdout = match stdout.join_within(deadline) {
+            Ok(stream) => stream,
+            Err(error) => {
+                stderr.cancel();
+                return Err(error);
+            }
+        };
+        let remaining = deadline.saturating_sub(started.elapsed());
+        let stderr = stderr.join_within(remaining)?;
         Ok((stdout, stderr))
+    }
+}
+
+struct ReaderHandle {
+    result: Receiver<io::Result<CapturedStream>>,
+    cancel_flag: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl ReaderHandle {
+    fn cancel(&self) {
+        self.cancel_flag.store(true, Ordering::Release);
+    }
+
+    fn join_within(mut self, deadline: Duration) -> io::Result<CapturedStream> {
+        let result = match self.result.recv_timeout(deadline) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => {
+                self.cancel();
+                self.join.take();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "output reader did not finish within the cleanup deadline",
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other(
+                    "output reader thread terminated unexpectedly",
+                ));
+            }
+        }?;
+        self.join
+            .take()
+            .ok_or_else(|| io::Error::other("output reader join handle is missing"))?
+            .join()
+            .map_err(|_| io::Error::other("output reader thread panicked"))?;
+        Ok(result)
     }
 }
 
@@ -587,45 +725,69 @@ fn spawn_reader<R: Read + Send + 'static>(
     mut reader: R,
     limit: usize,
     mut writer: Option<Box<dyn Write + Send>>,
-) -> JoinHandle<io::Result<CapturedStream>> {
-    thread::spawn(move || {
-        let mut captured = Vec::with_capacity(limit.min(8192));
-        let mut byte_count = 0_u64;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0_u8; 8192];
-        let mut truncated = false;
-        let mut write_error = None;
-        loop {
-            let read = reader.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            byte_count = byte_count.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-            hasher.update(&buffer[..read]);
-            if let Some(writer) = writer.as_mut() {
-                if let Err(error) = writer
-                    .write_all(&buffer[..read])
-                    .and_then(|_| writer.flush())
-                {
-                    if write_error.is_none() {
-                        write_error = Some(io::Error::new(error.kind(), error.to_string()));
-                    }
+) -> ReaderHandle {
+    let (sender, result) = mpsc::sync_channel(1);
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let thread_cancel_flag = Arc::clone(&cancel_flag);
+    let join = thread::spawn(move || {
+        let result = read_stream(&mut reader, limit, &mut writer, &thread_cancel_flag);
+        let _ = sender.send(result);
+    });
+    ReaderHandle {
+        result,
+        cancel_flag,
+        join: Some(join),
+    }
+}
+
+fn read_stream<R: Read>(
+    reader: &mut R,
+    limit: usize,
+    writer: &mut Option<Box<dyn Write + Send>>,
+    cancel_flag: &AtomicBool,
+) -> io::Result<CapturedStream> {
+    let mut captured = Vec::with_capacity(limit.min(8192));
+    let mut byte_count = 0_u64;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    let mut truncated = false;
+    let mut write_error = None;
+    loop {
+        if cancel_flag.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "output reader cancellation requested",
+            ));
+        }
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        byte_count = byte_count.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        hasher.update(&buffer[..read]);
+        if let Some(writer) = writer.as_mut() {
+            if let Err(error) = writer
+                .write_all(&buffer[..read])
+                .and_then(|_| writer.flush())
+            {
+                if write_error.is_none() {
+                    write_error = Some(io::Error::new(error.kind(), error.to_string()));
                 }
             }
-            let remaining = limit.saturating_sub(captured.len());
-            let kept = remaining.min(read);
-            captured.extend_from_slice(&buffer[..kept]);
-            truncated |= kept < read;
         }
-        if let Some(error) = write_error {
-            return Err(error);
-        }
-        Ok(CapturedStream {
-            bytes: captured,
-            byte_count,
-            full_digest: digest_from_hasher(hasher),
-            truncated,
-        })
+        let remaining = limit.saturating_sub(captured.len());
+        let kept = remaining.min(read);
+        captured.extend_from_slice(&buffer[..kept]);
+        truncated |= kept < read;
+    }
+    if let Some(error) = write_error {
+        return Err(error);
+    }
+    Ok(CapturedStream {
+        bytes: captured,
+        byte_count,
+        full_digest: digest_from_hasher(hasher),
+        truncated,
     })
 }
 
@@ -642,12 +804,6 @@ fn digest_from_hasher(hasher: Sha256) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     format!("sha256:{hex}")
-}
-
-fn join_reader(reader: JoinHandle<io::Result<CapturedStream>>) -> io::Result<CapturedStream> {
-    reader
-        .join()
-        .map_err(|_| io::Error::other("output reader thread panicked"))?
 }
 
 #[cfg(unix)]
@@ -868,7 +1024,7 @@ mod tests {
             Ok(GracefulStop::Unsupported)
         }
 
-        fn force_stop_and_wait(&mut self) -> io::Result<Option<ExitOutcome>> {
+        fn force_stop_and_wait(&mut self, _deadline: Duration) -> io::Result<Option<ExitOutcome>> {
             self.state.lock().expect("state").forced += 1;
             if matches!(self.behavior, FakeBehavior::CleanupFailure) {
                 return Err(io::Error::other("injected cleanup failure"));
@@ -884,7 +1040,10 @@ mod tests {
             Ok(())
         }
 
-        fn collect_output(self: Box<Self>) -> io::Result<(CapturedStream, CapturedStream)> {
+        fn collect_output(
+            self: Box<Self>,
+            _deadline: Duration,
+        ) -> io::Result<(CapturedStream, CapturedStream)> {
             let stream = CapturedStream::from_captured(b"fixture".to_vec(), false);
             Ok((stream.clone(), stream))
         }
@@ -995,7 +1154,7 @@ mod tests {
 
     #[test]
     fn uncertain_cleanup_is_never_returned_as_result() {
-        let (supervisor, _, _) = supervisor(FakeBehavior::CleanupFailure);
+        let (supervisor, state, _) = supervisor(FakeBehavior::CleanupFailure);
         let mut request = request();
         request.timeout = Duration::from_millis(2);
         let guard = GenerationGuard::new(request.identity.clone());
@@ -1005,10 +1164,11 @@ mod tests {
             .expect_err("cleanup failure must fail closed");
 
         assert!(matches!(error, ProcessError::CleanupUncertain { .. }));
+        assert_eq!(state.lock().expect("state").sealed, 1);
     }
 
     #[test]
-    fn characterizes_monitor_failure_skipping_cleanup_before_t4() {
+    fn monitor_failure_attempts_bounded_cleanup_before_failing_closed() {
         let (supervisor, state, _) = supervisor(FakeBehavior::MonitorFailure);
         let request = request();
         let guard = GenerationGuard::new(request.identity.clone());
@@ -1019,9 +1179,9 @@ mod tests {
 
         assert!(matches!(error, ProcessError::Monitor(_)));
         let state = state.lock().expect("state");
-        assert_eq!(state.graceful, 0);
-        assert_eq!(state.forced, 0);
-        assert_eq!(state.sealed, 0);
+        assert_eq!(state.graceful, 1);
+        assert_eq!(state.forced, 1);
+        assert_eq!(state.sealed, 1);
     }
 
     #[test]
@@ -1111,11 +1271,49 @@ mod tests {
             32,
             Some(Box::new(FailingWriter)),
         )
-        .join()
-        .expect("reader thread")
+        .join_within(Duration::from_secs(1))
         .expect_err("tee failure");
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn blocked_reader_join_is_bounded_and_worker_can_finish_after_release() {
+        struct GateReader {
+            released: Arc<AtomicBool>,
+            finished: Arc<AtomicBool>,
+        }
+
+        impl Read for GateReader {
+            fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+                while !self.released.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+                self.finished.store(true, Ordering::Release);
+                Ok(0)
+            }
+        }
+
+        let released = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let error = spawn_reader(
+            GateReader {
+                released: Arc::clone(&released),
+                finished: Arc::clone(&finished),
+            },
+            32,
+            None,
+        )
+        .join_within(Duration::from_millis(2))
+        .expect_err("blocked reader must respect the join deadline");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        released.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while !finished.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(finished.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1128,16 +1326,14 @@ mod tests {
             6,
             Some(Box::new(stdout_sink.clone())),
         )
-        .join()
-        .expect("stdout thread")
+        .join_within(Duration::from_secs(1))
         .expect("stdout reader");
         let stderr = spawn_reader(
             Cursor::new(b"stderr-bytes".to_vec()),
             6,
             Some(Box::new(stderr_sink.clone())),
         )
-        .join()
-        .expect("stderr thread")
+        .join_within(Duration::from_secs(1))
         .expect("stderr reader");
 
         assert_eq!(stdout.bytes, b"stdout".to_vec());
@@ -1155,16 +1351,14 @@ mod tests {
             13,
             None,
         )
-        .join()
-        .expect("first reader thread")
+        .join_within(Duration::from_secs(1))
         .expect("first stream");
         let second = spawn_reader(
             Cursor::new(b"shared-prefix-second-suffix".to_vec()),
             13,
             None,
         )
-        .join()
-        .expect("second reader thread")
+        .join_within(Duration::from_secs(1))
         .expect("second stream");
 
         assert_eq!(first.bytes, second.bytes);

@@ -521,10 +521,13 @@ Exit gate:
 Status (candidate slice 2026-08-19): process readers now retain only a bounded
 preview while hashing and counting the complete stdout/stderr streams. Receipt
 output digests bind those full-stream digests and byte counts, so equal previews
-with different suffixes cannot collide. Deterministic tests cover the invariant
-and all existing contracts pass. This does **not** yet close T4: total wall
-deadlines, interruptible reader joins, RAII finalization, and native fault-path
-qualification remain pending.
+with different suffixes cannot collide. A single wall deadline now bounds the
+execution and cleanup sub-budgets; pipe-reader joins are bounded; and monitor or
+force-stop failures still attempt descendant cleanup before failing closed.
+Deterministic process tests cover these invariants and the full locked Rust
+suite passes. This does **not** yet close T4: RAII finalization, stronger
+interruptible drain semantics, native fault-path qualification, and exact-head
+OrbStack evidence for this new candidate remain pending.
 
 Deliverables:
 
