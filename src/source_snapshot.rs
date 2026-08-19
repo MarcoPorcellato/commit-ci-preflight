@@ -23,8 +23,12 @@ use crate::receipt::canonical_digest;
 
 pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: &str = "1.0";
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
-const TREE_CAPTURE_LIMIT: usize = 16 * 1024 * 1024;
-const BLOB_CAPTURE_LIMIT: usize = 128 * 1024 * 1024;
+// ProcessSupervisor deliberately caps every captured child stream at one MiB.
+// Snapshot materialization uses the same bound so oversized Git objects fail
+// closed instead of bypassing the supervisor's capture contract.
+const GIT_CAPTURE_LIMIT: usize = 1_048_576;
+const TREE_CAPTURE_LIMIT: usize = GIT_CAPTURE_LIMIT;
+const BLOB_CAPTURE_LIMIT: usize = GIT_CAPTURE_LIMIT;
 const MAX_ENTRIES: usize = 50_000;
 const LFS_HEADER: &[u8] = b"version https://git-lfs.github.com/spec/v1\n";
 
