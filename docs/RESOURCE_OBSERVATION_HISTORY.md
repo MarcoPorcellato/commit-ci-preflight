@@ -60,6 +60,13 @@ Direct argv beginning with `docker --context orbstack` or
 Make targets must pass explicit context because CCP intentionally does not
 inspect script contents, environment values, runtime APIs, or container state.
 
+`guard exec` starts its child in CCP's current working directory. Invoke the
+wrapper from the repository or workspace under test so relative paths, test
+discovery, and project configuration remain comparable. If a build tool is
+selected with an explicit manifest path, that does not change CCP's working
+directory; keep the shell in the target workspace and point only the build tool
+at its manifest.
+
 Do not wrap a command that recursively invokes another CCP `run`, `benchmark`
 or `guard exec`. Host-wide admission is intentionally non-reentrant: the inner
 command waits for the outer command's slot. Run CCP's own full test suite

@@ -37,8 +37,9 @@ schema, busy state, queue count, and opaque ticket identifiers.
 
 For long-running local workflows that should not go through receipt creation,
 use `commit-ci-preflight guard exec -- <program> [args...]`. It is shell-free,
-inherits the caller environment, keeps stdout/stderr separate, waits for the
-same admission slot with a bounded queue timeout, and uses a separate bounded
+inherits the caller environment and current working directory, keeps
+stdout/stderr separate, waits for the same admission slot with a bounded queue
+timeout, and uses a separate bounded
 child runtime timeout. Both guard timeouts default to six hours, are capped at
 24 hours, and can be selected independently with
 `--admission-timeout-seconds` and `--timeout-seconds`.
