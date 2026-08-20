@@ -878,6 +878,7 @@ fn acquire_advisory_lock(path: &Path, label: &'static str) -> Result<Arc<File>, 
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
         .map_err(CacheError::Io)?;
     if let Err(error) = file.try_lock_exclusive() {
