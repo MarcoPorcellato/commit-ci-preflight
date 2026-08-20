@@ -15,6 +15,12 @@ Semantic Versioning after its first public release.
   mounts and rejects missing, symlinked, escaped, replaced, oversized, or
   over-count output before cache promotion or receipt sealing. Disk and
   runtime-resource contracts and native qualification remain pending.
+- T8 storage-capacity sub-slice: schema `1.2` binds an explicit retained-free,
+  receipt/journal, cache-growth, and declared-artifact allowance into the plan.
+  Local runs preflight the CCP-owned cache-root filesystem before Git, runtime,
+  or workspace work and fail closed without inspecting or deleting unowned
+  data. Inode reservation, owned cache-total enforcement, runtime-resource
+  capability evidence, and native qualification remain pending.
 - Receipt v2 now embeds the complete normalized public execution plan and
   rejects a configuration digest that does not match it. Policy `1.1`
   independently reconstructs a regular policy-relative trusted configuration,

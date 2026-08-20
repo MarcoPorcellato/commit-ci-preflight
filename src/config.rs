@@ -32,6 +32,8 @@ pub const MAX_TIMEOUT_SECONDS: u64 = 86_400;
 pub const MAX_MEMORY_MIB: u64 = 262_144;
 pub const MAX_CPU_COUNT: u16 = 256;
 pub const MAX_PIDS: u32 = 65_536;
+pub const MAX_STORAGE_BYTES: u64 = 1_099_511_627_776;
+const MIN_RECEIPT_JOURNAL_RESERVE_BYTES: u64 = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -45,6 +47,8 @@ pub struct ConfigV1 {
     pub environment: EnvironmentConfig,
     #[serde(default)]
     pub caches: Vec<CacheConfig>,
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
     pub checks: Vec<CheckConfig>,
 }
 
@@ -108,6 +112,14 @@ pub struct CacheConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct StorageConfig {
+    pub min_free_bytes: u64,
+    pub receipt_journal_reserve_bytes: u64,
+    pub max_cache_growth_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CheckConfig {
     pub id: String,
     pub required: bool,
@@ -155,6 +167,8 @@ pub struct ExecutionPlanV1 {
     pub receipt: NormalizedReceipt,
     pub environment: NormalizedEnvironment,
     pub caches: Vec<NormalizedCache>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<NormalizedStorage>,
     pub checks: Vec<NormalizedCheck>,
 }
 
@@ -223,6 +237,15 @@ pub struct NormalizedCache {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct NormalizedStorage {
+    pub min_free_bytes: u64,
+    pub receipt_journal_reserve_bytes: u64,
+    pub max_cache_growth_bytes: u64,
+    pub max_artifact_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedCheck {
     pub id: String,
     pub required: bool,
@@ -282,6 +305,7 @@ impl ConfigV1 {
         let caches = normalize_caches(self.caches)?;
         let environment = normalize_environment(&schema_version, self.environment, &caches)?;
         let checks = normalize_checks(self.checks)?;
+        let storage = normalize_storage(&schema_version, self.storage, &checks)?;
         let receipt = NormalizedReceipt {
             output: self.receipt.output,
             freshness_seconds: self.receipt.freshness_seconds,
@@ -301,6 +325,7 @@ impl ConfigV1 {
             receipt,
             environment,
             caches,
+            storage,
             checks,
         };
         let plan_digest = canonical_digest(&plan).map_err(ConfigError::Receipt)?;
@@ -312,7 +337,10 @@ impl ConfigV1 {
     }
 
     fn validate_top_level(&self) -> Result<(), ConfigError> {
-        if self.schema_version != CONFIG_SCHEMA_VERSION && self.schema_version != "1.1" {
+        if !matches!(
+            self.schema_version.as_str(),
+            CONFIG_SCHEMA_VERSION | "1.1" | "1.2"
+        ) {
             return Err(ConfigError::UnsupportedSchemaVersion(
                 self.schema_version.clone(),
             ));
@@ -442,6 +470,65 @@ fn normalize_checks(checks: Vec<CheckConfig>) -> Result<Vec<NormalizedCheck>, Co
 
     validate_dependencies(&by_id)?;
     topological_checks(&by_id)
+}
+
+fn normalize_storage(
+    schema_version: &str,
+    storage: Option<StorageConfig>,
+    checks: &[NormalizedCheck],
+) -> Result<Option<NormalizedStorage>, ConfigError> {
+    if schema_version != "1.2" {
+        if storage.is_some() {
+            return Err(ConfigError::InvalidField("storage"));
+        }
+        return Ok(None);
+    }
+    let storage = storage.ok_or(ConfigError::MissingStoragePolicy)?;
+    validate_bounded(
+        "storage.min_free_bytes",
+        storage.min_free_bytes,
+        1,
+        MAX_STORAGE_BYTES,
+    )?;
+    validate_bounded(
+        "storage.receipt_journal_reserve_bytes",
+        storage.receipt_journal_reserve_bytes,
+        MIN_RECEIPT_JOURNAL_RESERVE_BYTES,
+        MAX_STORAGE_BYTES,
+    )?;
+    validate_bounded(
+        "storage.max_cache_growth_bytes",
+        storage.max_cache_growth_bytes,
+        0,
+        MAX_STORAGE_BYTES,
+    )?;
+    let max_artifact_bytes = checks
+        .iter()
+        .flat_map(|check| check.artifact_contracts.iter())
+        .try_fold(0_u64, |total, artifact| {
+            total.checked_add(artifact.max_bytes)
+        })
+        .ok_or(ConfigError::InvalidField("storage.max_artifact_bytes"))?;
+    let required = storage
+        .min_free_bytes
+        .checked_add(storage.receipt_journal_reserve_bytes)
+        .and_then(|total| total.checked_add(storage.max_cache_growth_bytes))
+        .and_then(|total| total.checked_add(max_artifact_bytes))
+        .ok_or(ConfigError::InvalidField("storage"))?;
+    if required > MAX_STORAGE_BYTES {
+        return Err(ConfigError::OutOfRange {
+            field: "storage.required_free_bytes",
+            minimum: 1,
+            maximum: MAX_STORAGE_BYTES,
+            actual: required,
+        });
+    }
+    Ok(Some(NormalizedStorage {
+        min_free_bytes: storage.min_free_bytes,
+        receipt_journal_reserve_bytes: storage.receipt_journal_reserve_bytes,
+        max_cache_growth_bytes: storage.max_cache_growth_bytes,
+        max_artifact_bytes,
+    }))
 }
 
 fn validate_path_isolation(
@@ -709,7 +796,7 @@ fn normalize_environment(
     {
         return Err(ConfigError::InvalidField("environment"));
     }
-    if schema_version == "1.1" && !inherit.is_empty() {
+    if schema_version != CONFIG_SCHEMA_VERSION && !inherit.is_empty() {
         return Err(ConfigError::InvalidField("environment.allow"));
     }
 
@@ -885,6 +972,7 @@ pub enum ConfigError {
         name: String,
         cache_id: String,
     },
+    MissingStoragePolicy,
     DependencyCycle(Vec<String>),
     PlanDigestMismatch,
 }
@@ -920,6 +1008,9 @@ impl fmt::Display for ConfigError {
                 formatter,
                 "runtime-internal environment {name} references unknown cache {cache_id}"
             ),
+            Self::MissingStoragePolicy => {
+                write!(formatter, "schema 1.2 requires an explicit storage policy")
+            }
             Self::OutOfRange {
                 field,
                 minimum,
@@ -1212,6 +1303,134 @@ timeout_seconds = 60
         assert!(matches!(
             ConfigV1::parse(&input).and_then(ConfigV1::into_plan),
             Err(ConfigError::UnknownEnvironmentCache { .. })
+        ));
+    }
+
+    #[test]
+    fn v1_2_storage_policy_is_explicit_and_normalized_into_the_plan() {
+        let input = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.2\"")
+            + r#"
+
+[storage]
+min_free_bytes = 1073741824
+receipt_journal_reserve_bytes = 1048576
+max_cache_growth_bytes = 2147483648
+"#;
+
+        let plan = ConfigV1::parse(&input)
+            .and_then(ConfigV1::into_plan)
+            .expect("v1.2 storage plan");
+
+        let storage = plan.plan.storage.expect("storage policy");
+        assert_eq!(storage.min_free_bytes, 1_073_741_824);
+        assert_eq!(storage.receipt_journal_reserve_bytes, 1_048_576);
+        assert_eq!(storage.max_cache_growth_bytes, 2_147_483_648);
+        assert_eq!(storage.max_artifact_bytes, 0);
+    }
+
+    #[test]
+    fn v1_2_storage_policy_is_required_and_bounded() {
+        let missing = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.2\"");
+        assert!(matches!(
+            ConfigV1::parse(&missing).and_then(ConfigV1::into_plan),
+            Err(ConfigError::MissingStoragePolicy)
+        ));
+
+        let invalid = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.2\"")
+            + r#"
+
+[storage]
+min_free_bytes = 0
+receipt_journal_reserve_bytes = 1048576
+max_cache_growth_bytes = 2147483648
+"#;
+        assert!(matches!(
+            ConfigV1::parse(&invalid).and_then(ConfigV1::into_plan),
+            Err(ConfigError::OutOfRange {
+                field: "storage.min_free_bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn v1_2_storage_policy_changes_the_plan_digest() {
+        let base = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.2\"")
+            + r#"
+
+[storage]
+min_free_bytes = 1073741824
+receipt_journal_reserve_bytes = 1048576
+max_cache_growth_bytes = 2147483648
+"#;
+        let changed = base.replace(
+            "max_cache_growth_bytes = 2147483648",
+            "max_cache_growth_bytes = 3221225472",
+        );
+
+        let first = ConfigV1::parse(&base)
+            .and_then(ConfigV1::into_plan)
+            .expect("first plan");
+        let second = ConfigV1::parse(&changed)
+            .and_then(ConfigV1::into_plan)
+            .expect("second plan");
+
+        assert_ne!(first.plan_digest, second.plan_digest);
+    }
+
+    #[test]
+    fn v1_2_storage_policy_derives_declared_artifact_allowance() {
+        let check = check("report", &[]).replace(
+            "depends_on = []",
+            r#"depends_on = []
+artifacts = ["results/report.json"]
+
+[[checks.artifact_contracts]]
+path = "results/report.json"
+kind = "regular-file"
+max_bytes = 4096
+max_entries = 1"#,
+        );
+        let input = valid_config(&check)
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.2\"")
+            + r#"
+
+[storage]
+min_free_bytes = 100
+receipt_journal_reserve_bytes = 4096
+max_cache_growth_bytes = 0
+"#;
+
+        let plan = ConfigV1::parse(&input)
+            .and_then(ConfigV1::into_plan)
+            .expect("v1.2 storage plan");
+        assert_eq!(
+            plan.plan
+                .storage
+                .expect("storage policy")
+                .max_artifact_bytes,
+            4096
+        );
+    }
+
+    #[test]
+    fn storage_policy_is_rejected_by_historical_schema_versions() {
+        let input = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.1\"")
+            + r#"
+
+[storage]
+min_free_bytes = 1073741824
+receipt_journal_reserve_bytes = 1048576
+max_cache_growth_bytes = 0
+"#;
+        assert!(matches!(
+            ConfigV1::parse(&input).and_then(ConfigV1::into_plan),
+            Err(ConfigError::InvalidField("storage"))
         ));
     }
 

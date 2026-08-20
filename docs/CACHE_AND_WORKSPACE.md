@@ -104,6 +104,18 @@ The default reporting budget is 20 GiB and can be overridden with
 `--disk-budget-bytes`. Exceeding the budget is reported; it does not trigger
 automatic eviction.
 
+## Schema 1.2 capacity preflight
+
+The inventory budget remains reporting-only. A schema `1.2` `[storage]` policy
+is separate: immediately before a local run begins its Git/runtime/workspace
+work, CCP probes free bytes on the selected CCP-owned cache-root filesystem.
+It requires the declared retained-free reserve, receipt/journal reserve,
+maximum cache growth, and the sum of declared artifact bounds. Insufficient or
+unreadable capacity is a fail-closed preflight error; it does not choose files
+for deletion and it does not mutate cache generations. See
+[`CONFIGURATION.md`](CONFIGURATION.md#storage-capacity-policy) for the exact
+contract and digest boundary.
+
 ## Cleanup safety
 
 ```console

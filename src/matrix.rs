@@ -245,6 +245,7 @@ impl MatrixConfigV2 {
                 receipt: self.receipt.clone(),
                 environment: self.environment.as_v1(),
                 caches: self.caches.clone(),
+                storage: None,
                 checks: group_checks,
             }
             .into_plan()
@@ -293,6 +294,7 @@ impl MatrixPlanEnvelopeV2 {
                 receipt: self.plan.receipt.clone(),
                 environment: self.plan.environment.clone(),
                 caches: self.plan.caches.clone(),
+                storage: None,
                 checks: runtime.checks.clone(),
             };
             let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;

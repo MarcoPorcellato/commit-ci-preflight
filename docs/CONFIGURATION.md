@@ -4,8 +4,9 @@
 
 `.commit-ci-preflight.toml` schema `1.0` remains supported for legacy planning,
 runtime diagnosis, deterministic container argv rendering, and local execution.
-Schema `1.1` adds explicit environment classes for the same single-runtime
-contract; it does not change the separate v2 matrix schema.
+Schema `1.1` adds explicit environment classes. Schema `1.2` additionally
+requires an explicit storage-capacity policy for the same single-runtime
+contract; neither changes the separate v2 matrix schema.
 `doctor` performs only the bounded runtime probe described in `docs/RUNTIME.md`;
 `run` performs the separately documented execution flow in `docs/LOCAL_RUN.md`.
 
@@ -40,12 +41,13 @@ starting the runtime.
 
 | Field | Requirement |
 |---|---|
-| `schema_version` | `1.0`, or `1.1` for explicit environment classes |
+| `schema_version` | `1.0`, `1.1` for explicit environment classes, or `1.2` for an explicit storage policy |
 | `project` | Logical `owner/name`; never a URL or credential-bearing remote |
 | `runtime` | Required runtime type, pinned image, and resource limits |
 | `receipt` | Optional output/freshness table with fail-safe defaults |
 | `environment` | Optional environment contract; `1.0` permits legacy `allow`, while `1.1` uses `fixed`, `runtime_internal`, and `remote_secret_only` |
 | `caches` | Up to 32 unique logical caches |
+| `storage` | Required only by `1.2`; preflight reserve and bounded owned-growth declaration |
 | `checks` | 1–128 explicit checks |
 
 ## Runtime
@@ -142,6 +144,33 @@ does not copy artifact contents into the receipt or expose a host path.
 See [`CACHE_AND_WORKSPACE.md`](CACHE_AND_WORKSPACE.md) for cache-root
 precedence, ownership, persistence, inventory, and cleanup rules.
 
+### Storage-capacity policy
+
+Schema `1.2` requires one explicit policy. It is normalized into the plan and
+therefore changes the plan digest and any snapshot-backed receipt v2.
+
+```toml
+schema_version = "1.2"
+
+[storage]
+min_free_bytes = 1073741824          # Keep at least 1 GiB free after the declared run allowance.
+receipt_journal_reserve_bytes = 1048576 # Reserve 1 MiB for CCP receipt and journal writes.
+max_cache_growth_bytes = 2147483648  # Bound new CCP-managed cache growth for this run.
+```
+
+The policy does not request deletion or make a prediction about arbitrary
+project writes. Before Git inspection, runtime probing, workspace creation, or
+container execution, CCP calculates the required free capacity as:
+
+`min_free_bytes + receipt_journal_reserve_bytes + max_cache_growth_bytes + sum(artifact_contract.max_bytes)`.
+
+The probe is performed only against the already-owned CCP cache root. A probe
+failure, an arithmetic overflow, or insufficient free capacity fails closed;
+CCP does not evict, delete, or inspect unowned files. The dynamic free-space
+sample is deliberately not included in a receipt: it is host-specific and is
+not execution evidence. Schema `1.0` and `1.1` reject a `[storage]` table so
+they retain their historical contract unchanged.
+
 ## Environment classes and privacy
 
 Schema `1.0` retains `environment.allow` as a legacy host-inheritance
@@ -165,7 +194,8 @@ checks that digest immediately before rendering the process environment.
 ## Plan digest
 
 The digest covers the normalized schema version, project, runtime, receipt
-policy, environment names, caches, ordered checks, and artifact contracts. It uses the same CCP
-canonical JSON v1 profile described in `docs/RECEIPT_SPEC.md`.
+policy, environment names, caches, schema-`1.2` storage policy, ordered checks,
+and artifact contracts. It uses the same CCP canonical JSON v1 profile
+described in `docs/RECEIPT_SPEC.md`.
 
 The digest is integrity evidence, not a signature or identity attestation.

@@ -145,6 +145,16 @@
         },
         "schema_version": {
           "type": "string"
+        },
+        "storage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NormalizedStorage"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -450,6 +460,38 @@
         "name",
         "cache_id",
         "container_target"
+      ],
+      "type": "object"
+    },
+    "NormalizedStorage": {
+      "additionalProperties": false,
+      "properties": {
+        "max_artifact_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_cache_growth_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_free_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "receipt_journal_reserve_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "min_free_bytes",
+        "receipt_journal_reserve_bytes",
+        "max_cache_growth_bytes",
+        "max_artifact_bytes"
       ],
       "type": "object"
     },

@@ -65,6 +65,7 @@ use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
 };
 use commit_ci_preflight::source_snapshot::{SourceSnapshot, resolve_clean_head};
+use commit_ci_preflight::storage::{SystemStorageProbe, preflight as preflight_storage};
 use commit_ci_preflight::verify::{
     VerificationDecision, VerificationError, receipt_input_failure_report, system_evaluated_at_utc,
     validate_verification_policy_path, verify_receipt_document_for_policy_path,
@@ -855,6 +856,12 @@ fn print_run(
     }
     let root = resolve_cache_root(location)?;
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
+    if let Some(storage) = &envelope.plan.storage {
+        let storage_probe = SystemStorageProbe;
+        preflight_storage(storage, &cache.root().path, &storage_probe)
+            .map_err(RunError::Storage)
+            .map_err(CliError::Run)?;
+    }
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
     let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
     let journal_id = new_journal_id(&envelope.plan_digest, generation)?;
@@ -1269,7 +1276,9 @@ fn run_failure_kind(error: &RunError) -> RunFailureKindV1 {
     match error {
         RunError::ResourcePressure => RunFailureKindV1::ResourcePressure,
         RunError::StaleCommit => RunFailureKindV1::StaleCommit,
-        RunError::Workspace(_) | RunError::Cache(_) => RunFailureKindV1::PreparationFailed,
+        RunError::Workspace(_) | RunError::Cache(_) | RunError::Storage(_) => {
+            RunFailureKindV1::PreparationFailed
+        }
         RunError::Runtime(_) | RunError::Process(_) => RunFailureKindV1::ExecutionFailed,
         RunError::Receipt(_) | RunError::UnsafeReceiptPath => RunFailureKindV1::FinalizationFailed,
         RunError::Invariant(_) => RunFailureKindV1::Invariant,

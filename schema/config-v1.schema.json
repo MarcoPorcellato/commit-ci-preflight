@@ -29,6 +29,16 @@
     },
     "schema_version": {
       "type": "string"
+    },
+    "storage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StorageConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -252,6 +262,32 @@
       "enum": [
         "docker_compatible",
         "host"
+      ]
+    },
+    "StorageConfig": {
+      "type": "object",
+      "properties": {
+        "max_cache_growth_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "min_free_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "receipt_journal_reserve_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min_free_bytes",
+        "receipt_journal_reserve_bytes",
+        "max_cache_growth_bytes"
       ]
     }
   }
