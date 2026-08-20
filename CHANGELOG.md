@@ -86,6 +86,8 @@ Semantic Versioning after its first public release.
 - Complete cross-repository adoption and safe-recovery documentation, including
   a pinned-verifier GitHub gate template that keeps adopting-repository policy,
   CCP source, and commit-bound evidence in separate trust domains.
+- Drafted a vendor-neutral multi-harness integration design covering Codex,
+  Claude Code, and the other documented Superpowers-compatible environments.
 - Added a cross-activity coordination runbook covering host-wide admission
   ownership, lease-aware handoff, worktree isolation, and fail-closed recovery.
 - Default-on host-wide single-slot admission for heavy `run` and `benchmark`
