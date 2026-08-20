@@ -307,7 +307,7 @@ fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability
     capability_probe: &dyn RuntimeCapabilityProbe,
     runtime_preflight: Option<RuntimePreflight>,
 ) -> Result<RunOutcome, RunError> {
-    let (receipt, artifact_manifest) =
+    let (receipt, artifact_manifest, runtime_capability_evidence) =
         execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
             request,
             runtime,
@@ -337,6 +337,7 @@ fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability
                 platform: receipt.receipt.platform.clone(),
                 configuration_digest: receipt.receipt.configuration_digest.clone(),
                 execution_plan: request.envelope.plan.clone(),
+                runtime_capability_evidence: runtime_capability_evidence.clone(),
                 artifact_manifest: artifact_manifest.clone(),
                 checks: receipt.receipt.checks.clone(),
                 overall_status: receipt.receipt.overall_status,
@@ -390,7 +391,7 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         &capability_probe,
         None,
     )
-    .map(|(receipt, _)| receipt)
+    .map(|(receipt, _, _)| receipt)
 }
 
 fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
@@ -404,7 +405,14 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
     storage_probe: &dyn StorageProbe,
     capability_probe: &dyn RuntimeCapabilityProbe,
     runtime_preflight: Option<RuntimePreflight>,
-) -> Result<(ReceiptEnvelopeV1, Vec<crate::receipt::ArtifactEvidence>), RunError> {
+) -> Result<
+    (
+        ReceiptEnvelopeV1,
+        Vec<crate::receipt::ArtifactEvidence>,
+        Option<crate::runtime::RuntimeCapabilityEvidenceV1>,
+    ),
+    RunError,
+> {
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
     }
@@ -437,7 +445,7 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
         })?,
     };
     let runtime_probe = runtime_preflight.runtime_probe;
-    let _runtime_capability_evidence = runtime_preflight.capability_evidence;
+    let runtime_capability_evidence = runtime_preflight.capability_evidence;
     let identity = RunIdentity {
         project: request.envelope.plan.project.clone(),
         commit: None,
@@ -683,7 +691,7 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
         redaction_policy_version: REDACTION_POLICY_VERSION.to_owned(),
     })
     .map_err(RunError::Receipt)?;
-    Ok((receipt, artifact_manifest))
+    Ok((receipt, artifact_manifest, runtime_capability_evidence))
 }
 
 fn ensure_local_environment_allowed(envelope: &ExecutionPlanEnvelopeV1) -> Result<(), RunError> {
@@ -1770,6 +1778,95 @@ depends_on = ["first"]
             snapshot.evidence().entry_count
         );
         assert_eq!(outcome.receipt_v2, Some(decoded));
+    }
+
+    #[test]
+    fn schema_1_3_snapshot_run_seals_the_captured_runtime_capability_evidence() {
+        let mut fixture = RunFixture::new("schema-1-3-snapshot-v2");
+        fixture.envelope.plan.schema_version = "1.3".to_owned();
+        fixture.envelope.plan.runtime.pull_policy = Some(crate::config::RuntimePullPolicy::Never);
+        fixture.envelope.plan.runtime.swap_mode = Some(crate::config::RuntimeSwapMode::Disabled);
+        fixture.envelope.plan.storage = Some(crate::config::NormalizedStorage {
+            min_free_bytes: 1,
+            receipt_journal_reserve_bytes: 4096,
+            max_cache_growth_bytes: 0,
+            max_artifact_bytes: 0,
+        });
+        fixture.envelope.plan_digest =
+            canonical_digest(&fixture.envelope.plan).expect("schema 1.3 plan digest");
+        let supervisor = FakeSupervisor::new(ExecutionMode::Pass);
+        let commit = "a".repeat(40);
+        let identity = RunIdentity {
+            project: fixture.envelope.plan.project.clone(),
+            commit: Some(commit.clone()),
+            config_digest: fixture.envelope.plan_digest.clone(),
+            generation: "7".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let resource_root = fixture.root.join("source-snapshot");
+        let mut snapshot = SourceSnapshot::materialize(
+            &fixture.repository,
+            &commit,
+            &resource_root,
+            &supervisor,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("source snapshot");
+        snapshot
+            .prepare_mount_overlay(&fixture.envelope)
+            .expect("mount overlay");
+        let runtime_preflight = RuntimePreflight {
+            runtime_probe: Some(
+                ProbeOnlyRuntime
+                    .probe(
+                        &fixture.envelope,
+                        &supervisor,
+                        &fixture.repository,
+                        &CancellationToken::default(),
+                        &doctor_guard(&fixture.envelope),
+                    )
+                    .expect("runtime probe"),
+            ),
+            capability_evidence: Some(RuntimeCapabilityEvidenceV1 {
+                schema_version: "1.0".to_owned(),
+                memory_limit_supported: true,
+                swap_limit_supported: true,
+                context_digest: format!("sha256:{}", "b".repeat(64)),
+                resolved_image_id: format!("sha256:{}", "c".repeat(64)),
+                resolved_image_reference: fixture.envelope.plan.runtime.image.clone(),
+            }),
+        };
+        let mut barrier = NoopCompletionBarrier;
+        let mut lifecycle = NoopRunLifecycleObserver;
+        let outcome = execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight(
+            &RunRequest {
+                envelope: &fixture.envelope,
+                repository: &fixture.repository,
+                cache: &fixture.cache,
+                generation: 7,
+                source_snapshot: Some(&snapshot),
+            },
+            &DockerCompatibleRuntime,
+            &supervisor,
+            &CancellationToken::default(),
+            &FixedClock::new(),
+            &mut barrier,
+            &mut lifecycle,
+            runtime_preflight,
+        )
+        .expect("schema 1.3 snapshot run");
+
+        let receipt = outcome.receipt_v2.expect("v2 receipt");
+        assert_eq!(
+            receipt
+                .receipt
+                .runtime_capability_evidence
+                .expect("runtime capability evidence")
+                .resolved_image_reference,
+            fixture.envelope.plan.runtime.image
+        );
     }
 
     #[test]

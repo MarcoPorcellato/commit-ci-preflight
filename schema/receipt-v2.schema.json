@@ -677,6 +677,16 @@
         "run": {
           "$ref": "#/$defs/RunEvidence"
         },
+        "runtime_capability_evidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeCapabilityEvidenceV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "schema_version": {
           "type": "string"
         },
@@ -742,6 +752,38 @@
         "generation",
         "started_at_utc",
         "finished_at_utc"
+      ],
+      "type": "object"
+    },
+    "RuntimeCapabilityEvidenceV1": {
+      "additionalProperties": false,
+      "properties": {
+        "context_digest": {
+          "type": "string"
+        },
+        "memory_limit_supported": {
+          "type": "boolean"
+        },
+        "resolved_image_id": {
+          "type": "string"
+        },
+        "resolved_image_reference": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "swap_limit_supported": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "memory_limit_supported",
+        "swap_limit_supported",
+        "context_digest",
+        "resolved_image_id",
+        "resolved_image_reference"
       ],
       "type": "object"
     },

@@ -20,7 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::config::{ArtifactKind, ExecutionPlanV1};
+use crate::config::{ArtifactKind, ExecutionPlanV1, RuntimePullPolicy, RuntimeSwapMode};
+use crate::runtime::RuntimeCapabilityEvidenceV1;
 
 pub const RECEIPT_SCHEMA_VERSION: &str = "1.0";
 pub const RECEIPT_V2_SCHEMA_VERSION: &str = "2.0";
@@ -67,6 +68,8 @@ pub struct ReceiptV2 {
     pub platform: PlatformEvidence,
     pub configuration_digest: String,
     pub execution_plan: ExecutionPlanV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_capability_evidence: Option<RuntimeCapabilityEvidenceV1>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_manifest: Vec<ArtifactEvidence>,
     pub checks: Vec<CheckEvidence>,
@@ -262,6 +265,7 @@ impl ReceiptV2 {
                 actual: self.configuration_digest.clone(),
             });
         }
+        self.validate_runtime_capability_evidence()?;
         if self.execution_plan.checks.len() != self.checks.len() {
             return Err(ReceiptError::ExecutionPlanCheckMismatch(
                 "check set".to_owned(),
@@ -281,6 +285,50 @@ impl ReceiptV2 {
             }
         }
         self.validate_artifact_manifest()?;
+        Ok(())
+    }
+
+    fn validate_runtime_capability_evidence(&self) -> Result<(), ReceiptError> {
+        if self.execution_plan.schema_version == "1.3" {
+            if self.execution_plan.runtime.pull_policy != Some(RuntimePullPolicy::Never)
+                || self.execution_plan.runtime.swap_mode != Some(RuntimeSwapMode::Disabled)
+            {
+                return Err(ReceiptError::RuntimeCapabilityEvidenceMismatch);
+            }
+            let evidence = self
+                .runtime_capability_evidence
+                .as_ref()
+                .ok_or(ReceiptError::MissingRuntimeCapabilityEvidence)?;
+            if evidence.schema_version != "1.0"
+                || !evidence.memory_limit_supported
+                || !evidence.swap_limit_supported
+            {
+                return Err(ReceiptError::InvalidRuntimeCapabilityEvidence(
+                    "schema_version or capability booleans",
+                ));
+            }
+            validate_sha256(
+                "runtime_capability.context_digest",
+                &evidence.context_digest,
+            )
+            .map_err(|_| ReceiptError::InvalidRuntimeCapabilityEvidence("context_digest"))?;
+            validate_sha256(
+                "runtime_capability.resolved_image_id",
+                &evidence.resolved_image_id,
+            )
+            .map_err(|_| ReceiptError::InvalidRuntimeCapabilityEvidence("resolved_image_id"))?;
+            require_text(
+                "runtime_capability.resolved_image_reference",
+                &evidence.resolved_image_reference,
+            )?;
+            if evidence.resolved_image_reference != self.execution_plan.runtime.image {
+                return Err(ReceiptError::RuntimeCapabilityEvidenceMismatch);
+            }
+            return Ok(());
+        }
+        if self.runtime_capability_evidence.is_some() {
+            return Err(ReceiptError::UnexpectedRuntimeCapabilityEvidence);
+        }
         Ok(())
     }
 
@@ -703,6 +751,10 @@ pub enum ReceiptError {
     ExecutionPlanCheckMismatch(String),
     DuplicateArtifactEvidence(String),
     ArtifactManifestMismatch(String),
+    MissingRuntimeCapabilityEvidence,
+    UnexpectedRuntimeCapabilityEvidence,
+    InvalidRuntimeCapabilityEvidence(&'static str),
+    RuntimeCapabilityEvidenceMismatch,
 }
 
 impl fmt::Display for ReceiptError {
@@ -781,6 +833,23 @@ impl fmt::Display for ReceiptError {
                     "artifact evidence does not match the execution plan: {path}"
                 )
             }
+            Self::MissingRuntimeCapabilityEvidence => {
+                write!(
+                    formatter,
+                    "schema 1.3 receipt lacks runtime capability evidence"
+                )
+            }
+            Self::UnexpectedRuntimeCapabilityEvidence => write!(
+                formatter,
+                "historical receipt unexpectedly contains runtime capability evidence"
+            ),
+            Self::InvalidRuntimeCapabilityEvidence(field) => {
+                write!(formatter, "runtime capability evidence is invalid: {field}")
+            }
+            Self::RuntimeCapabilityEvidenceMismatch => write!(
+                formatter,
+                "runtime capability evidence does not match the execution plan"
+            ),
         }
     }
 }
@@ -915,6 +984,7 @@ timeout_seconds = 60
             },
             configuration_digest: canonical_digest(&execution_plan).expect("plan digest"),
             execution_plan,
+            runtime_capability_evidence: None,
             artifact_manifest: Vec::new(),
             checks: vec![CheckEvidence {
                 id: "rust-test".to_owned(),
@@ -933,6 +1003,106 @@ timeout_seconds = 60
             incomplete_reason: None,
             redaction_policy_version: "1".to_owned(),
         }
+    }
+
+    fn passing_schema_1_3_receipt() -> ReceiptV2 {
+        let execution_plan = ConfigV1::parse(
+            r#"
+schema_version = "1.3"
+project = "example/project"
+
+[runtime]
+kind = "docker_compatible"
+image = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+pull_policy = "never"
+swap_mode = "disabled"
+
+[storage]
+min_free_bytes = 1
+receipt_journal_reserve_bytes = 4096
+max_cache_growth_bytes = 0
+
+[[checks]]
+id = "rust-test"
+required = true
+argv = ["cargo", "test"]
+working_directory = "."
+timeout_seconds = 60
+"#,
+        )
+        .expect("config")
+        .into_plan()
+        .expect("plan")
+        .plan;
+        let mut receipt = passing_receipt_v2();
+        receipt.configuration_digest = canonical_digest(&execution_plan).expect("plan digest");
+        receipt.execution_plan = execution_plan;
+        receipt.runtime_capability_evidence = Some(RuntimeCapabilityEvidenceV1 {
+            schema_version: "1.0".to_owned(),
+            memory_limit_supported: true,
+            swap_limit_supported: true,
+            context_digest: digest('b'),
+            resolved_image_id: digest('c'),
+            resolved_image_reference: receipt.execution_plan.runtime.image.clone(),
+        });
+        receipt
+    }
+
+    #[test]
+    fn schema_1_3_receipt_requires_matching_runtime_capability_evidence() {
+        let mut receipt = passing_schema_1_3_receipt();
+        receipt.runtime_capability_evidence = None;
+
+        assert!(matches!(
+            receipt.validate(),
+            Err(ReceiptError::MissingRuntimeCapabilityEvidence)
+        ));
+    }
+
+    #[test]
+    fn historical_receipt_rejects_runtime_capability_evidence() {
+        let mut receipt = passing_receipt_v2();
+        receipt.runtime_capability_evidence = Some(RuntimeCapabilityEvidenceV1 {
+            schema_version: "1.0".to_owned(),
+            memory_limit_supported: true,
+            swap_limit_supported: true,
+            context_digest: digest('b'),
+            resolved_image_id: digest('c'),
+            resolved_image_reference: receipt.execution_plan.runtime.image.clone(),
+        });
+
+        assert!(matches!(
+            receipt.validate(),
+            Err(ReceiptError::UnexpectedRuntimeCapabilityEvidence)
+        ));
+    }
+
+    #[test]
+    fn schema_1_3_receipt_rejects_invalid_or_mismatched_runtime_capability_evidence() {
+        let mut receipt = passing_schema_1_3_receipt();
+        receipt
+            .runtime_capability_evidence
+            .as_mut()
+            .expect("evidence")
+            .resolved_image_reference = "example.invalid/other@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+        assert!(matches!(
+            receipt.validate(),
+            Err(ReceiptError::RuntimeCapabilityEvidenceMismatch)
+        ));
+
+        let mut receipt = passing_schema_1_3_receipt();
+        receipt
+            .runtime_capability_evidence
+            .as_mut()
+            .expect("evidence")
+            .context_digest = "sha256:not-a-digest".to_owned();
+        assert!(matches!(
+            receipt.validate(),
+            Err(ReceiptError::InvalidRuntimeCapabilityEvidence(_))
+        ));
     }
 
     #[test]

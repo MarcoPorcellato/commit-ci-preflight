@@ -87,6 +87,29 @@ fn generated_v2_schema_matches_pinned_contract_byte_for_byte() {
 }
 
 #[test]
+fn v2_schema_exposes_optional_runtime_capability_evidence() {
+    let schema: serde_json::Value =
+        serde_json::from_str(PINNED_V2_SCHEMA).expect("pinned schema parses");
+    let properties = &schema["$defs"]["ReceiptV2"]["properties"];
+
+    assert_eq!(
+        properties["runtime_capability_evidence"]["anyOf"][0]["$ref"],
+        "#/$defs/RuntimeCapabilityEvidenceV1"
+    );
+    assert_eq!(
+        properties["runtime_capability_evidence"]["anyOf"][1]["type"],
+        "null"
+    );
+    assert!(
+        !schema["$defs"]["ReceiptV2"]["required"]
+            .as_array()
+            .expect("required fields")
+            .iter()
+            .any(|field| field == "runtime_capability_evidence")
+    );
+}
+
+#[test]
 fn shared_v2_schema_accepts_both_receipt_families() {
     let schema: serde_json::Value =
         serde_json::from_str(PINNED_V2_SCHEMA).expect("pinned schema parses");
