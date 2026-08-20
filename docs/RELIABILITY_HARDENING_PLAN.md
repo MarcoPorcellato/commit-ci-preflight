@@ -578,6 +578,16 @@ without requiring unsafe stale-lock deletion. The locks do not by themselves
 recover an interrupted multi-cache promotion; that journal and recovery path
 remains pending.
 
+The journal candidate now records every prepared cache entry, its prior marker
+and manifest bytes, and an owned backup name before promotion begins. All
+entries are promoted while the journal remains present; backups and staging
+directories are removed only after the complete set succeeds. A later promoter
+can recover a prepared or partially promoted journal only after acquiring the
+same entry locks; ambiguous state returns a hard error and leaves evidence in
+place. This is still a candidate slice: durable manifest replacement,
+reflink/clonefile optimization, and a public cache-promotion outcome remain
+pending.
+
 Deliverables:
 
 - immutable last-known-good generations;

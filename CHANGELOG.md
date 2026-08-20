@@ -9,6 +9,11 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T5 journal candidate: multi-cache promotion now records an owned,
+  versioned journal before replacing any current generation, keeps backups
+  until every entry is promoted, and recovers an interrupted prepared journal
+  only while the corresponding advisory entry locks are available. Ambiguous
+  filesystem state remains fail-closed.
 - T5 recovery candidate: owned cache entries and promotion use advisory
   operating-system locks that are released automatically when the owning
   process exits; concurrent preparation of one cache entry and concurrent
