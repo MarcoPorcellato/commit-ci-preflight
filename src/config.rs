@@ -118,6 +118,24 @@ pub struct CheckConfig {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub artifact_contracts: Vec<ArtifactContractConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactContractConfig {
+    pub path: String,
+    pub kind: ArtifactKind,
+    pub max_bytes: u64,
+    pub max_entries: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactKind {
+    RegularFile,
+    Directory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -213,6 +231,18 @@ pub struct NormalizedCheck {
     pub timeout_seconds: u64,
     pub depends_on: Vec<String>,
     pub artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_contracts: Vec<NormalizedArtifactContract>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NormalizedArtifactContract {
+    pub path: String,
+    pub kind: ArtifactKind,
+    pub max_bytes: u64,
+    pub max_entries: u64,
+    pub producer_check: String,
 }
 
 impl ConfigV1 {
@@ -400,6 +430,7 @@ fn normalize_checks(checks: Vec<CheckConfig>) -> Result<Vec<NormalizedCheck>, Co
         if check.artifacts.iter().any(|artifact| artifact == ".") {
             return Err(ConfigError::InvalidField("check.artifacts"));
         }
+        validate_artifact_contracts(&check)?;
         let id = check.id.clone();
         if by_id.insert(id.clone(), check).is_some() {
             return Err(ConfigError::DuplicateId {
@@ -425,16 +456,20 @@ fn validate_path_isolation(
         reject_path_overlap(&cache.mount_path, &receipt.output)?;
     }
 
-    let mut artifacts = BTreeSet::new();
+    let mut artifacts: BTreeSet<&str> = BTreeSet::new();
     for check in checks {
         for artifact in &check.artifacts {
-            if !artifacts.insert(artifact.as_str()) {
+            if artifacts.contains(artifact.as_str()) {
                 return Err(ConfigError::DuplicateArtifact(artifact.clone()));
+            }
+            for other in &artifacts {
+                reject_path_overlap(artifact, other)?;
             }
             reject_path_overlap(artifact, &receipt.output)?;
             for cache in caches {
                 reject_path_overlap(artifact, &cache.mount_path)?;
             }
+            artifacts.insert(artifact.as_str());
         }
     }
     Ok(())
@@ -547,7 +582,53 @@ fn normalize_check(check: &CheckConfig) -> NormalizedCheck {
         timeout_seconds: check.timeout_seconds,
         depends_on: check.depends_on.clone(),
         artifacts: check.artifacts.clone(),
+        artifact_contracts: check
+            .artifact_contracts
+            .iter()
+            .map(|artifact| NormalizedArtifactContract {
+                path: artifact.path.clone(),
+                kind: artifact.kind,
+                max_bytes: artifact.max_bytes,
+                max_entries: artifact.max_entries,
+                producer_check: check.id.clone(),
+            })
+            .collect(),
     }
+}
+
+fn validate_artifact_contracts(check: &CheckConfig) -> Result<(), ConfigError> {
+    let mut paths = BTreeSet::new();
+    for artifact in &check.artifact_contracts {
+        validate_relative_path("check.artifact_contracts.path", &artifact.path)?;
+        if artifact.path == "." || !check.artifacts.contains(&artifact.path) {
+            return Err(ConfigError::InvalidField("check.artifact_contracts.path"));
+        }
+        if !paths.insert(&artifact.path) {
+            return Err(ConfigError::DuplicateValue("check.artifact_contracts.path"));
+        }
+        validate_bounded(
+            "check.artifact_contracts.max_bytes",
+            artifact.max_bytes,
+            1,
+            1_073_741_824,
+        )?;
+        let maximum_entries = match artifact.kind {
+            ArtifactKind::RegularFile => 1,
+            ArtifactKind::Directory => 10_000,
+        };
+        validate_bounded(
+            "check.artifact_contracts.max_entries",
+            artifact.max_entries,
+            1,
+            maximum_entries,
+        )?;
+        if artifact.kind == ArtifactKind::RegularFile && artifact.max_entries != 1 {
+            return Err(ConfigError::InvalidField(
+                "check.artifact_contracts.max_entries",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn unique_sorted<F>(
@@ -1200,6 +1281,60 @@ timeout_seconds = 60
         assert!(matches!(
             ConfigV1::parse(&duplicate_artifact).and_then(ConfigV1::into_plan),
             Err(ConfigError::DuplicateArtifact(path)) if path == "build/output"
+        ));
+
+        let nested_artifacts = valid_config(
+            &(check("parent", &[]).replace(
+                "depends_on = []",
+                "depends_on = []\nartifacts = [\"build/reports\"]",
+            ) + &check("child", &[]).replace(
+                "depends_on = []",
+                "depends_on = []\nartifacts = [\"build/reports/result.json\"]",
+            )),
+        );
+        assert!(matches!(
+            ConfigV1::parse(&nested_artifacts).and_then(ConfigV1::into_plan),
+            Err(ConfigError::PathOverlap { .. })
+        ));
+    }
+
+    #[test]
+    fn artifact_contract_requires_a_bounded_regular_file_owned_by_its_check() {
+        let input = valid_config(&check("test", &[])).replace(
+            "depends_on = []",
+            "depends_on = []\nartifacts = [\"results/report.json\"]\n\n[[checks.artifact_contracts]]\npath = \"results/report.json\"\nkind = \"regular-file\"\nmax_bytes = 1048576\nmax_entries = 1",
+        );
+        let plan = ConfigV1::parse(&input)
+            .and_then(ConfigV1::into_plan)
+            .expect("artifact contract plan");
+        assert_eq!(plan.plan.checks[0].artifact_contracts.len(), 1);
+        assert_eq!(
+            plan.plan.checks[0].artifact_contracts[0].producer_check,
+            "test"
+        );
+    }
+
+    #[test]
+    fn artifact_contract_rejects_undeclared_paths_and_unbounded_directory_shape() {
+        let base = valid_config(&check("test", &[])).replace(
+            "depends_on = []",
+            "depends_on = []\nartifacts = [\"results\"]\n\n[[checks.artifact_contracts]]\npath = \"other\"\nkind = \"regular-file\"\nmax_bytes = 1\nmax_entries = 1",
+        );
+        assert!(matches!(
+            ConfigV1::parse(&base).and_then(ConfigV1::into_plan),
+            Err(ConfigError::InvalidField("check.artifact_contracts.path"))
+        ));
+
+        let directory = base
+            .replace("path = \"other\"", "path = \"results\"")
+            .replace("kind = \"regular-file\"", "kind = \"directory\"")
+            .replace("max_entries = 1", "max_entries = 10001");
+        assert!(matches!(
+            ConfigV1::parse(&directory).and_then(ConfigV1::into_plan),
+            Err(ConfigError::OutOfRange {
+                field: "check.artifact_contracts.max_entries",
+                ..
+            })
         ));
     }
 }

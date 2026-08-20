@@ -78,7 +78,9 @@ Every check declares:
 - a repository-relative `working_directory`;
 - `timeout_seconds` between 1 and 86400;
 - optional `depends_on` IDs;
-- optional repository-relative `artifacts`.
+- optional repository-relative `artifacts`;
+- optional `artifact_contracts` nested tables for artifacts that must become
+  receipt evidence.
 
 There is no implicit shell. An operator who explicitly places a shell binary in
 `argv[0]` has deliberately selected it; the tool never inserts one.
@@ -98,18 +100,44 @@ Absolute Unix paths, Windows drive paths, backslashes, `~`, empty segments,
 receipt output, or artifact.
 
 Cache mounts cannot overlap one another, the receipt output, or declared
-artifacts. Artifact paths are globally unique and identify files in contract
-v1; directory artifacts are not yet supported. These restrictions prevent two
-steps from silently assigning different meanings to the same writable path.
+artifacts. Artifact paths cannot duplicate or nest beneath one another. A
+legacy artifact is a regular-file mount; a declared `artifact_contract` may
+instead make an already-declared artifact a directory mount. These restrictions
+prevent two steps from silently assigning different meanings to the same
+writable path.
 The repository root is mounted read-only at `/workspace`; only declared cache
 and artifact paths receive nested read-write bindings. Host mount paths that
 cannot be represented safely by the Docker `--mount` syntax are rejected.
 Before a live `run`, every cache destination must already exist as a real
-directory in the repository and every artifact destination as a real file.
-They may be ignored generated placeholders, but must not be symlinks. This is
-required by nested Docker bindings beneath a read-only repository mount; the
-runner fails before Docker rather than mutating the source checkout to create
-them.
+directory in the repository. A regular-file artifact destination must be a real
+file and a directory artifact destination must be a real directory. They may
+be ignored generated placeholders, but must not be symlinks. This is required
+by nested Docker bindings beneath a read-only repository mount; the runner
+fails before Docker rather than mutating the source checkout to create them.
+
+### Artifact contracts
+
+An artifact contract is optional only for legacy execution. If declared, it is
+normative plan data and a snapshot-backed receipt v2 MUST contain exactly one
+observed manifest record for it. The record is created only from the
+CCP-owned writable mount after checks complete; it never reads the operator's
+source checkout.
+
+```toml
+artifacts = ["results/report.json"]
+
+[[checks.artifact_contracts]]
+path = "results/report.json" # Must also appear in `artifacts` for this check.
+kind = "regular-file"         # `regular-file` or `directory`.
+max_bytes = 1048576           # 1 byte through 1 GiB.
+max_entries = 1               # Exactly 1 for a regular file; 1 through 10000 for a directory.
+```
+
+`path` is producer-bound to its containing check. The observer rejects a
+missing output, symlink, special object, pre-existing symlinked ancestor,
+concurrent replacement, byte-limit breach, or directory-entry-limit breach.
+It computes a canonical manifest digest from bounded final-state entries. It
+does not copy artifact contents into the receipt or expose a host path.
 
 See [`CACHE_AND_WORKSPACE.md`](CACHE_AND_WORKSPACE.md) for cache-root
 precedence, ownership, persistence, inventory, and cleanup rules.
@@ -137,7 +165,7 @@ checks that digest immediately before rendering the process environment.
 ## Plan digest
 
 The digest covers the normalized schema version, project, runtime, receipt
-policy, environment names, caches, and ordered checks. It uses the same CCP
+policy, environment names, caches, ordered checks, and artifact contracts. It uses the same CCP
 canonical JSON v1 profile described in `docs/RECEIPT_SPEC.md`.
 
 The digest is integrity evidence, not a signature or identity attestation.

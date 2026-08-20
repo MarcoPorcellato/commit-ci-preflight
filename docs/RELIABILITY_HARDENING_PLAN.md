@@ -689,6 +689,16 @@ Exit gate:
 
 ### PR T8 — Environment, artifact, disk, and runtime-resource contracts
 
+Status (local artifact sub-slice): typed contracts now bind artifact path,
+kind, byte and entry limits, and producer check into the normalized plan.
+Snapshot-backed v2 runs observe only the CCP-owned writable artifact mount
+after source revalidation and before barrier, cache promotion, and receipt
+sealing. They record a canonical final-state digest and fail closed on missing,
+symlinked, escaped, replaced, oversized, or over-count output. Initial-state
+evidence, disk and inode reservation, RAM and swap capability verification,
+and native qualification remain pending; this status does not close T8 or its
+exit gate.
+
 Deliverables:
 
 - environment classes: fixed, runtime-internal, and remote-secret-only;

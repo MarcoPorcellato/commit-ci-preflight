@@ -137,6 +137,7 @@ impl MatrixCheckConfigV2 {
             timeout_seconds: self.timeout_seconds,
             depends_on: self.depends_on.clone(),
             artifacts: self.artifacts.clone(),
+            artifact_contracts: Vec::new(),
         }
     }
 }

@@ -9,6 +9,12 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T8 artifact-evidence sub-slice: typed regular-file and directory contracts
+  are normalized into the execution plan; snapshot-backed receipt v2 records a
+  bounded, producer-linked canonical final-state manifest from CCP-owned
+  mounts and rejects missing, symlinked, escaped, replaced, oversized, or
+  over-count output before cache promotion or receipt sealing. Disk and
+  runtime-resource contracts and native qualification remain pending.
 - Receipt v2 now embeds the complete normalized public execution plan and
   rejects a configuration digest that does not match it. Policy `1.1`
   independently reconstructs a regular policy-relative trusted configuration,

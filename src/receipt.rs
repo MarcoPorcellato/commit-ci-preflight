@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::config::ExecutionPlanV1;
+use crate::config::{ArtifactKind, ExecutionPlanV1};
 
 pub const RECEIPT_SCHEMA_VERSION: &str = "1.0";
 pub const RECEIPT_V2_SCHEMA_VERSION: &str = "2.0";
@@ -67,10 +67,23 @@ pub struct ReceiptV2 {
     pub platform: PlatformEvidence,
     pub configuration_digest: String,
     pub execution_plan: ExecutionPlanV1,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_manifest: Vec<ArtifactEvidence>,
     pub checks: Vec<CheckEvidence>,
     pub overall_status: EvidenceStatus,
     pub incomplete_reason: Option<String>,
     pub redaction_policy_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactEvidence {
+    pub path: String,
+    pub kind: ArtifactKind,
+    pub producer_check: String,
+    pub entry_count: u64,
+    pub total_bytes: u64,
+    pub manifest_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -266,6 +279,45 @@ impl ReceiptV2 {
             {
                 return Err(ReceiptError::ExecutionPlanCheckMismatch(planned.id.clone()));
             }
+        }
+        self.validate_artifact_manifest()?;
+        Ok(())
+    }
+
+    fn validate_artifact_manifest(&self) -> Result<(), ReceiptError> {
+        let mut expected = BTreeMap::new();
+        for check in &self.execution_plan.checks {
+            for artifact in &check.artifact_contracts {
+                expected.insert(artifact.path.as_str(), artifact);
+            }
+        }
+        let mut observed = BTreeSet::new();
+        for artifact in &self.artifact_manifest {
+            if !observed.insert(artifact.path.as_str()) {
+                return Err(ReceiptError::DuplicateArtifactEvidence(
+                    artifact.path.clone(),
+                ));
+            }
+            let planned = expected
+                .get(artifact.path.as_str())
+                .ok_or_else(|| ReceiptError::ArtifactManifestMismatch(artifact.path.clone()))?;
+            if artifact.kind != planned.kind
+                || artifact.producer_check != planned.producer_check
+                || (artifact.kind == ArtifactKind::RegularFile && artifact.entry_count != 1)
+                || artifact.entry_count > planned.max_entries
+                || artifact.total_bytes > planned.max_bytes
+            {
+                return Err(ReceiptError::ArtifactManifestMismatch(
+                    artifact.path.clone(),
+                ));
+            }
+            validate_sha256("artifact.manifest_digest", &artifact.manifest_digest)?;
+        }
+        if observed.len() != expected.len() || expected.keys().any(|path| !observed.contains(path))
+        {
+            return Err(ReceiptError::ArtifactManifestMismatch(
+                "artifact set".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -649,6 +701,8 @@ pub enum ReceiptError {
         actual: String,
     },
     ExecutionPlanCheckMismatch(String),
+    DuplicateArtifactEvidence(String),
+    ArtifactManifestMismatch(String),
 }
 
 impl fmt::Display for ReceiptError {
@@ -718,6 +772,15 @@ impl fmt::Display for ReceiptError {
                     "receipt evidence does not match execution plan check: {id}"
                 )
             }
+            Self::DuplicateArtifactEvidence(path) => {
+                write!(formatter, "duplicate artifact evidence path: {path}")
+            }
+            Self::ArtifactManifestMismatch(path) => {
+                write!(
+                    formatter,
+                    "artifact evidence does not match the execution plan: {path}"
+                )
+            }
         }
     }
 }
@@ -734,7 +797,7 @@ impl std::error::Error for ReceiptError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ConfigV1;
+    use crate::config::{ArtifactKind, ConfigV1, NormalizedArtifactContract};
 
     fn digest(fill: char) -> String {
         format!("sha256:{}", fill.to_string().repeat(64))
@@ -852,6 +915,7 @@ timeout_seconds = 60
             },
             configuration_digest: canonical_digest(&execution_plan).expect("plan digest"),
             execution_plan,
+            artifact_manifest: Vec::new(),
             checks: vec![CheckEvidence {
                 id: "rust-test".to_owned(),
                 required: true,
@@ -869,6 +933,50 @@ timeout_seconds = 60
             incomplete_reason: None,
             redaction_policy_version: "1".to_owned(),
         }
+    }
+
+    #[test]
+    fn v2_receipt_rejects_a_declared_artifact_without_observed_evidence() {
+        let mut receipt = passing_receipt_v2();
+        receipt.execution_plan.checks[0]
+            .artifact_contracts
+            .push(NormalizedArtifactContract {
+                path: "results/report.json".to_owned(),
+                kind: ArtifactKind::RegularFile,
+                max_bytes: 1024,
+                max_entries: 1,
+                producer_check: "rust-test".to_owned(),
+            });
+        receipt.configuration_digest =
+            canonical_digest(&receipt.execution_plan).expect("updated plan digest");
+
+        assert!(receipt.validate().is_err());
+    }
+
+    #[test]
+    fn v2_receipt_rejects_regular_file_evidence_without_one_file_entry() {
+        let mut receipt = passing_receipt_v2();
+        receipt.execution_plan.checks[0]
+            .artifact_contracts
+            .push(NormalizedArtifactContract {
+                path: "results/report.json".to_owned(),
+                kind: ArtifactKind::RegularFile,
+                max_bytes: 1024,
+                max_entries: 1,
+                producer_check: "rust-test".to_owned(),
+            });
+        receipt.configuration_digest =
+            canonical_digest(&receipt.execution_plan).expect("updated plan digest");
+        receipt.artifact_manifest.push(ArtifactEvidence {
+            path: "results/report.json".to_owned(),
+            kind: ArtifactKind::RegularFile,
+            producer_check: "rust-test".to_owned(),
+            entry_count: 0,
+            total_bytes: 0,
+            manifest_digest: digest('d'),
+        });
+
+        assert!(receipt.validate().is_err());
     }
 
     #[test]

@@ -1,5 +1,48 @@
 {
   "$defs": {
+    "ArtifactEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "entry_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "manifest_digest": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "producer_check": {
+          "type": "string"
+        },
+        "total_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "producer_check",
+        "entry_count",
+        "total_bytes",
+        "manifest_digest"
+      ],
+      "type": "object"
+    },
+    "ArtifactKind": {
+      "enum": [
+        "regular-file",
+        "directory"
+      ],
+      "type": "string"
+    },
     "CheckEvidence": {
       "additionalProperties": false,
       "properties": {
@@ -180,6 +223,38 @@
       ],
       "type": "object"
     },
+    "NormalizedArtifactContract": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "max_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_entries": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "producer_check": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "max_bytes",
+        "max_entries",
+        "producer_check"
+      ],
+      "type": "object"
+    },
     "NormalizedCache": {
       "additionalProperties": false,
       "properties": {
@@ -202,6 +277,12 @@
         "argv": {
           "items": {
             "type": "string"
+          },
+          "type": "array"
+        },
+        "artifact_contracts": {
+          "items": {
+            "$ref": "#/$defs/NormalizedArtifactContract"
           },
           "type": "array"
         },
@@ -492,6 +573,12 @@
     "ReceiptV2": {
       "additionalProperties": false,
       "properties": {
+        "artifact_manifest": {
+          "items": {
+            "$ref": "#/$defs/ArtifactEvidence"
+          },
+          "type": "array"
+        },
         "checks": {
           "items": {
             "$ref": "#/$defs/CheckEvidence"

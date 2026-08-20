@@ -79,6 +79,24 @@ field with this public plan. It rejects a mismatch before a PASS decision, while
 continuing to exclude fixed literal and secret values. This comparison does not
 establish cryptographic producer identity or host attestation.
 
+## Artifact-manifest evidence in v2
+
+`artifact_manifest` is backward-compatible as an empty or omitted field for a
+historical plan with no `artifact_contracts`. When a plan declares artifact
+contracts, v2 validation requires an exact path-for-path manifest match. Each
+record carries the contract path, producer check ID, declared kind, observed
+entry count, observed total bytes, and a canonical `sha256:` digest of the
+bounded final-state content manifest.
+
+For a regular file, `entry_count` MUST be exactly one. For a directory, every
+entry is traversed in deterministic path order. Missing output, a symlink or
+unsafe object, an escaped ancestor, concurrent replacement, or an exceeded
+size or entry limit prevents the run from sealing a receipt. The receipt
+contains neither artifact contents nor local filesystem paths. This
+final-state slice does not yet claim an initial-state manifest, artifact
+retention, or cross-host artifact reconstruction; those remain separate
+reliability work.
+
 ## Status semantics
 
 | Status | Normative meaning |

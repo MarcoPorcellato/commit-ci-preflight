@@ -39,6 +39,41 @@
     "checks"
   ],
   "$defs": {
+    "ArtifactContractConfig": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_entries": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "kind",
+        "max_bytes",
+        "max_entries"
+      ]
+    },
+    "ArtifactKind": {
+      "type": "string",
+      "enum": [
+        "regular-file",
+        "directory"
+      ]
+    },
     "CacheConfig": {
       "type": "object",
       "properties": {
@@ -62,6 +97,12 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "artifact_contracts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactContractConfig"
           }
         },
         "artifacts": {
