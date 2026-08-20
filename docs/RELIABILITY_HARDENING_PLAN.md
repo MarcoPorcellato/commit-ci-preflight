@@ -620,6 +620,25 @@ Exit gate:
 
 ### PR T6 — Crash-safe bounded admission
 
+Status (candidate slice): admission now uses one cooperative deadline-aware
+lock primitive for queue acquisition, status snapshots, ticket publication,
+slot contention, and release cleanup. Ticket records are fully written and
+synced in a staging name before publication; the legacy high-water counter is
+updated with durable replacement rather than truncation. A valid unlocked
+ticket with no lease, an unlocked malformed ticket, or an abandoned staging
+record is quarantined reversibly under the CCP-owned coordinator root. Locked,
+foreign, malformed-with-live-lock, and otherwise ambiguous states still fail
+closed and remain in place. The heartbeat stop path is interruptible, so
+release does not inherit the full heartbeat interval.
+
+The read-only status command has an explicit bounded timeout and continues to
+report the cross-activity visibility note. A local process list remains
+insufficient evidence of global inactivity. This slice does not yet claim the
+T6 exit gate: all filesystem calls are not interruptible at the OS level,
+Windows-native atomic replacement semantics and crash-point subprocess
+receipts remain pending, and the full admission state-machine qualification is
+still required.
+
 Deliverables:
 
 - one deadline-aware, cancellation-aware lock primitive used by every queue,

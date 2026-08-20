@@ -16,21 +16,21 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+use crate::durable_fs::{DurableFileSystem, DurableFsError};
 use crate::process::CancellationToken;
 
 pub const ADMISSION_SCHEMA_VERSION: &str = "1.0";
 pub const ADMISSION_STATUS_SCHEMA_VERSION: &str = "2.0";
 pub const DEFAULT_QUEUE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+pub const DEFAULT_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_QUEUE_TICKETS: usize = 1024;
 
 const OWNER_FILE: &str = ".ccp-admission-root-v1.json";
@@ -41,8 +41,10 @@ const QUEUE_LOCK: &str = "queue.lock";
 const SLOT_LOCK: &str = "slot.lock";
 const NEXT_TICKET: &str = "next-ticket-v1";
 const TICKETS_DIR: &str = "tickets";
+const TICKET_STAGING_PREFIX: &str = ".ticket-staging-";
 const TICKET_PREFIX: &str = "ticket-";
 const TICKET_SUFFIX: &str = ".json";
+const QUARANTINE_DIR: &str = "quarantine";
 const LEASES_DIR: &str = "leases";
 const LEASE_PREFIX: &str = "lease-";
 const LEASE_SUFFIX: &str = ".json";
@@ -51,6 +53,39 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const WAIT_INTERVAL: Duration = Duration::from_millis(25);
 const PROCESS_VISIBILITY_NOTE: &str =
     "No process visible in the local shell does not prove global inactivity.";
+static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy)]
+struct AdmissionDeadline {
+    at: Instant,
+}
+
+impl AdmissionDeadline {
+    fn from_timeout(timeout: Duration) -> Result<Self, AdmissionError> {
+        if timeout.is_zero() {
+            return Err(AdmissionError::InvalidTimeout);
+        }
+        Ok(Self {
+            at: Instant::now()
+                .checked_add(timeout)
+                .ok_or(AdmissionError::InvalidTimeout)?,
+        })
+    }
+
+    fn check(&self, cancellation: &CancellationToken) -> Result<(), AdmissionError> {
+        if cancellation.is_cancelled() {
+            return Err(AdmissionError::Cancelled);
+        }
+        if Instant::now() >= self.at {
+            return Err(AdmissionError::Timeout);
+        }
+        Ok(())
+    }
+
+    fn remaining(&self) -> Duration {
+        self.at.saturating_duration_since(Instant::now())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AdmissionStatusV1 {
@@ -102,19 +137,18 @@ struct TicketInfo {
 
 #[derive(Debug)]
 struct HeartbeatHandle {
-    stop: Arc<AtomicBool>,
+    stop: Option<Sender<()>>,
     join: Option<thread::JoinHandle<()>>,
 }
 
 impl HeartbeatHandle {
     fn start(path: PathBuf, owner_run_id: String) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
+        let (stop, thread_stop) = mpsc::channel();
         let join = thread::spawn(move || {
-            while !thread_stop.load(Ordering::Acquire) {
-                thread::sleep(HEARTBEAT_INTERVAL);
-                if thread_stop.load(Ordering::Acquire) {
-                    break;
+            loop {
+                match thread_stop.recv_timeout(HEARTBEAT_INTERVAL) {
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {}
                 }
                 let Ok(mut lease) = read_lease(&path) else {
                     break;
@@ -132,13 +166,15 @@ impl HeartbeatHandle {
             }
         });
         Self {
-            stop,
+            stop: Some(stop),
             join: Some(join),
         }
     }
 
     fn stop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -198,37 +234,26 @@ impl AdmissionCoordinator {
         timeout: Duration,
         cancellation: &CancellationToken,
     ) -> Result<AdmissionGuard, AdmissionError> {
-        if timeout.is_zero() {
-            return Err(AdmissionError::InvalidTimeout);
-        }
-        if cancellation.is_cancelled() {
-            return Err(AdmissionError::Cancelled);
-        }
-        self.initialize()?;
-        let deadline = Instant::now()
-            .checked_add(timeout)
-            .ok_or(AdmissionError::InvalidTimeout)?;
-        let mut queue = self.lock_queue_until(deadline, cancellation)?;
+        let deadline = AdmissionDeadline::from_timeout(timeout)?;
+        deadline.check(cancellation)?;
+        self.initialize_until(&deadline, cancellation)?;
+        let mut queue = self.lock_queue_until(&deadline, cancellation)?;
         let (live, stale) = self.scan_tickets(None, true)?;
         self.remove_stale(stale)?;
         if live.len() >= MAX_QUEUE_TICKETS {
             unlock(&mut queue)?;
             return Err(AdmissionError::QueueFull);
         }
-        let mut reservation = self.create_ticket()?;
+        let mut reservation = self.create_ticket(&deadline, cancellation)?;
         unlock(&mut queue)?;
 
         loop {
-            if cancellation.is_cancelled() {
+            if let Err(error) = deadline.check(cancellation) {
                 reservation.cleanup(self)?;
-                return Err(AdmissionError::Cancelled);
-            }
-            if Instant::now() >= deadline {
-                reservation.cleanup(self)?;
-                return Err(AdmissionError::Timeout);
+                return Err(error);
             }
 
-            let mut queue = self.lock_queue_until(deadline, cancellation)?;
+            let mut queue = self.lock_queue_until(&deadline, cancellation)?;
             let (live, stale) = self.scan_tickets(
                 Some(
                     reservation
@@ -242,7 +267,7 @@ impl AdmissionCoordinator {
             let first_is_ours = live
                 .first()
                 .is_some_and(|ticket| Some(ticket.id.as_str()) == reservation.id.as_deref());
-            if first_is_ours && let Some(slot) = self.try_lock_slot()? {
+            if first_is_ours && let Some(slot) = self.try_lock_slot(&deadline, cancellation)? {
                 let ticket_id = reservation
                     .id
                     .as_deref()
@@ -282,23 +307,28 @@ impl AdmissionCoordinator {
                 });
             }
             unlock(&mut queue)?;
-            sleep_until(deadline, cancellation);
+            sleep_until(deadline.at, cancellation);
         }
     }
 
     pub fn status(&self) -> Result<AdmissionStatusV1, AdmissionError> {
+        let cancellation = CancellationToken::default();
+        self.status_with_timeout(DEFAULT_STATUS_TIMEOUT, &cancellation)
+    }
+
+    pub fn status_with_timeout(
+        &self,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<AdmissionStatusV1, AdmissionError> {
+        let deadline = AdmissionDeadline::from_timeout(timeout)?;
+        deadline.check(cancellation)?;
         if !self.root_exists()? {
             return Ok(empty_status());
         }
         self.validate_layout(true)?;
         let queue_lock = self.lock_status(QUEUE_LOCK, "queue_lock")?;
-        let mut queue = self.open_queue(false)?;
-        queue
-            .lock_exclusive()
-            .map_err(|source| AdmissionError::Lock {
-                path: self.root.join(QUEUE_LOCK),
-                source,
-            })?;
+        let mut queue = self.lock_queue_until(&deadline, cancellation)?;
         let (live, _stale) = self.scan_tickets(None, false)?;
         let slot = self.slot_status()?;
         let active = slot.state == "held";
@@ -320,19 +350,27 @@ impl AdmissionCoordinator {
         })
     }
 
+    #[cfg(test)]
     fn initialize(&self) -> Result<(), AdmissionError> {
+        let cancellation = CancellationToken::default();
+        let deadline = AdmissionDeadline::from_timeout(DEFAULT_QUEUE_TIMEOUT)
+            .expect("default admission timeout is representable");
+        self.initialize_until(&deadline, &cancellation)
+    }
+
+    fn initialize_until(
+        &self,
+        deadline: &AdmissionDeadline,
+        cancellation: &CancellationToken,
+    ) -> Result<(), AdmissionError> {
+        deadline.check(cancellation)?;
         fs::create_dir_all(&self.root).map_err(|source| AdmissionError::Io {
             path: self.root.clone(),
             source,
         })?;
         self.validate_layout(false)?;
         let mut queue = self.open_queue(true)?;
-        queue
-            .lock_exclusive()
-            .map_err(|source| AdmissionError::Lock {
-                path: self.root.join(QUEUE_LOCK),
-                source,
-            })?;
+        lock_exclusive_until(&queue, &self.root.join(QUEUE_LOCK), deadline, cancellation)?;
         self.ensure_owner_marker()?;
         let tickets = self.root.join(TICKETS_DIR);
         if let Ok(metadata) = fs::symlink_metadata(&tickets) {
@@ -353,6 +391,17 @@ impl AdmissionCoordinator {
         } else {
             fs::create_dir(&leases).map_err(|source| AdmissionError::Io {
                 path: leases.clone(),
+                source,
+            })?;
+        }
+        let quarantine = self.root.join(QUARANTINE_DIR);
+        if let Ok(metadata) = fs::symlink_metadata(&quarantine) {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AdmissionError::UnsafeLayout(quarantine));
+            }
+        } else {
+            fs::create_dir(&quarantine).map_err(|source| AdmissionError::Io {
+                path: quarantine.clone(),
                 source,
             })?;
         }
@@ -397,42 +446,42 @@ impl AdmissionCoordinator {
         }
     }
 
-    fn create_ticket(&self) -> Result<TicketReservation, AdmissionError> {
-        let id = self.next_ticket_id()?;
+    fn create_ticket(
+        &self,
+        deadline: &AdmissionDeadline,
+        cancellation: &CancellationToken,
+    ) -> Result<TicketReservation, AdmissionError> {
+        let id = self.next_ticket_id(deadline, cancellation)?;
         let path = self
             .root
             .join(TICKETS_DIR)
             .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|source| AdmissionError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        file.lock_exclusive()
-            .map_err(|source| AdmissionError::Lock {
-                path: path.clone(),
-                source,
-            })?;
+        let staging_path = self.root.join(TICKETS_DIR).join(format!(
+            "{TICKET_STAGING_PREFIX}{id}-{}-{}.json",
+            std::process::id(),
+            QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
         let marker = TicketMarker {
             owner: "commit-ci-preflight".to_owned(),
             purpose: "host-admission-ticket".to_owned(),
             schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
             ticket_id: id.clone(),
         };
-        let bytes = serde_json::to_vec(&marker).map_err(AdmissionError::Json)?;
-        file.write_all(&bytes)
+        let mut bytes = serde_json::to_vec(&marker).map_err(AdmissionError::Json)?;
+        bytes.push(b'\n');
+        DurableFileSystem::default()
+            .create_new(&staging_path, &bytes)
+            .map_err(|error| durable_error(staging_path.clone(), error))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&staging_path)
             .map_err(|source| AdmissionError::Io {
-                path: path.clone(),
+                path: staging_path.clone(),
                 source,
             })?;
-        file.write_all(b"\n").map_err(|source| AdmissionError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        file.sync_all().map_err(|source| AdmissionError::Io {
+        lock_exclusive_until(&file, &staging_path, deadline, cancellation)?;
+        fs::rename(&staging_path, &path).map_err(|source| AdmissionError::Io {
             path: path.clone(),
             source,
         })?;
@@ -460,7 +509,42 @@ impl AdmissionCoordinator {
         })
     }
 
-    fn next_ticket_id(&self) -> Result<String, AdmissionError> {
+    fn next_ticket_id(
+        &self,
+        deadline: &AdmissionDeadline,
+        cancellation: &CancellationToken,
+    ) -> Result<String, AdmissionError> {
+        deadline.check(cancellation)?;
+        let directory = self.root.join(TICKETS_DIR);
+        let entries = fs::read_dir(&directory).map_err(|source| AdmissionError::Io {
+            path: directory.clone(),
+            source,
+        })?;
+        let mut highest = 0u64;
+        for entry in entries {
+            deadline.check(cancellation)?;
+            let entry = entry.map_err(AdmissionError::ReadDir)?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|source| AdmissionError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(AdmissionError::MalformedTicket(path));
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| AdmissionError::MalformedTicket(path.clone()))?;
+            if name.starts_with(TICKET_STAGING_PREFIX) {
+                continue;
+            }
+            let id = parse_ticket_name(&path)?;
+            let value = id
+                .parse::<u64>()
+                .map_err(|_| AdmissionError::MalformedTicket(path.clone()))?;
+            highest = highest.max(value);
+        }
         let path = self.root.join(NEXT_TICKET);
         let next = match fs::symlink_metadata(&path) {
             Ok(metadata) => {
@@ -480,49 +564,29 @@ impl AdmissionCoordinator {
             Err(error) if error.kind() == io::ErrorKind::NotFound => 1,
             Err(source) => return Err(AdmissionError::Io { path, source }),
         };
+        let next = highest.max(next.saturating_sub(1));
+        let next = next
+            .checked_add(1)
+            .ok_or(AdmissionError::TicketCounterExhausted)?;
         let next_after = next
             .checked_add(1)
             .ok_or(AdmissionError::TicketCounterExhausted)?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)
-            .map_err(|source| AdmissionError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        writeln!(file, "{next_after}").map_err(|source| AdmissionError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        file.sync_all()
-            .map_err(|source| AdmissionError::Io { path, source })?;
+        let counter = format!("{next_after}\n");
+        DurableFileSystem::default()
+            .atomic_replace(&path, counter.as_bytes())
+            .map_err(|error| durable_error(path.clone(), error))?;
         Ok(format!("{next:020}"))
     }
 
     fn lock_queue_until(
         &self,
-        deadline: Instant,
+        deadline: &AdmissionDeadline,
         cancellation: &CancellationToken,
     ) -> Result<File, AdmissionError> {
         let path = self.root.join(QUEUE_LOCK);
         let file = self.open_queue(false)?;
-        loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(file),
-                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
-                    if cancellation.is_cancelled() {
-                        return Err(AdmissionError::Cancelled);
-                    }
-                    if Instant::now() >= deadline {
-                        return Err(AdmissionError::Timeout);
-                    }
-                    thread::sleep(WAIT_INTERVAL);
-                }
-                Err(source) => return Err(AdmissionError::Lock { path, source }),
-            }
-        }
+        lock_exclusive_until(&file, &path, deadline, cancellation)?;
+        Ok(file)
     }
 
     fn scan_tickets(
@@ -552,8 +616,46 @@ impl AdmissionCoordinator {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return Err(AdmissionError::MalformedTicket(path));
             }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| AdmissionError::MalformedTicket(path.clone()))?;
+            if name.starts_with(TICKET_STAGING_PREFIX) {
+                if reclaim_stale {
+                    self.quarantine_file(&path)?;
+                    continue;
+                }
+                return Err(AdmissionError::RecoveryRequired(path));
+            }
             let id = parse_ticket_name(&path)?;
-            let marker = read_ticket(&path)?;
+            let marker = match read_ticket(&path) {
+                Ok(marker) => marker,
+                Err(AdmissionError::MalformedTicket(_)) if reclaim_stale => {
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .map_err(|source| AdmissionError::Io {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    match file.try_lock_exclusive() {
+                        Ok(()) => {
+                            FileExt::unlock(&file).map_err(|source| AdmissionError::Lock {
+                                path: path.clone(),
+                                source,
+                            })?;
+                            self.quarantine_file(&path)?;
+                            continue;
+                        }
+                        Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                            return Err(AdmissionError::MalformedTicket(path));
+                        }
+                        Err(source) => return Err(AdmissionError::Lock { path, source }),
+                    }
+                }
+                Err(error) => return Err(error),
+            };
             if marker.owner != "commit-ci-preflight"
                 || marker.purpose != "host-admission-ticket"
                 || marker.schema_version != ADMISSION_SCHEMA_VERSION
@@ -577,7 +679,9 @@ impl AdmissionCoordinator {
             match file.try_lock_exclusive() {
                 Ok(()) => {
                     let lease = self.read_lease(&ticket.id)?;
-                    if reclaim_stale && lease.as_ref().is_some_and(lease_is_expired) {
+                    if reclaim_stale
+                        && (lease.is_none() || lease.as_ref().is_some_and(lease_is_expired))
+                    {
                         stale.push(StaleTicket { ticket, file });
                     } else {
                         FileExt::unlock(&file).map_err(|source| AdmissionError::Lock {
@@ -603,17 +707,29 @@ impl AdmissionCoordinator {
 
     fn remove_stale(&self, stale: Vec<StaleTicket>) -> Result<(), AdmissionError> {
         for stale in stale {
-            fs::remove_file(&stale.ticket.path).map_err(|source| AdmissionError::Io {
-                path: stale.ticket.path.clone(),
-                source,
-            })?;
             FileExt::unlock(&stale.file).map_err(|source| AdmissionError::Lock {
                 path: stale.ticket.path.clone(),
                 source,
             })?;
+            self.quarantine_file(&stale.ticket.path)?;
             self.remove_lease(&stale.ticket.id)?;
         }
         Ok(())
+    }
+
+    fn quarantine_file(&self, path: &Path) -> Result<(), AdmissionError> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| AdmissionError::MalformedTicket(path.to_path_buf()))?;
+        let destination = self.root.join(QUARANTINE_DIR).join(format!(
+            "{name}.{}",
+            QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::rename(path, &destination).map_err(|source| AdmissionError::Io {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 
     fn lease_path(&self, ticket_id: &str) -> PathBuf {
@@ -665,7 +781,11 @@ impl AdmissionCoordinator {
         }
     }
 
-    fn try_lock_slot(&self) -> Result<Option<File>, AdmissionError> {
+    fn try_lock_slot(
+        &self,
+        _deadline: &AdmissionDeadline,
+        _cancellation: &CancellationToken,
+    ) -> Result<Option<File>, AdmissionError> {
         let path = self.root.join(SLOT_LOCK);
         let file = open_lock_file(&path, true)?;
         match file.try_lock_exclusive() {
@@ -846,6 +966,16 @@ impl AdmissionCoordinator {
                         return Err(AdmissionError::UnsafeLayout(path));
                     }
                 }
+                Some(QUARANTINE_DIR) => {
+                    let metadata =
+                        fs::symlink_metadata(&path).map_err(|source| AdmissionError::Io {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                        return Err(AdmissionError::UnsafeLayout(path));
+                    }
+                }
                 _ => return Err(AdmissionError::UnsafeLayout(path)),
             }
         }
@@ -878,13 +1008,16 @@ impl AdmissionGuard {
     }
 
     fn release_inner(&mut self) -> Result<(), AdmissionError> {
+        let cancellation = CancellationToken::default();
+        let deadline = AdmissionDeadline::from_timeout(DEFAULT_STATUS_TIMEOUT)
+            .expect("default status timeout is representable");
         let mut queue = self.coordinator.open_queue(false)?;
-        queue
-            .lock_exclusive()
-            .map_err(|source| AdmissionError::Lock {
-                path: self.coordinator.root.join(QUEUE_LOCK),
-                source,
-            })?;
+        lock_exclusive_until(
+            &queue,
+            &self.coordinator.root.join(QUEUE_LOCK),
+            &deadline,
+            &cancellation,
+        )?;
         let mut cleanup_error = None;
         if let Some(mut heartbeat) = self.heartbeat.take() {
             heartbeat.stop();
@@ -954,12 +1087,15 @@ impl TicketReservation {
             .clone();
         let file = self.file.as_ref().expect("reservation file is present");
         let mut queue = coordinator.open_queue(false)?;
-        queue
-            .lock_exclusive()
-            .map_err(|source| AdmissionError::Lock {
-                path: coordinator.root.join(QUEUE_LOCK),
-                source,
-            })?;
+        let cancellation = CancellationToken::default();
+        let deadline = AdmissionDeadline::from_timeout(DEFAULT_STATUS_TIMEOUT)
+            .expect("default status timeout is representable");
+        lock_exclusive_until(
+            &queue,
+            &coordinator.root.join(QUEUE_LOCK),
+            &deadline,
+            &cancellation,
+        )?;
         let mut cleanup_error = None;
         if let Err(source) = FileExt::unlock(file) {
             keep_first_error(
@@ -1052,11 +1188,50 @@ fn sleep_until(deadline: Instant, cancellation: &CancellationToken) {
     thread::sleep(remaining.min(WAIT_INTERVAL));
 }
 
+fn lock_exclusive_until(
+    file: &File,
+    path: &Path,
+    deadline: &AdmissionDeadline,
+    cancellation: &CancellationToken,
+) -> Result<(), AdmissionError> {
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                deadline.check(cancellation)?;
+                thread::sleep(deadline.remaining().min(WAIT_INTERVAL));
+            }
+            Err(source) => {
+                return Err(AdmissionError::Lock {
+                    path: path.to_path_buf(),
+                    source,
+                });
+            }
+        }
+    }
+}
+
 fn unlock(file: &mut File) -> Result<(), AdmissionError> {
     FileExt::unlock(file).map_err(|source| AdmissionError::Lock {
         path: PathBuf::from("admission lock"),
         source,
     })
+}
+
+fn durable_error(path: PathBuf, error: DurableFsError) -> AdmissionError {
+    match error {
+        DurableFsError::Io(source) => AdmissionError::Io { path, source },
+        DurableFsError::UnsafePath(_) | DurableFsError::OwnershipMismatch => {
+            AdmissionError::UnsafeLayout(path)
+        }
+        DurableFsError::AtomicReplacementUnavailable => AdmissionError::Io {
+            path,
+            source: io::Error::new(
+                io::ErrorKind::Unsupported,
+                "atomic admission record replacement is unavailable",
+            ),
+        },
+    }
 }
 
 fn keep_first_error(target: &mut Option<AdmissionError>, error: AdmissionError) {
@@ -1140,52 +1315,20 @@ fn read_lease(path: &Path) -> Result<LeaseMarker, AdmissionError> {
 
 fn create_lease(path: &Path, lease: &LeaseMarker) -> Result<(), AdmissionError> {
     let bytes = serde_json::to_vec(lease).map_err(AdmissionError::Json)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|source| AdmissionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(&bytes)
-        .map_err(|source| AdmissionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(b"\n").map_err(|source| AdmissionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.sync_all().map_err(|source| AdmissionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    let mut bytes = bytes;
+    bytes.push(b'\n');
+    DurableFileSystem::default()
+        .create_new(path, &bytes)
+        .map_err(|error| durable_error(path.to_path_buf(), error))
 }
 
 fn write_lease(path: &Path, lease: &LeaseMarker) -> Result<(), AdmissionError> {
     let bytes = serde_json::to_vec(lease).map_err(AdmissionError::Json)?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .map_err(|source| AdmissionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(&bytes)
-        .map_err(|source| AdmissionError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    file.write_all(b"\n").map_err(|source| AdmissionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    file.sync_all().map_err(|source| AdmissionError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    let mut bytes = bytes;
+    bytes.push(b'\n');
+    DurableFileSystem::default()
+        .atomic_replace(path, &bytes)
+        .map_err(|error| durable_error(path.to_path_buf(), error))
 }
 
 fn unix_seconds() -> Result<u64, AdmissionError> {
@@ -1350,6 +1493,7 @@ pub enum AdmissionError {
     MalformedTicket(PathBuf),
     ForeignLease(PathBuf),
     MalformedLease(PathBuf),
+    RecoveryRequired(PathBuf),
     MalformedCounter(PathBuf),
     TicketCounterExhausted,
     Clock,
@@ -1374,6 +1518,7 @@ impl AdmissionError {
             | Self::MalformedTicket(_)
             | Self::ForeignLease(_)
             | Self::MalformedLease(_)
+            | Self::RecoveryRequired(_)
             | Self::MalformedCounter(_)
             | Self::TicketCounterExhausted
             | Self::Clock
@@ -1426,6 +1571,11 @@ impl fmt::Display for AdmissionError {
             Self::MalformedLease(path) => write!(
                 formatter,
                 "malformed admission lease rejected at {}",
+                path.display()
+            ),
+            Self::RecoveryRequired(path) => write!(
+                formatter,
+                "admission recovery is required for staged state at {}",
                 path.display()
             ),
             Self::MalformedCounter(path) => write!(
@@ -1654,11 +1804,17 @@ mod tests {
         fs::create_dir_all(&tickets).expect("ticket directory");
         let malformed = tickets.join("ticket-00000000000000000001.json");
         fs::write(&malformed, b"not-json\n").expect("malformed ticket");
-        assert!(matches!(
-            coordinator.acquire(Duration::from_secs(1), &CancellationToken::default()),
-            Err(AdmissionError::MalformedTicket(_))
-        ));
-        fs::remove_file(malformed).expect("remove malformed marker");
+        let guard = coordinator
+            .acquire(Duration::from_secs(1), &CancellationToken::default())
+            .expect("quarantine unlocked malformed marker");
+        drop(guard);
+        assert!(!malformed.exists());
+        assert_eq!(
+            fs::read_dir(coordinator.root().join(QUARANTINE_DIR))
+                .expect("quarantine directory")
+                .count(),
+            1
+        );
         let foreign = tickets.join("ticket-00000000000000000001.json");
         fs::write(
             &foreign,
@@ -1748,6 +1904,38 @@ mod tests {
     }
 
     #[test]
+    fn status_timeout_and_cancellation_bound_queue_lock_waits() {
+        let coordinator = coordinator("status-deadline");
+        coordinator.initialize().expect("initialize coordinator");
+        let queue_path = coordinator.root().join(QUEUE_LOCK);
+        let queue = open_existing_lock_file(&queue_path)
+            .expect("open queue")
+            .expect("queue exists");
+        queue.lock_exclusive().expect("hold queue");
+
+        let started = Instant::now();
+        let cancellation = CancellationToken::default();
+        let result = coordinator.status_with_timeout(Duration::from_millis(80), &cancellation);
+        assert!(matches!(result, Err(AdmissionError::Timeout)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let cancellation = CancellationToken::default();
+        let waiter_cancellation = cancellation.clone();
+        let waiter_coordinator = coordinator.clone();
+        let waiter = thread::spawn(move || {
+            waiter_coordinator.status_with_timeout(Duration::from_secs(2), &waiter_cancellation)
+        });
+        thread::sleep(Duration::from_millis(30));
+        cancellation.cancel();
+        assert!(matches!(
+            waiter.join().expect("status waiter"),
+            Err(AdmissionError::Cancelled)
+        ));
+        FileExt::unlock(&queue).expect("unlock queue");
+        fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
+    }
+
+    #[test]
     fn cross_activity_status_reports_slot_owner_and_lock_roles() {
         if child_mode("cross_activity_status_reports_slot_owner_and_lock_roles") {
             return;
@@ -1781,7 +1969,7 @@ mod tests {
     }
 
     #[test]
-    fn unlocked_ticket_without_lease_is_not_quarantined() {
+    fn unlocked_ticket_without_lease_is_quarantined() {
         let coordinator = coordinator("unknown-lease");
         coordinator.initialize().expect("initialize coordinator");
         let path = coordinator
@@ -1806,12 +1994,70 @@ mod tests {
         drop(file);
         fs::write(coordinator.root().join(NEXT_TICKET), b"2\n").expect("next ticket");
 
-        let result = coordinator.acquire(Duration::from_millis(80), &CancellationToken::default());
-        assert!(matches!(result, Err(AdmissionError::Timeout)));
-        assert!(
-            path.exists(),
-            "unknown lease must remain for operator review"
+        let guard = coordinator
+            .acquire(Duration::from_secs(2), &CancellationToken::default())
+            .expect("unlocked ticket without lease is certainly abandoned");
+        drop(guard);
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read_dir(coordinator.root().join(QUARANTINE_DIR))
+                .expect("quarantine directory")
+                .count(),
+            1
         );
+        fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
+    }
+
+    #[test]
+    fn abandoned_ticket_staging_is_quarantined_before_acquisition() {
+        let coordinator = coordinator("staged-ticket");
+        coordinator.initialize().expect("initialize coordinator");
+        let staging = coordinator
+            .root()
+            .join(TICKETS_DIR)
+            .join(".ticket-staging-00000000000000000001-crashed.json");
+        fs::write(&staging, b"partial\n").expect("staging fixture");
+        assert!(matches!(
+            coordinator.status(),
+            Err(AdmissionError::RecoveryRequired(_))
+        ));
+
+        let guard = coordinator
+            .acquire(Duration::from_secs(2), &CancellationToken::default())
+            .expect("quarantine abandoned staging");
+        drop(guard);
+        assert!(!staging.exists());
+        assert_eq!(
+            fs::read_dir(coordinator.root().join(QUARANTINE_DIR))
+                .expect("quarantine directory")
+                .count(),
+            1
+        );
+        fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
+    }
+
+    #[test]
+    fn locked_malformed_ticket_remains_fail_closed() {
+        let coordinator = coordinator("locked-malformed");
+        coordinator.initialize().expect("initialize coordinator");
+        let path = coordinator
+            .root()
+            .join(TICKETS_DIR)
+            .join("ticket-00000000000000000001.json");
+        fs::write(&path, b"partial\n").expect("malformed ticket");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open malformed ticket");
+        file.lock_exclusive().expect("lock malformed ticket");
+
+        assert!(matches!(
+            coordinator.acquire(Duration::from_secs(1), &CancellationToken::default()),
+            Err(AdmissionError::MalformedTicket(_))
+        ));
+        assert!(path.exists());
+        FileExt::unlock(&file).expect("unlock malformed ticket");
         fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
     }
 
