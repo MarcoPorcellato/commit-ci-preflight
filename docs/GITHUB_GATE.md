@@ -87,9 +87,6 @@ and Rustup paths are persistent managed caches. The bounded format timeout also
 covers that first toolchain provisioning; warm format runs remain sub-second.
 
 ~~~console
-export CARGO_HOME=.ccp-mounts/cargo-home
-export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
-export RUSTUP_HOME=.ccp-mounts/rustup-home
 cargo run --locked -- run \
   --config .commit-ci-preflight.toml \
   --repository . \
@@ -100,9 +97,11 @@ cargo run --locked -- verify \
   --expected-commit "$(git rev-parse HEAD)"
 ~~~
 
-The root policy currently accepts genuine Apple Silicon macOS execution
-through the Docker-compatible adapter. It does not claim Linux-host-native,
-Windows-native, GitHub-hosted, or identity evidence.
+The root policy is schema `1.1`: it resolves only the policy-relative trusted
+configuration and requires a receipt v2 whose normalized execution plan agrees
+with it. It accepts genuine Apple Silicon macOS execution through the
+Docker-compatible adapter. It does not claim Linux-host-native, Windows-native,
+GitHub-hosted, or cryptographic identity evidence.
 
 The source checkout stays read-only, and Docker's integrated init process
 reaps terminated descendants so process-supervisor checks remain truthful in a
@@ -113,6 +112,11 @@ These overrides exist only in test helpers and never weaken production
 cache-path validation. The four persistent managed cache locations live below
 the operator-selected cache root and may be inventoried with
 `commit-ci-preflight cache inventory --json`.
+
+The repository configuration is schema `1.1`: the Cargo and Rustup variables
+are runtime-internal bindings derived from those reviewed cache mounts. Do not
+reintroduce host-path exports; they would be legacy input that the current plan
+does not allowlist.
 
 ## Publish evidence before opening or updating the PR
 

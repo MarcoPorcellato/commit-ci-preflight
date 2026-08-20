@@ -38,7 +38,12 @@ use crate::runtime::{
     RuntimeError, RuntimeExecutionContext, RuntimePort, docker_execution_environment, doctor_guard,
 };
 use crate::source_snapshot::{SourceSnapshot, SourceSnapshotError};
-use crate::workspace::{PreparedWorkspace, WorkspaceError};
+use crate::storage::{
+    StorageError, StorageProbe, SystemStorageProbe, preflight as preflight_storage,
+};
+use crate::workspace::{
+    ArtifactObservationError, PreparedWorkspace, WorkspaceError, observe_artifacts,
+};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_CAPTURE_BYTES: usize = 65_536;
@@ -135,14 +140,36 @@ pub fn execute_local_run(
     cancellation: &CancellationToken,
     clock: &dyn Clock,
 ) -> Result<RunOutcome, RunError> {
+    let storage_probe = SystemStorageProbe;
+    execute_local_run_with_storage_probe(
+        request,
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        &storage_probe,
+    )
+}
+
+pub fn execute_local_run_with_storage_probe(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    storage_probe: &dyn StorageProbe,
+) -> Result<RunOutcome, RunError> {
     let mut barrier = NoopCompletionBarrier;
-    execute_local_run_with_barrier(
+    let mut lifecycle = NoopRunLifecycleObserver;
+    execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
         request,
         runtime,
         supervisor,
         cancellation,
         clock,
         &mut barrier,
+        &mut lifecycle,
+        storage_probe,
     )
 }
 
@@ -155,7 +182,8 @@ pub fn execute_local_run_with_barrier(
     barrier: &mut dyn CompletionBarrier,
 ) -> Result<RunOutcome, RunError> {
     let mut lifecycle = NoopRunLifecycleObserver;
-    execute_local_run_with_barrier_and_lifecycle(
+    let storage_probe = SystemStorageProbe;
+    execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
         request,
         runtime,
         supervisor,
@@ -163,6 +191,7 @@ pub fn execute_local_run_with_barrier(
         clock,
         barrier,
         &mut lifecycle,
+        &storage_probe,
     )
 }
 
@@ -175,7 +204,8 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
     barrier: &mut dyn CompletionBarrier,
     lifecycle: &mut dyn RunLifecycleObserver,
 ) -> Result<RunOutcome, RunError> {
-    let receipt = execute_local_receipt_with_barrier_and_lifecycle(
+    let storage_probe = SystemStorageProbe;
+    execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
         request,
         runtime,
         supervisor,
@@ -183,7 +213,31 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
         clock,
         barrier,
         lifecycle,
-    )?;
+        &storage_probe,
+    )
+}
+
+pub fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    barrier: &mut dyn CompletionBarrier,
+    lifecycle: &mut dyn RunLifecycleObserver,
+    storage_probe: &dyn StorageProbe,
+) -> Result<RunOutcome, RunError> {
+    let (receipt, artifact_manifest) =
+        execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
+            request,
+            runtime,
+            supervisor,
+            cancellation,
+            clock,
+            barrier,
+            lifecycle,
+            storage_probe,
+        )?;
     let receipt_v2 = request
         .source_snapshot
         .map(|snapshot| {
@@ -200,6 +254,8 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
                 },
                 platform: receipt.receipt.platform.clone(),
                 configuration_digest: receipt.receipt.configuration_digest.clone(),
+                execution_plan: request.envelope.plan.clone(),
+                artifact_manifest: artifact_manifest.clone(),
                 checks: receipt.receipt.checks.clone(),
                 overall_status: receipt.receipt.overall_status,
                 incomplete_reason: receipt.receipt.incomplete_reason.clone(),
@@ -238,12 +294,41 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
     barrier: &mut dyn CompletionBarrier,
     lifecycle: &mut dyn RunLifecycleObserver,
 ) -> Result<ReceiptEnvelopeV1, RunError> {
+    let storage_probe = SystemStorageProbe;
+    execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
+        request,
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        barrier,
+        lifecycle,
+        &storage_probe,
+    )
+    .map(|(receipt, _)| receipt)
+}
+
+fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    barrier: &mut dyn CompletionBarrier,
+    lifecycle: &mut dyn RunLifecycleObserver,
+    storage_probe: &dyn StorageProbe,
+) -> Result<(ReceiptEnvelopeV1, Vec<crate::receipt::ArtifactEvidence>), RunError> {
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
     }
+    ensure_local_environment_allowed(request.envelope)?;
     let repository = fs::canonicalize(request.repository).map_err(RunError::Io)?;
     if !repository.is_dir() {
         return Err(RunError::RepositoryNotDirectory);
+    }
+    if let Some(storage) = &request.envelope.plan.storage {
+        preflight_storage(storage, &request.cache.root().path, storage_probe)
+            .map_err(RunError::Storage)?;
     }
     let identity = RunIdentity {
         project: request.envelope.plan.project.clone(),
@@ -333,7 +418,7 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         request.generation,
         &started_at_utc,
     )?;
-    let environment = docker_execution_environment(&request.envelope.plan.environment_allow);
+    let environment = docker_execution_environment(request.envelope).map_err(RunError::Runtime)?;
     let mut statuses = BTreeMap::new();
     let mut checks = Vec::with_capacity(request.envelope.plan.checks.len());
     let mut terminal_reason: Option<&'static str> = None;
@@ -422,6 +507,9 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         return Err(RunError::ResourcePressure);
     }
 
+    let artifact_manifest = observe_artifacts(&request.envelope.plan, &prepared.plan.run_root)
+        .map_err(RunError::ArtifactObservation)?;
+
     barrier.finalize(&checks)?;
     lifecycle.transition(RunLifecyclePhase::Finalizing)?;
 
@@ -483,7 +571,15 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         redaction_policy_version: REDACTION_POLICY_VERSION.to_owned(),
     })
     .map_err(RunError::Receipt)?;
-    Ok(receipt)
+    Ok((receipt, artifact_manifest))
+}
+
+fn ensure_local_environment_allowed(envelope: &ExecutionPlanEnvelopeV1) -> Result<(), RunError> {
+    if envelope.plan.environment.remote_secret_only.is_empty() {
+        Ok(())
+    } else {
+        Err(RunError::RemoteSecretOnly)
+    }
 }
 
 fn inspect_repository(
@@ -840,12 +936,15 @@ pub enum RunError {
     InvalidCommit,
     StaleCommit,
     ResourcePressure,
+    RemoteSecretOnly,
     GitInspection,
     UnsafeReceiptPath,
     Clock,
     Invariant(&'static str),
     Cache(CacheError),
     Workspace(WorkspaceError),
+    ArtifactObservation(ArtifactObservationError),
+    Storage(StorageError),
     SourceSnapshot(SourceSnapshotError),
     Runtime(RuntimeError),
     Process(ProcessError),
@@ -859,7 +958,8 @@ impl RunError {
             Self::RepositoryNotDirectory
             | Self::DirtyRepository
             | Self::InvalidCommit
-            | Self::UnsafeReceiptPath => 2,
+            | Self::UnsafeReceiptPath
+            | Self::RemoteSecretOnly => 2,
             Self::StaleCommit => 5,
             Self::ResourcePressure => 6,
             Self::Runtime(error) => error.exit_code(),
@@ -867,6 +967,8 @@ impl RunError {
             Self::Process(_) | Self::GitInspection => 4,
             Self::Cache(_)
             | Self::Workspace(_)
+            | Self::ArtifactObservation(_)
+            | Self::Storage(_)
             | Self::SourceSnapshot(_)
             | Self::Clock
             | Self::Invariant(_)
@@ -888,12 +990,17 @@ impl fmt::Display for RunError {
             Self::ResourcePressure => {
                 formatter.write_str("host resource pressure watchdog tripped")
             }
+            Self::RemoteSecretOnly => formatter.write_str(
+                "configuration declares remote-secret-only environment; local attestation is unavailable",
+            ),
             Self::GitInspection => formatter.write_str("Git repository inspection failed"),
             Self::UnsafeReceiptPath => formatter.write_str("receipt output path is unsafe"),
             Self::Clock => formatter.write_str("UTC clock could not be represented"),
             Self::Invariant(message) => write!(formatter, "run invariant failed: {message}"),
             Self::Cache(error) => write!(formatter, "{error}"),
             Self::Workspace(error) => write!(formatter, "{error}"),
+            Self::ArtifactObservation(error) => write!(formatter, "{error}"),
+            Self::Storage(error) => write!(formatter, "{error}"),
             Self::SourceSnapshot(error) => write!(formatter, "{error}"),
             Self::Runtime(error) => write!(formatter, "{error}"),
             Self::Process(error) => write!(formatter, "{error}"),
@@ -908,6 +1015,8 @@ impl std::error::Error for RunError {
         match self {
             Self::Cache(error) => Some(error),
             Self::Workspace(error) => Some(error),
+            Self::ArtifactObservation(error) => Some(error),
+            Self::Storage(error) => Some(error),
             Self::SourceSnapshot(error) => Some(error),
             Self::Runtime(error) => Some(error),
             Self::Process(error) => Some(error),
@@ -925,7 +1034,7 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::cache::{CacheRootOptions, PlatformFamily, ResolvedCacheRoot};
-    use crate::config::ConfigV1;
+    use crate::config::{ArtifactKind, ConfigV1, NormalizedArtifactContract};
     use crate::process::{CapturedStream, ExitOutcome};
     use crate::runtime::DockerCompatibleRuntime;
 
@@ -1225,6 +1334,14 @@ mod tests {
         }
     }
 
+    struct FixedStorageProbe(u64);
+
+    impl StorageProbe for FixedStorageProbe {
+        fn available_bytes(&self, _path: &Path) -> Result<u64, StorageError> {
+            Ok(self.0)
+        }
+    }
+
     struct CountingBarrier {
         calls: usize,
         deny: bool,
@@ -1382,6 +1499,22 @@ depends_on = ["first"]
         }
     }
 
+    #[test]
+    fn remote_secret_only_environment_rejects_local_attestation_before_runtime() {
+        let mut fixture = RunFixture::new("remote-secret-only");
+        fixture
+            .envelope
+            .plan
+            .environment
+            .remote_secret_only
+            .push("DEPLOY_TOKEN".to_owned());
+
+        assert!(matches!(
+            ensure_local_environment_allowed(&fixture.envelope),
+            Err(RunError::RemoteSecretOnly)
+        ));
+    }
+
     impl Drop for RunFixture {
         fn drop(&mut self) {
             if self.root.exists() {
@@ -1470,6 +1603,69 @@ depends_on = ["first"]
             snapshot.evidence().entry_count
         );
         assert_eq!(outcome.receipt_v2, Some(decoded));
+    }
+
+    #[test]
+    fn snapshot_run_seals_observed_artifact_manifest_in_v2_receipt() {
+        let mut fixture = RunFixture::new("snapshot-v2-artifact");
+        fixture.envelope.plan.checks[0]
+            .artifact_contracts
+            .push(NormalizedArtifactContract {
+                path: "results/first.json".to_owned(),
+                kind: ArtifactKind::RegularFile,
+                max_bytes: 1024,
+                max_entries: 1,
+                producer_check: "first".to_owned(),
+            });
+        fixture.envelope.plan_digest =
+            canonical_digest(&fixture.envelope.plan).expect("artifact plan digest");
+        let supervisor = FakeSupervisor::new(ExecutionMode::Pass);
+        let commit = "a".repeat(40);
+        let identity = RunIdentity {
+            project: fixture.envelope.plan.project.clone(),
+            commit: Some(commit.clone()),
+            config_digest: fixture.envelope.plan_digest.clone(),
+            generation: "7".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let resource_root = fixture.root.join("source-snapshot");
+        let mut snapshot = SourceSnapshot::materialize(
+            &fixture.repository,
+            &commit,
+            &resource_root,
+            &supervisor,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("source snapshot");
+        snapshot
+            .prepare_mount_overlay(&fixture.envelope)
+            .expect("mount overlay");
+
+        let outcome = execute_local_run(
+            &RunRequest {
+                envelope: &fixture.envelope,
+                repository: &fixture.repository,
+                cache: &fixture.cache,
+                generation: 7,
+                source_snapshot: Some(&snapshot),
+            },
+            &DockerCompatibleRuntime,
+            &supervisor,
+            &CancellationToken::default(),
+            &FixedClock::new(),
+        )
+        .expect("snapshot run");
+        let receipt = outcome.receipt_v2.expect("v2 receipt");
+
+        assert_eq!(receipt.receipt.artifact_manifest.len(), 1);
+        assert_eq!(
+            receipt.receipt.artifact_manifest[0].path,
+            "results/first.json"
+        );
+        assert_eq!(receipt.receipt.artifact_manifest[0].entry_count, 1);
+        assert_eq!(receipt.receipt.artifact_manifest[0].total_bytes, 0);
     }
 
     #[test]
@@ -1635,6 +1831,54 @@ depends_on = ["first"]
 
         assert!(matches!(error, RunError::ResourcePressure));
         assert!(!fixture.repository.join(".ccp/receipt.json").exists());
+    }
+
+    #[test]
+    fn storage_preflight_stops_before_git_runtime_or_workspace_mutation() {
+        let mut fixture = RunFixture::new("storage-preflight");
+        fixture.envelope.plan.storage = Some(crate::config::NormalizedStorage {
+            min_free_bytes: 100,
+            receipt_journal_reserve_bytes: 20,
+            max_cache_growth_bytes: 30,
+            max_artifact_bytes: 0,
+        });
+        fixture.envelope.plan_digest =
+            canonical_digest(&fixture.envelope.plan).expect("plan digest");
+        let supervisor = FakeSupervisor::new(ExecutionMode::Pass);
+
+        let error = execute_local_run_with_storage_probe(
+            &RunRequest {
+                envelope: &fixture.envelope,
+                repository: &fixture.repository,
+                cache: &fixture.cache,
+                generation: 7,
+                source_snapshot: None,
+            },
+            &DockerCompatibleRuntime,
+            &supervisor,
+            &CancellationToken::default(),
+            &FixedClock::new(),
+            &FixedStorageProbe(149),
+        )
+        .expect_err("insufficient storage must stop before run setup");
+
+        assert!(matches!(
+            error,
+            RunError::Storage(StorageError::Insufficient {
+                available_bytes: 149,
+                required_bytes: 150,
+            })
+        ));
+        assert_eq!(supervisor.git_revisions.load(Ordering::SeqCst), 0);
+        assert_eq!(supervisor.docker_runs.load(Ordering::SeqCst), 0);
+        assert!(!fixture.repository.join(".ccp/receipt.json").exists());
+        assert!(
+            !fixture
+                .cache
+                .workspace_path(&fixture.envelope.plan_digest)
+                .expect("workspace path")
+                .exists()
+        );
     }
 
     #[test]

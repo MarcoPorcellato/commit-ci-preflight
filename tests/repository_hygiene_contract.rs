@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+use std::{fs, path::Path};
 
 use saphyr::{LoadableYamlNode, MappingOwned, YamlOwned};
 
@@ -106,6 +106,7 @@ fn roadmap_and_templates_reference_existing_local_docs() {
         "docs/ADOPTION_GUIDE.md",
         "docs/RECEIPT_SPEC.md",
         "docs/PRODUCT_ROADMAP.md",
+        "docs/PROGRAMME_EXECUTION.md",
         "docs/REPOSITORY_PRESENTATION.md",
         "docs/assets/social-preview.svg",
     ] {
@@ -114,6 +115,19 @@ fn roadmap_and_templates_reference_existing_local_docs() {
             "expected repository-hygiene file exists: {path}"
         );
     }
+}
+
+#[test]
+fn programme_execution_ledger_is_discoverable_from_the_public_readme() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = fs::read_to_string(root.join("README.md")).expect("read README");
+    let ledger = fs::read_to_string(root.join("docs/PROGRAMME_EXECUTION.md"))
+        .expect("read programme execution ledger");
+
+    assert!(readme.contains("docs/PROGRAMME_EXECUTION.md"));
+    assert!(ledger.contains("## Near-term execution order"));
+    assert!(ledger.contains("## Decision and stop rules"));
+    assert!(ledger.contains("PENDING"));
 }
 
 #[test]

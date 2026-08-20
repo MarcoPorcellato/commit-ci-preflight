@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use commit_ci_preflight::config::ConfigV1;
-use commit_ci_preflight::verify::VerificationPolicyV1;
+use commit_ci_preflight::verify::{VerificationPolicyDocument, load_verification_policy_document};
 use saphyr::LoadableYamlNode;
 
 const WORKFLOW: &str = include_str!("../.github/workflows/receipt-gate.yml");
@@ -111,11 +111,17 @@ fn repository_policy_matches_the_normalized_local_plan() {
     let plan = ConfigV1::load(&root.join(".commit-ci-preflight.toml"))
         .and_then(ConfigV1::into_plan)
         .expect("repository plan");
-    let policy = VerificationPolicyV1::load(&root.join(".commit-ci-policy.toml")).expect("policy");
+    let policy = match load_verification_policy_document(&root.join(".commit-ci-policy.toml"))
+        .expect("policy")
+    {
+        VerificationPolicyDocument::V1_1(policy) => policy,
+        _ => panic!("root policy must bind the trusted execution plan"),
+    };
 
     assert_eq!(policy.project, plan.plan.project);
     assert_eq!(policy.configuration_digest, plan.plan_digest);
     assert_eq!(policy.image_reference, plan.plan.runtime.image);
+    assert_eq!(policy.trusted_config, ".commit-ci-preflight.toml");
 
     let mut required: Vec<_> = plan
         .plan
@@ -143,6 +149,32 @@ fn repository_policy_matches_the_normalized_local_plan() {
             .caches
             .iter()
             .any(|cache| cache.id == "test-work" && cache.mount_path == ".ccp-mounts/test-work")
+    );
+}
+
+#[test]
+fn repository_preflight_declares_cache_backed_runtime_environment() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let plan = ConfigV1::load(&root.join(".commit-ci-preflight.toml"))
+        .and_then(ConfigV1::into_plan)
+        .expect("repository plan");
+
+    assert_eq!(plan.plan.schema_version, "1.1");
+    assert!(plan.plan.environment.inherit.is_empty());
+    assert!(plan.plan.environment.fixed.is_empty());
+    assert!(plan.plan.environment.remote_secret_only.is_empty());
+    assert_eq!(
+        plan.plan
+            .environment
+            .runtime_internal
+            .iter()
+            .map(|binding| (binding.name.as_str(), binding.cache_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("CARGO_HOME", "cargo-home"),
+            ("CARGO_TARGET_DIR", "cargo-target"),
+            ("RUSTUP_HOME", "rustup-home"),
+        ]
     );
 }
 

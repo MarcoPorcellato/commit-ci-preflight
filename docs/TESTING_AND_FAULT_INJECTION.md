@@ -48,7 +48,7 @@ must eventually invert the assertion:
 |---|---|---|
 | Immutable source execution (closed: positive snapshot tests replaced the characterization) | `src/source_snapshot.rs`, `src/workspace.rs` | T2 closed in source; native qualification pending |
 | A complete cache entry can be mutated while retaining its complete marker | `src/cache.rs` | T5 |
-| A newly sealed receipt can alter argv while retaining the declared configuration digest | `tests/verification_contract.rs` | T7 |
+| A historical v1 receipt can alter argv while retaining its declared digest | `tests/verification_contract.rs` | Intentional v1 compatibility; policy v1.1 requires v2 and independently rejects the plan mismatch |
 | A partial ticket counter blocks admission | `src/admission.rs` | T6 |
 | A monitor failure currently returns before process cleanup | `src/process.rs` | T4 |
 | Docker execution is currently a one-shot client command without persistent daemon identity | `src/runtime.rs` | T3 |
@@ -95,6 +95,7 @@ The v1 compatibility baseline remains pinned in:
 - `tests/fixtures/receipt-v1-pass.json`
 - `schema/receipt-v1.schema.json`
 - `schema/policy-v1.schema.json`
+- `schema/policy-v1_1.schema.json`
 - `schema/verification-report-v1.schema.json`
 
 Receipt v1 remains readable during hardening, but it cannot provide v2 physical
@@ -104,6 +105,12 @@ repository policy requires evidence that the selected schema cannot carry.
 Receipt v2 is additionally pinned in `schema/receipt-v2.schema.json` and
 `tests/fixtures/receipt-v2-pass.json`. Deterministic tests cover v1/v2 dispatch,
 snapshot-digest tampering, source revalidation and journal ownership.
+
+Trusted-plan policy tests additionally cover policy-relative regular-file
+configuration resolution, independent normalized-plan comparison with bounded
+field pointers, v1 downgrade rejection, unsupported/revoked producers,
+source-snapshot strategy, and the rule that a missing receipt cannot bypass
+trusted configuration validation.
 
 ## Rules for future fault tests
 

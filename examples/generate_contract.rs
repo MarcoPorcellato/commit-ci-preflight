@@ -24,7 +24,8 @@ use commit_ci_preflight::receipt::{
     ReceiptEnvelopeV1, ReceiptV1, RepositoryEvidence, RunEvidence, receipt_schema_json,
 };
 use commit_ci_preflight::verify::{
-    verification_policy_schema_json, verification_report_schema_json,
+    trusted_plan_policy_schema_json, verification_policy_schema_json,
+    verification_report_schema_json,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,6 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     write_exact(
         Path::new("schema/policy-v1.schema.json"),
         verification_policy_schema_json()?.as_bytes(),
+    )?;
+    write_exact(
+        Path::new("schema/policy-v1_1.schema.json"),
+        trusted_plan_policy_schema_json()?.as_bytes(),
     )?;
     write_exact(
         Path::new("schema/verification-report-v1.schema.json"),

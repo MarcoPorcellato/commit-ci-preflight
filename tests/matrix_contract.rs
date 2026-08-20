@@ -271,6 +271,34 @@ timeout_seconds = 30
 }
 
 #[test]
+fn v2_matrix_configuration_rejects_single_runtime_environment_classes() {
+    let input = format!(
+        r#"
+schema_version = "2.0"
+project = "example/project"
+
+[environment.fixed]
+SOURCE_DATE_EPOCH = "0"
+
+[[checks]]
+id = "repository-check"
+runtime_id = "python312"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 30
+
+{}
+{}
+"#,
+        runtime("python312", IMAGE_312),
+        runtime("python311", IMAGE_311),
+    );
+
+    assert!(MatrixConfigV2::parse(&input).is_err());
+}
+
+#[test]
 fn generated_v2_schemas_match_pinned_contracts() {
     assert_eq!(
         matrix_config_schema_json().expect("config schema"),

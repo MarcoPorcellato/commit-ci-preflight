@@ -29,6 +29,16 @@
     },
     "schema_version": {
       "type": "string"
+    },
+    "storage": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StorageConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -39,6 +49,41 @@
     "checks"
   ],
   "$defs": {
+    "ArtifactContractConfig": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_entries": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "kind",
+        "max_bytes",
+        "max_entries"
+      ]
+    },
+    "ArtifactKind": {
+      "type": "string",
+      "enum": [
+        "regular-file",
+        "directory"
+      ]
+    },
     "CacheConfig": {
       "type": "object",
       "properties": {
@@ -62,6 +107,12 @@
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "artifact_contracts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactContractConfig"
           }
         },
         "artifacts": {
@@ -110,6 +161,26 @@
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "fixed": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "remote_secret_only": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "runtime_internal": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeInternalEnvironmentConfig"
           }
         }
       },
@@ -170,11 +241,53 @@
         "pids_limit"
       ]
     },
+    "RuntimeInternalEnvironmentConfig": {
+      "type": "object",
+      "properties": {
+        "cache_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "cache_id"
+      ]
+    },
     "RuntimeKind": {
       "type": "string",
       "enum": [
         "docker_compatible",
         "host"
+      ]
+    },
+    "StorageConfig": {
+      "type": "object",
+      "properties": {
+        "max_cache_growth_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "min_free_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "receipt_journal_reserve_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min_free_bytes",
+        "receipt_journal_reserve_bytes",
+        "max_cache_growth_bytes"
       ]
     }
   }

@@ -22,14 +22,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
+use crate::config::{ConfigError, ConfigV1, ExecutionPlanEnvelopeV1, ExecutionPlanV1};
 use crate::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ReceiptEnvelopeV1, ReceiptEnvelopeV2,
-    ReceiptError, RepositoryEvidence, RunEvidence, canonical_json,
+    ReceiptError, RepositoryEvidence, RunEvidence, SourceSnapshotStrategy, canonical_json,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationPolicyDocument {
     V1(VerificationPolicyV1),
+    V1_1(VerificationPolicyV1_1),
     V2(crate::matrix::MatrixVerificationPolicyV2),
 }
 
@@ -41,6 +43,7 @@ pub enum VerificationPolicyDocumentError {
     Parse(toml::de::Error),
     UnsupportedSchemaVersion,
     V1(PolicyError),
+    V1_1(PolicyError),
     V2(crate::matrix::MatrixError),
 }
 
@@ -55,6 +58,7 @@ impl fmt::Display for VerificationPolicyDocumentError {
                 formatter.write_str("verification policy schema version is unsupported")
             }
             Self::V1(error) => write!(formatter, "{error}"),
+            Self::V1_1(error) => write!(formatter, "{error}"),
             Self::V2(error) => write!(formatter, "{error}"),
         }
     }
@@ -79,6 +83,9 @@ pub fn load_verification_policy_document(
         Some(POLICY_SCHEMA_VERSION) => VerificationPolicyV1::parse(&bytes)
             .map(VerificationPolicyDocument::V1)
             .map_err(VerificationPolicyDocumentError::V1),
+        Some(TRUSTED_PLAN_POLICY_SCHEMA_VERSION) => VerificationPolicyV1_1::parse(&bytes)
+            .map(VerificationPolicyDocument::V1_1)
+            .map_err(VerificationPolicyDocumentError::V1_1),
         Some(crate::matrix::MATRIX_POLICY_SCHEMA_VERSION) => {
             crate::matrix::MatrixVerificationPolicyV2::parse(source)
                 .map(VerificationPolicyDocument::V2)
@@ -89,6 +96,7 @@ pub fn load_verification_policy_document(
 }
 
 pub const POLICY_SCHEMA_VERSION: &str = "1.0";
+pub const TRUSTED_PLAN_POLICY_SCHEMA_VERSION: &str = "1.1";
 pub const VERIFICATION_REPORT_SCHEMA_VERSION: &str = "1.0";
 const MAX_POLICY_BYTES: usize = 1024 * 1024;
 const MAX_RECEIPT_BYTES: usize = 4 * 1024 * 1024;
@@ -173,6 +181,101 @@ impl VerificationPolicyV1 {
             }
         }
         Ok(())
+    }
+}
+
+/// Strict policy version that reconstructs the normalized execution plan from
+/// the trusted checkout before accepting a v2 receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct VerificationPolicyV1_1 {
+    pub schema_version: String,
+    pub project: String,
+    pub configuration_digest: String,
+    pub required_checks: Vec<String>,
+    pub image_reference: String,
+    pub max_age_seconds: u64,
+    pub platforms: Vec<AcceptedPlatformV1>,
+    pub trusted_config: String,
+    pub source_snapshot_strategy: SourceSnapshotStrategy,
+    pub supported_producers: Vec<ProducerContractV1_1>,
+    #[serde(default)]
+    pub revoked_producers: Vec<ProducerContractV1_1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProducerContractV1_1 {
+    pub name: String,
+    pub version: String,
+}
+
+impl VerificationPolicyV1_1 {
+    pub fn parse(bytes: &[u8]) -> Result<Self, PolicyError> {
+        if bytes.len() > MAX_POLICY_BYTES {
+            return Err(PolicyError::TooLarge);
+        }
+        let source = std::str::from_utf8(bytes).map_err(|_| PolicyError::InvalidUtf8)?;
+        let policy: Self = toml::from_str(source).map_err(PolicyError::Parse)?;
+        policy.validate()?;
+        Ok(policy)
+    }
+
+    pub fn validate(&self) -> Result<(), PolicyError> {
+        if self.schema_version != TRUSTED_PLAN_POLICY_SCHEMA_VERSION {
+            return Err(PolicyError::UnsupportedSchemaVersion);
+        }
+        self.baseline().validate()?;
+        validate_trusted_config_path(&self.trusted_config)?;
+        if self.supported_producers.is_empty() {
+            return Err(PolicyError::InvalidField("supported_producers"));
+        }
+        let mut supported = BTreeSet::new();
+        for producer in &self.supported_producers {
+            validate_producer_contract(producer)?;
+            if !supported.insert((&producer.name, &producer.version)) {
+                return Err(PolicyError::DuplicateValue("supported_producers"));
+            }
+        }
+        let mut revoked = BTreeSet::new();
+        for producer in &self.revoked_producers {
+            validate_producer_contract(producer)?;
+            let key = (&producer.name, &producer.version);
+            if !revoked.insert(key) {
+                return Err(PolicyError::DuplicateValue("revoked_producers"));
+            }
+            if supported.contains(&key) {
+                return Err(PolicyError::DuplicateValue("producer_contracts"));
+            }
+        }
+        Ok(())
+    }
+
+    fn baseline(&self) -> VerificationPolicyV1 {
+        VerificationPolicyV1 {
+            schema_version: POLICY_SCHEMA_VERSION.to_owned(),
+            project: self.project.clone(),
+            configuration_digest: self.configuration_digest.clone(),
+            required_checks: self.required_checks.clone(),
+            image_reference: self.image_reference.clone(),
+            max_age_seconds: self.max_age_seconds,
+            platforms: self.platforms.clone(),
+        }
+    }
+
+    fn load_trusted_plan(
+        &self,
+        policy_path: &Path,
+    ) -> Result<ExecutionPlanEnvelopeV1, TrustedPlanError> {
+        let parent = policy_path.parent().ok_or(TrustedPlanError::PolicyPath)?;
+        let config_path = parent.join(&self.trusted_config);
+        let metadata = fs::symlink_metadata(&config_path).map_err(TrustedPlanError::Io)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(TrustedPlanError::UnsafeConfigurationPath);
+        }
+        ConfigV1::load(&config_path)
+            .and_then(ConfigV1::into_plan)
+            .map_err(TrustedPlanError::Config)
     }
 }
 
@@ -356,6 +459,7 @@ pub fn verify_receipt_document_for_policy(
         VerificationPolicyDocument::V1(policy) => {
             verify_receipt_document(bytes, policy, expected_commit, evaluated_at_utc)
         }
+        VerificationPolicyDocument::V1_1(_) => Err(VerificationError::TrustedPolicyPathRequired),
         VerificationPolicyDocument::V2(policy) => crate::matrix::verify_matrix_receipt_document(
             bytes,
             policy,
@@ -364,6 +468,134 @@ pub fn verify_receipt_document_for_policy(
         )
         .map_err(|error| VerificationError::Matrix(error.to_string())),
     }
+}
+
+/// Verify a receipt against a policy loaded from a trusted checkout. Policy
+/// version 1.1 resolves its configuration only relative to that policy file;
+/// callers cannot substitute an arbitrary configuration path.
+pub fn verify_receipt_document_for_policy_path(
+    bytes: &[u8],
+    policy_path: &Path,
+    expected_commit: &str,
+    evaluated_at_utc: &str,
+) -> Result<VerificationReportV1, VerificationError> {
+    let policy = load_verification_policy_document(policy_path)
+        .map_err(|error| VerificationError::PolicyDocument(error.to_string()))?;
+    match &policy {
+        VerificationPolicyDocument::V1_1(policy) => {
+            let trusted_plan = policy
+                .load_trusted_plan(policy_path)
+                .map_err(VerificationError::TrustedPlan)?;
+            verify_trusted_plan_receipt_document(
+                bytes,
+                policy,
+                &trusted_plan,
+                expected_commit,
+                evaluated_at_utc,
+            )
+        }
+        _ => verify_receipt_document_for_policy(bytes, &policy, expected_commit, evaluated_at_utc),
+    }
+}
+
+/// Validate every trusted input selected by a policy path before receipt I/O.
+/// This prevents a missing or malformed receipt from bypassing policy v1.1's
+/// trusted-configuration requirement.
+pub fn validate_verification_policy_path(policy_path: &Path) -> Result<(), VerificationError> {
+    let policy = load_verification_policy_document(policy_path)
+        .map_err(|error| VerificationError::PolicyDocument(error.to_string()))?;
+    if let VerificationPolicyDocument::V1_1(policy) = policy {
+        policy
+            .load_trusted_plan(policy_path)
+            .map_err(VerificationError::TrustedPlan)?;
+    }
+    Ok(())
+}
+
+fn verify_trusted_plan_receipt_document(
+    bytes: &[u8],
+    policy: &VerificationPolicyV1_1,
+    trusted_plan: &ExecutionPlanEnvelopeV1,
+    expected_commit: &str,
+    evaluated_at_utc: &str,
+) -> Result<VerificationReportV1, VerificationError> {
+    let mut report =
+        verify_receipt_document(bytes, &policy.baseline(), expected_commit, evaluated_at_utc)?;
+    report.assurance_scope = "integrity_and_trusted_plan_policy".to_owned();
+    if report.integrity_status != VerificationStatus::Pass {
+        return Ok(report);
+    }
+    if trusted_plan.plan_digest != policy.configuration_digest {
+        report.findings.push(finding(
+            "policy.trusted_config_digest",
+            "trusted_config",
+            "trusted configuration does not reconstruct the policy execution-plan digest",
+        ));
+    }
+    let receipt = match serde_json::from_slice::<ReceiptEnvelopeV2>(bytes) {
+        Ok(receipt) => receipt,
+        Err(_) => {
+            report.findings.push(finding(
+                "policy.receipt_schema",
+                "receipt.schema_version",
+                "trusted-plan policy requires a strict receipt v2",
+            ));
+            finalize_trusted_plan_report(&mut report);
+            return Ok(report);
+        }
+    };
+    compare_execution_plan(
+        &trusted_plan.plan,
+        &receipt.receipt.execution_plan,
+        &mut report.findings,
+    )?;
+    if receipt.receipt.source_snapshot.strategy != policy.source_snapshot_strategy {
+        report.findings.push(finding(
+            "policy.source_snapshot_strategy",
+            "source_snapshot.strategy",
+            "receipt source snapshot strategy is not accepted by trusted policy",
+        ));
+    }
+    let producer = (
+        &receipt.receipt.producer.name,
+        &receipt.receipt.producer.version,
+    );
+    if policy
+        .revoked_producers
+        .iter()
+        .any(|candidate| (&candidate.name, &candidate.version) == producer)
+    {
+        report.findings.push(finding(
+            "policy.producer_revoked",
+            "producer",
+            "receipt producer is explicitly revoked by trusted policy",
+        ));
+    } else if !policy
+        .supported_producers
+        .iter()
+        .any(|candidate| (&candidate.name, &candidate.version) == producer)
+    {
+        report.findings.push(finding(
+            "policy.producer_unsupported",
+            "producer",
+            "receipt producer is not supported by trusted policy",
+        ));
+    }
+    finalize_trusted_plan_report(&mut report);
+    Ok(report)
+}
+
+fn finalize_trusted_plan_report(report: &mut VerificationReportV1) {
+    if !report.findings.is_empty() {
+        report.policy_status = VerificationStatus::Fail;
+    }
+    report.decision = if report.integrity_status == VerificationStatus::Pass
+        && report.policy_status == VerificationStatus::Pass
+    {
+        VerificationDecision::Pass
+    } else {
+        VerificationDecision::Fail
+    };
 }
 
 pub fn receipt_input_failure_report(
@@ -566,6 +798,81 @@ fn check_equal(
     }
 }
 
+const MAX_PLAN_FINDINGS: usize = 128;
+
+fn compare_execution_plan(
+    trusted: &ExecutionPlanV1,
+    receipt: &ExecutionPlanV1,
+    findings: &mut Vec<VerificationFindingV1>,
+) -> Result<(), VerificationError> {
+    let trusted = serde_json::to_value(trusted)
+        .map_err(ReceiptError::Serialization)
+        .map_err(VerificationError::Receipt)?;
+    let receipt = serde_json::to_value(receipt)
+        .map_err(ReceiptError::Serialization)
+        .map_err(VerificationError::Receipt)?;
+    compare_plan_value(&trusted, &receipt, "", findings);
+    Ok(())
+}
+
+fn compare_plan_value(
+    trusted: &serde_json::Value,
+    receipt: &serde_json::Value,
+    path: &str,
+    findings: &mut Vec<VerificationFindingV1>,
+) {
+    if findings.len() >= MAX_PLAN_FINDINGS || trusted == receipt {
+        return;
+    }
+    match (trusted, receipt) {
+        (serde_json::Value::Object(trusted), serde_json::Value::Object(receipt)) => {
+            let keys: BTreeSet<_> = trusted.keys().chain(receipt.keys()).collect();
+            for key in keys {
+                let child_path = format!("{path}/{}", escape_json_pointer(key));
+                match (trusted.get(key), receipt.get(key)) {
+                    (Some(trusted), Some(receipt)) => {
+                        compare_plan_value(trusted, receipt, &child_path, findings)
+                    }
+                    _ => push_plan_finding(&child_path, findings),
+                }
+                if findings.len() >= MAX_PLAN_FINDINGS {
+                    break;
+                }
+            }
+        }
+        (serde_json::Value::Array(trusted), serde_json::Value::Array(receipt)) => {
+            let longest = trusted.len().max(receipt.len());
+            for index in 0..longest {
+                let child_path = format!("{path}/{index}");
+                match (trusted.get(index), receipt.get(index)) {
+                    (Some(trusted), Some(receipt)) => {
+                        compare_plan_value(trusted, receipt, &child_path, findings)
+                    }
+                    _ => push_plan_finding(&child_path, findings),
+                }
+                if findings.len() >= MAX_PLAN_FINDINGS {
+                    break;
+                }
+            }
+        }
+        _ => push_plan_finding(path, findings),
+    }
+}
+
+fn escape_json_pointer(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+fn push_plan_finding(path: &str, findings: &mut Vec<VerificationFindingV1>) {
+    if findings.len() < MAX_PLAN_FINDINGS {
+        findings.push(finding(
+            "policy.execution_plan.field_mismatch",
+            &format!("execution_plan{path}"),
+            "receipt execution-plan field does not match trusted configuration",
+        ));
+    }
+}
+
 pub(crate) fn finding(code: &str, field: &str, message: &str) -> VerificationFindingV1 {
     VerificationFindingV1 {
         code: code.to_owned(),
@@ -576,6 +883,12 @@ pub(crate) fn finding(code: &str, field: &str, message: &str) -> VerificationFin
 
 pub fn verification_policy_schema_json() -> Result<String, VerificationError> {
     serde_json::to_string_pretty(&schema_for!(VerificationPolicyV1))
+        .map_err(ReceiptError::Serialization)
+        .map_err(VerificationError::Receipt)
+}
+
+pub fn trusted_plan_policy_schema_json() -> Result<String, VerificationError> {
+    serde_json::to_string_pretty(&schema_for!(VerificationPolicyV1_1))
         .map_err(ReceiptError::Serialization)
         .map_err(VerificationError::Receipt)
 }
@@ -648,6 +961,35 @@ fn validate_image_reference(value: &str) -> Result<(), PolicyError> {
         return Err(PolicyError::InvalidField("image_reference"));
     }
     validate_digest(digest).map_err(|_| PolicyError::InvalidField("image_reference"))
+}
+
+fn validate_trusted_config_path(value: &str) -> Result<(), PolicyError> {
+    if value.is_empty()
+        || value.len() > 255
+        || value.starts_with('/')
+        || value.starts_with('~')
+        || value.contains('\\')
+        || value.contains(':')
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        Err(PolicyError::InvalidField("trusted_config"))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_producer_contract(value: &ProducerContractV1_1) -> Result<(), PolicyError> {
+    validate_name("producers.name", &value.name)?;
+    if value.version.is_empty()
+        || value.version.len() > 128
+        || value.version.chars().any(char::is_control)
+    {
+        Err(PolicyError::InvalidField("producers.version"))
+    } else {
+        Ok(())
+    }
 }
 
 pub(crate) fn validate_commit(value: &str) -> Result<(), VerificationError> {
@@ -754,6 +1096,37 @@ pub enum PolicyError {
     DuplicateValue(&'static str),
 }
 
+#[derive(Debug)]
+pub enum TrustedPlanError {
+    PolicyPath,
+    Io(io::Error),
+    UnsafeConfigurationPath,
+    Config(ConfigError),
+}
+
+impl fmt::Display for TrustedPlanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PolicyPath => formatter.write_str("trusted policy path has no parent directory"),
+            Self::Io(_) => formatter.write_str("cannot read trusted configuration"),
+            Self::UnsafeConfigurationPath => {
+                formatter.write_str("trusted configuration path is not a regular local file")
+            }
+            Self::Config(error) => write!(formatter, "trusted configuration is invalid: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for TrustedPlanError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Config(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for PolicyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -783,6 +1156,9 @@ impl std::error::Error for PolicyError {
 #[derive(Debug)]
 pub enum VerificationError {
     Policy(PolicyError),
+    PolicyDocument(String),
+    TrustedPlan(TrustedPlanError),
+    TrustedPolicyPathRequired,
     InvalidExpectedCommit,
     InvalidEvaluationTime,
     Receipt(ReceiptError),
@@ -793,6 +1169,10 @@ impl fmt::Display for VerificationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Policy(error) => write!(formatter, "{error}"),
+            Self::PolicyDocument(error) => write!(formatter, "{error}"),
+            Self::TrustedPlan(error) => write!(formatter, "{error}"),
+            Self::TrustedPolicyPathRequired => formatter
+                .write_str("trusted-plan policy verification requires the policy file path"),
             Self::InvalidExpectedCommit => {
                 formatter.write_str("expected commit must be lowercase Git SHA-1 or SHA-256")
             }
@@ -809,6 +1189,7 @@ impl std::error::Error for VerificationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Policy(error) => Some(error),
+            Self::TrustedPlan(error) => Some(error),
             Self::Receipt(error) => Some(error),
             _ => None,
         }

@@ -14,7 +14,7 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::config::ExecutionPlanEnvelopeV1;
+use crate::config::{ArtifactKind, ExecutionPlanEnvelopeV1, NormalizedCheck};
 use crate::process::{
     CancellationToken, CleanupStatus, GenerationGuard, ProcessRequest, ProcessTermination,
     RunIdentity, SupervisorPort,
@@ -78,6 +78,7 @@ pub struct SourceSnapshot {
     evidence: SourceSnapshotEvidenceV1,
     cleaned: bool,
     overlay_files: BTreeSet<String>,
+    overlay_directories: BTreeSet<String>,
 }
 
 impl SourceSnapshot {
@@ -183,6 +184,7 @@ impl SourceSnapshot {
             evidence,
             cleaned: false,
             overlay_files: BTreeSet::new(),
+            overlay_directories: BTreeSet::new(),
         })
     }
 
@@ -214,11 +216,21 @@ impl SourceSnapshot {
         for check in &envelope.plan.checks {
             for artifact in &check.artifacts {
                 let target = self.root.join(artifact);
-                if !target.exists() {
-                    let parent = target.parent().ok_or(SourceSnapshotError::InvalidPath)?;
-                    fs::create_dir_all(parent).map_err(SourceSnapshotError::Io)?;
-                    write_new_file(&target, &[])?;
-                    self.overlay_files.insert(artifact.clone());
+                match artifact_kind_for(check, artifact) {
+                    ArtifactKind::Directory => {
+                        if !target.exists() {
+                            fs::create_dir_all(&target).map_err(SourceSnapshotError::Io)?;
+                            self.overlay_directories.insert(artifact.clone());
+                        }
+                    }
+                    ArtifactKind::RegularFile => {
+                        if !target.exists() {
+                            let parent = target.parent().ok_or(SourceSnapshotError::InvalidPath)?;
+                            fs::create_dir_all(parent).map_err(SourceSnapshotError::Io)?;
+                            write_new_file(&target, &[])?;
+                            self.overlay_files.insert(artifact.clone());
+                        }
+                    }
                 }
             }
         }
@@ -241,6 +253,13 @@ impl SourceSnapshot {
         expected_paths.extend(self.overlay_files.iter().cloned());
         if collect_regular_files(&self.root)? != expected_paths {
             return Err(SourceSnapshotError::SnapshotChanged);
+        }
+        for directory in &self.overlay_directories {
+            let metadata =
+                fs::symlink_metadata(self.root.join(directory)).map_err(SourceSnapshotError::Io)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(SourceSnapshotError::SnapshotChanged);
+            }
         }
         for entry in &self.manifest.entries {
             let absolute = self.root.join(&entry.path);
@@ -275,6 +294,15 @@ impl SourceSnapshot {
         self.cleaned = true;
         Ok(())
     }
+}
+
+fn artifact_kind_for(check: &NormalizedCheck, path: &str) -> ArtifactKind {
+    check
+        .artifact_contracts
+        .iter()
+        .find(|contract| contract.path == path)
+        .map(|contract| contract.kind)
+        .unwrap_or(ArtifactKind::RegularFile)
 }
 
 impl Drop for SourceSnapshot {
@@ -606,6 +634,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use crate::config::ConfigV1;
     use crate::process::{CapturedStream, ExitOutcome, ProcessError, ProcessResult};
 
     static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -700,6 +729,71 @@ mod tests {
                 &identity,
             )
             .expect("revalidate");
+        snapshot.cleanup().expect("cleanup");
+        fs::remove_dir(root).expect("remove root");
+    }
+
+    #[test]
+    fn directory_artifact_overlay_stays_a_directory_and_revalidates() {
+        let root = fixture_root("directory-overlay");
+        fs::create_dir(&root).expect("fixture root");
+        let resource = root.join("resource");
+        let identity = identity();
+        let generation = GenerationGuard::new(identity.clone());
+        let mut snapshot = SourceSnapshot::materialize(
+            &root,
+            COMMIT,
+            &resource,
+            &FakeGit,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("snapshot");
+        let envelope = ConfigV1::parse(
+            r#"
+schema_version = "1.0"
+project = "fixture/project"
+
+[runtime]
+kind = "docker_compatible"
+image = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+
+[[checks]]
+id = "reports"
+required = true
+argv = ["fixture", "reports"]
+working_directory = "."
+timeout_seconds = 60
+artifacts = ["results"]
+
+[[checks.artifact_contracts]]
+path = "results"
+kind = "directory"
+max_bytes = 1024
+max_entries = 10
+"#,
+        )
+        .expect("config")
+        .into_plan()
+        .expect("plan");
+
+        snapshot
+            .prepare_mount_overlay(&envelope)
+            .expect("directory overlay");
+        assert!(snapshot.root().join("results").is_dir());
+        snapshot
+            .revalidate(
+                &FakeGit,
+                &CancellationToken::default(),
+                &generation,
+                &identity,
+            )
+            .expect("revalidate with directory overlay");
+
         snapshot.cleanup().expect("cleanup");
         fs::remove_dir(root).expect("remove root");
     }

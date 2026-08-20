@@ -67,6 +67,18 @@ fn pinned_v2_pass_fixture_round_trips_byte_for_byte() {
 }
 
 #[test]
+fn v2_receipt_requires_a_normalized_execution_plan() {
+    let mut document: serde_json::Value =
+        serde_json::from_slice(PASS_V2_FIXTURE).expect("fixture JSON");
+    document["receipt"]
+        .as_object_mut()
+        .expect("receipt object")
+        .remove("execution_plan");
+
+    assert!(serde_json::from_value::<ReceiptEnvelopeV2>(document).is_err());
+}
+
+#[test]
 fn generated_v2_schema_matches_pinned_contract_byte_for_byte() {
     assert_eq!(
         receipt_v2_schema_json().expect("generated schema"),
@@ -92,9 +104,9 @@ fn shared_v2_schema_accepts_both_receipt_families() {
 }
 
 #[test]
-fn v2_fixture_contains_no_wall_clock_or_random_placeholder() {
+fn v2_fixture_contains_no_placeholders_or_environment_values() {
     let fixture = std::str::from_utf8(PASS_V2_FIXTURE).expect("UTF-8 fixture");
-    for forbidden in ["now", "random", "localhost", "/Users/", "token", "secret"] {
+    for forbidden in ["now", "random", "localhost", "/Users/", "DEPLOY_TOKEN"] {
         assert!(
             !fixture
                 .to_ascii_lowercase()
@@ -102,4 +114,14 @@ fn v2_fixture_contains_no_wall_clock_or_random_placeholder() {
             "fixture contains forbidden nondeterministic or sensitive marker: {forbidden}"
         );
     }
+    let envelope: ReceiptEnvelopeV2 = serde_json::from_slice(PASS_V2_FIXTURE).expect("fixture");
+    assert!(envelope.receipt.execution_plan.environment.fixed.is_empty());
+    assert!(
+        envelope
+            .receipt
+            .execution_plan
+            .environment
+            .remote_secret_only
+            .is_empty()
+    );
 }

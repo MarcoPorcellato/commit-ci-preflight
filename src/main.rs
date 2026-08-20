@@ -65,9 +65,10 @@ use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
 };
 use commit_ci_preflight::source_snapshot::{SourceSnapshot, resolve_clean_head};
+use commit_ci_preflight::storage::{SystemStorageProbe, preflight as preflight_storage};
 use commit_ci_preflight::verify::{
-    VerificationDecision, VerificationError, load_verification_policy_document,
-    receipt_input_failure_report, system_evaluated_at_utc, verify_receipt_document_for_policy,
+    VerificationDecision, VerificationError, receipt_input_failure_report, system_evaluated_at_utc,
+    validate_verification_policy_path, verify_receipt_document_for_policy_path,
 };
 use commit_ci_preflight::workspace::{WorkspaceError, WorkspacePlanV1};
 use serde::Serialize;
@@ -802,16 +803,19 @@ fn print_verify(
     evaluated_at_utc: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
-    let policy = load_verification_policy_document(policy_path).map_err(CliError::usage)?;
+    validate_verification_policy_path(policy_path).map_err(CliError::Verification)?;
     let evaluated_at = evaluated_at_utc
         .map(str::to_owned)
         .map(Ok)
         .unwrap_or_else(system_evaluated_at_utc)
         .map_err(CliError::Verification)?;
     let report = match fs::read(receipt_path) {
-        Ok(receipt) => {
-            verify_receipt_document_for_policy(&receipt, &policy, expected_commit, &evaluated_at)
-        }
+        Ok(receipt) => verify_receipt_document_for_policy_path(
+            &receipt,
+            policy_path,
+            expected_commit,
+            &evaluated_at,
+        ),
         Err(_) => receipt_input_failure_report(expected_commit, &evaluated_at),
     }
     .map_err(CliError::Verification)?;
@@ -847,8 +851,17 @@ fn print_run(
         return print_matrix_run(path, location, generation, admission_timeout_seconds, json);
     }
     let envelope = load_plan(path)?;
+    if !envelope.plan.environment.remote_secret_only.is_empty() {
+        return Err(CliError::Run(RunError::RemoteSecretOnly));
+    }
     let root = resolve_cache_root(location)?;
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
+    if let Some(storage) = &envelope.plan.storage {
+        let storage_probe = SystemStorageProbe;
+        preflight_storage(storage, &cache.root().path, &storage_probe)
+            .map_err(RunError::Storage)
+            .map_err(CliError::Run)?;
+    }
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
     let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
     let journal_id = new_journal_id(&envelope.plan_digest, generation)?;
@@ -1263,7 +1276,9 @@ fn run_failure_kind(error: &RunError) -> RunFailureKindV1 {
     match error {
         RunError::ResourcePressure => RunFailureKindV1::ResourcePressure,
         RunError::StaleCommit => RunFailureKindV1::StaleCommit,
-        RunError::Workspace(_) | RunError::Cache(_) => RunFailureKindV1::PreparationFailed,
+        RunError::Workspace(_) | RunError::Cache(_) | RunError::Storage(_) => {
+            RunFailureKindV1::PreparationFailed
+        }
         RunError::Runtime(_) | RunError::Process(_) => RunFailureKindV1::ExecutionFailed,
         RunError::Receipt(_) | RunError::UnsafeReceiptPath => RunFailureKindV1::FinalizationFailed,
         RunError::Invariant(_) => RunFailureKindV1::Invariant,
@@ -2190,6 +2205,9 @@ impl CliError {
             Self::BenchmarkVerification(_) => 3,
             Self::Guard(error) => error.exit_code(),
             Self::Verification(VerificationError::Policy(_))
+            | Self::Verification(VerificationError::PolicyDocument(_))
+            | Self::Verification(VerificationError::TrustedPlan(_))
+            | Self::Verification(VerificationError::TrustedPolicyPathRequired)
             | Self::Verification(VerificationError::InvalidExpectedCommit)
             | Self::Verification(VerificationError::InvalidEvaluationTime)
             | Self::Verification(VerificationError::Matrix(_)) => 2,

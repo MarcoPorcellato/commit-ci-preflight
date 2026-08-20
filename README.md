@@ -342,7 +342,9 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 - [Complete adoption guide for another repository](docs/ADOPTION_GUIDE.md)
 - [Cross-activity coordination runbook](docs/COORDINATION_RUNBOOK.md)
+- [Coding-harness integration reference](docs/agent-integrations/HARNESS_INTEGRATION.md)
 - [Proof-carrying CI product roadmap](docs/PRODUCT_ROADMAP.md)
+- [Programme execution ledger](docs/PROGRAMME_EXECUTION.md)
 - [Repository presentation and social preview](docs/REPOSITORY_PRESENTATION.md)
 - [Troubleshooting and safe recovery](docs/TROUBLESHOOTING.md)
 - [Implemented architecture](docs/ARCHITECTURE.md)
@@ -362,7 +364,9 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 - [Architecture and implementation plan](docs/IMPLEMENTATION_PLAN.md)
 - [Reliability hardening roadmap](docs/RELIABILITY_HARDENING_PLAN.md)
 - [T2 immutable source snapshot ADR](docs/adr/0002-immutable-git-object-snapshots.md)
+- [T8 attestable environment classes ADR](docs/adr/0004-attestable-environment-classes.md)
 - [T2 contradictions analysis](docs/TRIZ_CONTRADICTIONS.md)
+- [T8 environment contradictions analysis](docs/TRIZ_ENVIRONMENT_CONTRACTS.md)
 - [T2 invariant evidence matrix](docs/INVARIANT_EVIDENCE_MATRIX.md)
 - [Testing and fault-injection contract](docs/TESTING_AND_FAULT_INJECTION.md)
 

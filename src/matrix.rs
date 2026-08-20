@@ -30,8 +30,8 @@ use serde::{Deserialize, Serialize};
 use crate::cache::ManagedCache;
 use crate::config::{
     CacheConfig, CheckConfig, ConfigError, ConfigV1, EnvironmentConfig, ExecutionPlanEnvelopeV1,
-    ExecutionPlanV1, NormalizedCache, NormalizedReceipt, NormalizedRuntime, ReceiptConfig,
-    RuntimeConfig, RuntimeKind, validate_identifier,
+    ExecutionPlanV1, NormalizedCache, NormalizedEnvironment, NormalizedReceipt, NormalizedRuntime,
+    ReceiptConfig, RuntimeConfig, RuntimeKind, validate_identifier,
 };
 use crate::process::{CancellationToken, SupervisorPort};
 use crate::receipt::{
@@ -64,10 +64,26 @@ pub struct MatrixConfigV2 {
     #[serde(default)]
     pub receipt: ReceiptConfig,
     #[serde(default)]
-    pub environment: EnvironmentConfig,
+    pub environment: MatrixEnvironmentConfigV2,
     #[serde(default)]
     pub caches: Vec<CacheConfig>,
     pub checks: Vec<MatrixCheckConfigV2>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+#[schemars(rename = "EnvironmentConfig")]
+pub struct MatrixEnvironmentConfigV2 {
+    pub allow: Vec<String>,
+}
+
+impl MatrixEnvironmentConfigV2 {
+    fn as_v1(&self) -> EnvironmentConfig {
+        EnvironmentConfig {
+            allow: self.allow.clone(),
+            ..EnvironmentConfig::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -121,6 +137,7 @@ impl MatrixCheckConfigV2 {
             timeout_seconds: self.timeout_seconds,
             depends_on: self.depends_on.clone(),
             artifacts: self.artifacts.clone(),
+            artifact_contracts: Vec::new(),
         }
     }
 }
@@ -136,7 +153,7 @@ pub struct MatrixPlanV2 {
     pub schema_version: String,
     pub project: String,
     pub receipt: NormalizedReceipt,
-    pub environment_allow: Vec<String>,
+    pub environment: NormalizedEnvironment,
     pub caches: Vec<NormalizedCache>,
     pub runtimes: Vec<MatrixRuntimePlanV2>,
 }
@@ -226,15 +243,16 @@ impl MatrixConfigV2 {
                 project: self.project.clone(),
                 runtime: runtime.as_runtime(),
                 receipt: self.receipt.clone(),
-                environment: self.environment.clone(),
+                environment: self.environment.as_v1(),
                 caches: self.caches.clone(),
+                storage: None,
                 checks: group_checks,
             }
             .into_plan()
             .map_err(MatrixError::Config)?;
             if shared_environment.is_none() {
                 shared_receipt = Some(group.plan.receipt.clone());
-                shared_environment = Some(group.plan.environment_allow.clone());
+                shared_environment = Some(group.plan.environment.clone());
                 shared_caches = Some(group.plan.caches.clone());
             }
             runtime_plans.push(MatrixRuntimePlanV2 {
@@ -248,7 +266,7 @@ impl MatrixConfigV2 {
             schema_version: MATRIX_CONFIG_SCHEMA_VERSION.to_owned(),
             project: self.project,
             receipt: shared_receipt.expect("at least two runtimes"),
-            environment_allow: shared_environment.expect("at least two runtimes"),
+            environment: shared_environment.expect("at least two runtimes"),
             caches: shared_caches.expect("at least two runtimes"),
             runtimes: runtime_plans,
         };
@@ -274,8 +292,9 @@ impl MatrixPlanEnvelopeV2 {
                 project: self.plan.project.clone(),
                 runtime: runtime.runtime.clone(),
                 receipt: self.plan.receipt.clone(),
-                environment_allow: self.plan.environment_allow.clone(),
+                environment: self.plan.environment.clone(),
                 caches: self.plan.caches.clone(),
+                storage: None,
                 checks: runtime.checks.clone(),
             };
             let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
@@ -284,7 +303,11 @@ impl MatrixPlanEnvelopeV2 {
             }
             result.push((
                 runtime.id.clone(),
-                ExecutionPlanEnvelopeV1 { plan_digest, plan },
+                ExecutionPlanEnvelopeV1 {
+                    plan_digest,
+                    plan,
+                    fixed_environment: BTreeMap::new(),
+                },
             ));
         }
         Ok(result)

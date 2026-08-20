@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
+
 use commit_ci_preflight::receipt::{EvidenceStatus, ReceiptEnvelopeV1, ReceiptEnvelopeV2};
 use commit_ci_preflight::verify::{
-    PolicyError, VerificationDecision, VerificationError, VerificationPolicyV1, VerificationStatus,
+    PolicyError, VerificationDecision, VerificationError, VerificationPolicyDocument,
+    VerificationPolicyV1, VerificationPolicyV1_1, VerificationStatus,
+    load_verification_policy_document, trusted_plan_policy_schema_json,
     verification_policy_schema_json, verification_report_schema_json, verify_receipt_document,
+    verify_receipt_document_for_policy_path,
 };
 
 const RECEIPT: &[u8] = include_bytes!("fixtures/receipt-v1-pass.json");
@@ -25,8 +30,12 @@ const EXAMPLE_POLICY: &[u8] = include_bytes!("../examples/policy/example-project
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
 const POLICY_SCHEMA: &str = include_str!("../schema/policy-v1.schema.json");
+const TRUSTED_PLAN_POLICY_SCHEMA: &str = include_str!("../schema/policy-v1_1.schema.json");
 const REPORT_SCHEMA: &str = include_str!("../schema/verification-report-v1.schema.json");
 const VERIFY_SOURCE: &str = include_str!("../src/verify.rs");
+const TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-trusted-plan.toml";
+const ALTERED_TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-trusted-plan-altered.toml";
+const ROOT_POLICY: &str = ".commit-ci-policy.toml";
 
 fn policy() -> VerificationPolicyV1 {
     VerificationPolicyV1::parse(POLICY).expect("policy")
@@ -105,19 +114,128 @@ fn valid_receipt_passes_integrity_and_repository_policy() {
 
 #[test]
 fn valid_v2_receipt_passes_and_snapshot_tampering_fails_integrity() {
+    let envelope: ReceiptEnvelopeV2 = serde_json::from_slice(RECEIPT_V2).expect("v2 receipt");
+    let mut v2_policy = policy();
+    v2_policy.configuration_digest = envelope.receipt.configuration_digest.clone();
     let report =
-        verify_receipt_document(RECEIPT_V2, &policy(), COMMIT, EVALUATED_AT).expect("verify v2");
+        verify_receipt_document(RECEIPT_V2, &v2_policy, COMMIT, EVALUATED_AT).expect("verify v2");
     assert_eq!(report.integrity_status, VerificationStatus::Pass);
     assert_eq!(report.policy_status, VerificationStatus::Pass);
     assert_eq!(report.decision, VerificationDecision::Pass);
 
-    let mut envelope: ReceiptEnvelopeV2 = serde_json::from_slice(RECEIPT_V2).expect("v2 receipt");
+    let mut envelope = envelope;
     envelope.receipt.source_snapshot.manifest_digest = format!("sha256:{}", "f".repeat(64));
     let tampered = serde_json::to_vec(&envelope).expect("tampered v2");
-    let report =
-        verify_receipt_document(&tampered, &policy(), COMMIT, EVALUATED_AT).expect("tamper report");
+    let report = verify_receipt_document(&tampered, &v2_policy, COMMIT, EVALUATED_AT)
+        .expect("tamper report");
     assert_eq!(report.integrity_status, VerificationStatus::Fail);
     assert_eq!(report.policy_status, VerificationStatus::NotRun);
+}
+
+#[test]
+fn receipt_v2_rejects_unknown_execution_plan_fields_before_policy_evaluation() {
+    let mut raw: serde_json::Value = serde_json::from_slice(RECEIPT_V2).expect("receipt JSON");
+    raw["receipt"]["execution_plan"]["unexpected"] = serde_json::Value::Bool(true);
+    let report = verify_receipt_document(
+        &serde_json::to_vec(&raw).expect("tampered bytes"),
+        &policy(),
+        COMMIT,
+        EVALUATED_AT,
+    )
+    .expect("verification report");
+    assert_eq!(report.integrity_status, VerificationStatus::Fail);
+    assert_eq!(report.policy_status, VerificationStatus::NotRun);
+    assert!(finding_codes(&report).contains(&"receipt.parse_or_shape"));
+}
+
+#[test]
+fn trusted_plan_policy_reconstructs_the_plan() {
+    let policy = Path::new(env!("CARGO_MANIFEST_DIR")).join(TRUSTED_PLAN_POLICY);
+    let report = verify_receipt_document_for_policy_path(RECEIPT_V2, &policy, COMMIT, EVALUATED_AT)
+        .expect("trusted-plan verification");
+    assert_eq!(report.decision, VerificationDecision::Pass);
+}
+
+#[test]
+fn trusted_plan_policy_reports_the_changed_execution_plan_field() {
+    let policy = Path::new(env!("CARGO_MANIFEST_DIR")).join(ALTERED_TRUSTED_PLAN_POLICY);
+    let report = verify_receipt_document_for_policy_path(RECEIPT_V2, &policy, COMMIT, EVALUATED_AT)
+        .expect("trusted-plan mismatch report");
+    assert_eq!(report.integrity_status, VerificationStatus::Pass);
+    assert_eq!(report.policy_status, VerificationStatus::Fail);
+    assert_eq!(report.decision, VerificationDecision::Fail);
+    assert!(report.findings.iter().any(|finding| {
+        finding.code == "policy.execution_plan.field_mismatch"
+            && finding.field == "execution_plan/checks/0/argv/2"
+    }));
+    assert!(report.findings.iter().all(|finding| {
+        !finding.message.contains("--release") && !finding.message.contains("cargo")
+    }));
+}
+
+#[test]
+fn repository_policy_uses_the_trusted_plan_contract() {
+    let policy = Path::new(env!("CARGO_MANIFEST_DIR")).join(ROOT_POLICY);
+    assert!(matches!(
+        load_verification_policy_document(&policy).expect("root policy"),
+        VerificationPolicyDocument::V1_1(_)
+    ));
+}
+
+#[test]
+fn trusted_plan_policy_rejects_downgrade_unsupported_producer_and_snapshot_strategy() {
+    let policy = Path::new(env!("CARGO_MANIFEST_DIR")).join(TRUSTED_PLAN_POLICY);
+    let v1 = verify_receipt_document_for_policy_path(RECEIPT, &policy, COMMIT, EVALUATED_AT)
+        .expect("downgrade report");
+    assert_eq!(v1.integrity_status, VerificationStatus::Pass);
+    assert!(finding_codes(&v1).contains(&"policy.receipt_schema"));
+
+    let original: ReceiptEnvelopeV2 = serde_json::from_slice(RECEIPT_V2).expect("v2 receipt");
+    let mut unsupported = original.receipt.clone();
+    unsupported.producer.version = "0.1.1".to_owned();
+    let unsupported = ReceiptEnvelopeV2::seal(unsupported).expect("seal producer receipt");
+    let unsupported = verify_receipt_document_for_policy_path(
+        &unsupported.canonical_bytes().expect("producer bytes"),
+        &policy,
+        COMMIT,
+        EVALUATED_AT,
+    )
+    .expect("producer report");
+    assert!(finding_codes(&unsupported).contains(&"policy.producer_unsupported"));
+
+    let mut strategy = original.receipt;
+    strategy.source_snapshot.strategy =
+        commit_ci_preflight::receipt::SourceSnapshotStrategy::GitArchive;
+    let strategy = ReceiptEnvelopeV2::seal(strategy).expect("seal snapshot receipt");
+    let strategy = verify_receipt_document_for_policy_path(
+        &strategy.canonical_bytes().expect("snapshot bytes"),
+        &policy,
+        COMMIT,
+        EVALUATED_AT,
+    )
+    .expect("snapshot report");
+    assert!(finding_codes(&strategy).contains(&"policy.source_snapshot_strategy"));
+}
+
+#[test]
+fn trusted_plan_policy_parser_rejects_unsafe_config_path_and_overlapping_producers() {
+    let policy = std::str::from_utf8(include_bytes!("fixtures/policy-v1_1-trusted-plan.toml"))
+        .expect("policy UTF-8");
+    let unsafe_path = policy.replace(
+        "trusted_config = \"config-v1-trusted-plan.toml\"",
+        "trusted_config = \"../other.toml\"",
+    );
+    assert!(matches!(
+        VerificationPolicyV1_1::parse(unsafe_path.as_bytes()),
+        Err(PolicyError::InvalidField("trusted_config"))
+    ));
+    let overlap = format!(
+        "{policy}\n[[revoked_producers]]\nname = \"commit-ci-preflight\"\nversion = \"0.1.0\"\n"
+    );
+    assert!(matches!(
+        VerificationPolicyV1_1::parse(overlap.as_bytes()),
+        Err(PolicyError::DuplicateValue("producer_contracts"))
+    ));
 }
 
 #[test]
@@ -361,6 +479,14 @@ fn generated_policy_and_report_schemas_match_pinned_bytes() {
         REPORT_SCHEMA
     );
     VerificationPolicyV1::parse(EXAMPLE_POLICY).expect("example policy");
+}
+
+#[test]
+fn generated_trusted_plan_policy_schema_matches_pinned_bytes() {
+    assert_eq!(
+        trusted_plan_policy_schema_json().expect("trusted-plan policy schema"),
+        TRUSTED_PLAN_POLICY_SCHEMA
+    );
 }
 
 #[test]

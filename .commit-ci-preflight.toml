@@ -1,4 +1,4 @@
-schema_version = "1.0"
+schema_version = "1.1"
 project = "MarcoPorcellato/commit-ci-preflight"
 
 [runtime]
@@ -13,8 +13,17 @@ network = true
 output = ".ccp/receipt.json"
 freshness_seconds = 86400
 
-[environment]
-allow = ["CARGO_HOME", "CARGO_TARGET_DIR", "RUSTUP_HOME"]
+[[environment.runtime_internal]]
+name = "CARGO_HOME"
+cache_id = "cargo-home"
+
+[[environment.runtime_internal]]
+name = "CARGO_TARGET_DIR"
+cache_id = "cargo-target"
+
+[[environment.runtime_internal]]
+name = "RUSTUP_HOME"
+cache_id = "rustup-home"
 
 [[caches]]
 id = "cargo-home"

@@ -16,6 +16,9 @@ use std::process::Command;
 
 const RECEIPT: &str = "tests/fixtures/receipt-v1-pass.json";
 const POLICY: &str = "tests/fixtures/policy-v1.toml";
+const RECEIPT_V2: &str = "tests/fixtures/receipt-v2-pass.json";
+const TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-trusted-plan.toml";
+const INVALID_TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-missing-config.toml";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
 
@@ -48,6 +51,36 @@ fn verify_cli_emits_machine_report_and_zero_only_for_pass() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
     assert_eq!(report["integrity_status"], "PASS");
     assert_eq!(report["policy_status"], "PASS");
+    assert_eq!(report["decision"], "PASS");
+}
+
+#[test]
+fn verify_cli_resolves_trusted_plan_policy_relative_to_the_policy_file() {
+    let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "verify",
+            "--receipt",
+            RECEIPT_V2,
+            "--policy",
+            TRUSTED_PLAN_POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ])
+        .output()
+        .expect("trusted-plan verify CLI");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(
+        report["assurance_scope"],
+        "integrity_and_trusted_plan_policy"
+    );
     assert_eq!(report["decision"], "PASS");
 }
 
@@ -102,4 +135,24 @@ fn missing_receipt_is_verification_failure_and_invalid_commit_is_usage() {
         .expect("invalid commit CLI");
     assert_eq!(invalid.status.code(), Some(2));
     assert!(invalid.stdout.is_empty());
+}
+
+#[test]
+fn missing_receipt_does_not_bypass_trusted_policy_configuration_validation() {
+    let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "verify",
+            "--receipt",
+            "tests/fixtures/does-not-exist.json",
+            "--policy",
+            INVALID_TRUSTED_PLAN_POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--json",
+        ])
+        .output()
+        .expect("invalid trusted policy CLI");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read trusted configuration"));
 }

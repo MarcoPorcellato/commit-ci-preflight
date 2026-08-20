@@ -9,6 +9,37 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T8 artifact-evidence sub-slice: typed regular-file and directory contracts
+  are normalized into the execution plan; snapshot-backed receipt v2 records a
+  bounded, producer-linked canonical final-state manifest from CCP-owned
+  mounts and rejects missing, symlinked, escaped, replaced, oversized, or
+  over-count output before cache promotion or receipt sealing. Disk and
+  runtime-resource contracts and native qualification remain pending.
+- T8 storage-capacity sub-slice: schema `1.2` binds an explicit retained-free,
+  receipt/journal, cache-growth, and declared-artifact allowance into the plan.
+  Local runs preflight the CCP-owned cache-root filesystem before Git, runtime,
+  or workspace work and fail closed without inspecting or deleting unowned
+  data. Inode reservation, owned cache-total enforcement, runtime-resource
+  capability evidence, and native qualification remain pending.
+- Receipt v2 now embeds the complete normalized public execution plan and
+  rejects a configuration digest that does not match it. Policy `1.1`
+  independently reconstructs a regular policy-relative trusted configuration,
+  rejects v1 downgrade and bounded field mismatches, and constrains declared
+  producer tuples and source-snapshot strategy. Fixed literals and secret
+  values remain outside the receipt; signing and native qualification remain
+  separate gates.
+- Added ADR 0004 and a T8 TRIZ ledger defining fixed, runtime-internal, and
+  remote-secret-only environment classes. The decision preserves v1 parsing,
+  prohibits silent host-value synthesis, and gates the cache-backed Rust
+  ergonomics fix on trusted-plan verification.
+- Added vendor-neutral coding-harness reference documentation: a common CCP
+  contract, evidence matrix, fourteen truthful L0/L1 harness pages, activity
+  handoff template, and a deterministic public-boundary contract test. No page
+  claims native harness verification or changes global harness configuration.
+- Added a canonical programme execution ledger that distinguishes implemented,
+  qualified, and released states; protects divergent local Receipt v2 work;
+  and orders reliability, environment, harness, cost, platform, and stable
+  release milestones without converting missing evidence into a PASS claim.
 - T6 admission candidate: queue, status, ticket publication, slot contention,
   and release use a cooperative bounded lock primitive; ticket markers are
   published only after durable staging; the high-water ticket counter uses
@@ -118,6 +149,12 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Added schema `1.1` explicit environment classes for single-runtime plans:
+  fixed non-secret values are digest-bound and fail closed on a missing or
+  altered private binding, runtime-internal values derive only from declared
+  cache IDs, and remote-secret-only plans reject local attestation before
+  admission. The repository Rust preflight now uses cache-backed bindings
+  without host-path exports; trusted receipt-plan reconstruction remains T7.
 - Refreshed the reliability-hardening checkpoint after T2 conflict resolution:
   draft PR #40 is stacked on PR #39, its exact-head qualification remains
   pending when the local CCP control plane reports `unknown`, and the previous

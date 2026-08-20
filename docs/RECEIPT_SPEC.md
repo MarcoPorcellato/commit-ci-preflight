@@ -23,9 +23,12 @@ A receipt document is a UTF-8 JSON object containing:
 Unknown fields are rejected at every typed object boundary.
 
 Schema v2 preserves the common v1 evidence and adds required
-`source_snapshot` evidence: strategy, canonical manifest digest and entry
-count. New snapshot-backed runs publish v2; historical v1 documents remain
-strictly readable and are never reinterpreted as carrying snapshot assurance.
+`source_snapshot` evidence plus a complete public `execution_plan`. The plan
+contains normalized checks, runtime limits, caches and class-safe environment
+metadata; it never contains a fixed literal or a secret value. Its canonical
+digest MUST equal `configuration_digest`. New snapshot-backed runs publish v2;
+historical v1 documents remain strictly readable and are never reinterpreted as
+carrying snapshot or plan-binding assurance.
 The pinned v2 schema and vector are `schema/receipt-v2.schema.json` and
 `tests/fixtures/receipt-v2-pass.json`.
 
@@ -62,6 +65,37 @@ The journal stores a separate private `source-snapshot-v1.json` binding with
 the exact commit, manifest digest, entry count and fixed CCP-owned resource ID.
 That record supports bounded recovery; it is not copied into the receipt and
 does not add host-path disclosure.
+
+## Execution-plan evidence in v2
+
+The embedded normalized plan makes the execution claim inspectable and binds
+every plan field into the receipt integrity identifier. A changed plan cannot
+retain the declared configuration digest and remain semantically valid.
+
+Receipt self-consistency alone is not trusted-plan verification. Policy `1.1`
+implements the additional boundary: its verifier reconstructs the normalized
+plan from the policy-relative trusted configuration and compares it field by
+field with this public plan. It rejects a mismatch before a PASS decision, while
+continuing to exclude fixed literal and secret values. This comparison does not
+establish cryptographic producer identity or host attestation.
+
+## Artifact-manifest evidence in v2
+
+`artifact_manifest` is backward-compatible as an empty or omitted field for a
+historical plan with no `artifact_contracts`. When a plan declares artifact
+contracts, v2 validation requires an exact path-for-path manifest match. Each
+record carries the contract path, producer check ID, declared kind, observed
+entry count, observed total bytes, and a canonical `sha256:` digest of the
+bounded final-state content manifest.
+
+For a regular file, `entry_count` MUST be exactly one. For a directory, every
+entry is traversed in deterministic path order. Missing output, a symlink or
+unsafe object, an escaped ancestor, concurrent replacement, or an exceeded
+size or entry limit prevents the run from sealing a receipt. The receipt
+contains neither artifact contents nor local filesystem paths. This
+final-state slice does not yet claim an initial-state manifest, artifact
+retention, or cross-host artifact reconstruction; those remain separate
+reliability work.
 
 ## Status semantics
 
@@ -129,8 +163,9 @@ Structural and integrity verification MUST:
 - compare it exactly with `receipt_id`.
 
 Policy verification for freshness, accepted platforms, exact externally
-supplied commit SHA, required check sets, image, and configuration is specified
-in [`VERIFICATION_POLICY.md`](VERIFICATION_POLICY.md). It remains distinguishable
+supplied commit SHA, required check sets, image, configuration, and—under
+policy `1.1`—trusted-plan reconstruction is specified in
+[`VERIFICATION_POLICY.md`](VERIFICATION_POLICY.md). It remains distinguishable
 from structural integrity. Trusted identity and signatures belong to later
 phases.
 

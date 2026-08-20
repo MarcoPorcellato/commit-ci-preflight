@@ -659,6 +659,15 @@ Exit gate:
 
 ### PR T7 — Trusted plan binding and receipt v2
 
+Status (local implementation tranche): policy `1.1` reconstructs a normalized
+plan only from a regular non-symlink configuration selected relative to the
+trusted policy. It accepts receipt v2 only, independently compares bounded
+field pointers without values, constrains producer name/version and snapshot
+strategy, and keeps v1 policy/receipt behavior historical and separate. The
+root policy has migrated locally to `1.1`. This is deterministic source evidence
+only until the exact candidate has the required independent receipt and review;
+it does not claim signing, producer identity, or native qualification.
+
 Deliverables:
 
 - verifier loads trusted configuration and policy from the trusted base;
@@ -679,6 +688,19 @@ Exit gate:
 - signing remains deferred and cannot mask a plan mismatch.
 
 ### PR T8 — Environment, artifact, disk, and runtime-resource contracts
+
+Status (local artifact and capacity sub-slices): typed contracts now bind artifact path,
+kind, byte and entry limits, and producer check into the normalized plan.
+Snapshot-backed v2 runs observe only the CCP-owned writable artifact mount
+after source revalidation and before barrier, cache promotion, and receipt
+sealing. They record a canonical final-state digest and fail closed on missing,
+symlinked, escaped, replaced, oversized, or over-count output. Initial-state
+evidence, inode reservation, owned cache-total enforcement, RAM and swap
+capability verification, and native qualification remain pending. Schema 1.2
+now declares a bounded disk-capacity allowance and preflights free bytes on the
+CCP-owned cache-root filesystem before Git, runtime, or workspace work; it
+never deletes data and records no host capacity sample in receipts. This status
+does not close T8 or its exit gate.
 
 Deliverables:
 

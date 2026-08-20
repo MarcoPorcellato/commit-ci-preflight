@@ -7,21 +7,17 @@ compatible runtime, managed workspace, cache, and receipt contracts. It runs
 only explicit argv from a clean Git checkout and never inserts a shell.
 
 ```console
-export CARGO_HOME=.ccp-mounts/cargo-home
-export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
-export RUSTUP_HOME=.ccp-mounts/rustup-home
 commit-ci-preflight run \
   --config .commit-ci-preflight.toml \
   --repository . \
   --generation 1
 ```
 
-The repository configuration allowlists these three variables and mounts the
-matching paths as writable managed caches. Set them before the run; otherwise
-Cargo or Rustup can fall back to a read-only image path and the first check can
-fail even though the same command passes on the host. CCP does not invent
-allowlisted environment values because they are part of the trusted operator
-input. `dry-run --json` reports names and mounts, never secret values.
+The repository configuration uses schema `1.1` runtime-internal bindings for
+the three Cargo/Rustup cache variables. CCP derives their container values from
+the reviewed managed-cache mounts, so the operator must not export host paths
+before the run. `dry-run --json` reports names and mounts, never fixed or secret
+values.
 
 Use `--json` to print the canonical receipt. Raw stdout and stderr remain local
 bounded process state and are not emitted by default or stored in the receipt;
@@ -54,14 +50,19 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 
 ## Execution sequence
 
-1. Parse and normalize schema `1.0`.
+1. Parse and normalize schema `1.0`, the explicit-environment schema `1.1`, or
+   schema `1.2` with its explicit storage-capacity policy.
 2. Perform bounded non-heavy setup required by the command: `run` resolves and
    initializes its selected cache, while `benchmark` may perform its optional
    runtime probe.
-3. Acquire the host-wide admission slot for `run`, `benchmark`, or `guard exec`,
+3. For schema `1.2` `run`, fail closed if the selected CCP-owned cache-root
+   filesystem cannot retain the declared free-space reserve after receipt/journal,
+   maximum cache-growth, and declared artifact allowances. This check never
+   deletes data and does not expose the host free-space sample in a receipt.
+4. Acquire the host-wide admission slot for `run`, `benchmark`, or `guard exec`,
    immediately before heavy execution, waiting cooperatively with cancellation
    until the selected timeout.
-4. On macOS, take a fresh strict `macos-v4` host-memory sample after slot
+5. On macOS, take a fresh strict `macos-v4` host-memory sample after slot
    acquisition. Denied, malformed, contradictory, timed-out, or uncertain
    samples release the slot and stop without starting heavy work. Linux and
    Windows report resource protection as unsupported and not enforced.
@@ -70,22 +71,22 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
    of physical RAM. Boundaries are inclusive and independently mandatory.
    Compression alone is advisory; it denies admission only at 70% or more
    together with another pressure signal.
-5. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
+6. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
    receipt output itself is excluded from this dirty check.
-6. For `run`, probe the Docker-compatible runtime with bounded output and deadline.
-7. For `run`, acquire the plan-generation workspace lock.
-8. For `run`, prepare only declared cache directories and artifact files.
-9. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
-10. For `run`, start the macOS watchdog before local check execution. It samples
+7. For `run`, probe the Docker-compatible runtime with bounded output and deadline.
+8. For `run`, acquire the plan-generation workspace lock.
+9. For `run`, prepare only declared cache directories and artifact files.
+10. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
+11. For `run`, start the macOS watchdog before local check execution. It samples
     every two seconds, cancels through the existing process supervisor on a
     hard trip or 15 consecutive compound soft samples (about 30 seconds), and
     joins before slot release. Compressor occupancy alone never cancels an
     otherwise healthy in-progress run.
     `benchmark` has no mid-workload watchdog in this tranche.
-11. Execute the `run` checks or benchmark workload with timeout, cancellation, and
+12. Execute the `run` checks or benchmark workload with timeout, cancellation, and
     stale-generation guards.
-12. Mark cache entries complete only when every check passes.
-13. Seal and atomically write the canonical receipt.
+13. Mark cache entries complete only when every check passes.
+14. Seal and atomically write the canonical receipt.
 
 For `guard exec` on macOS, pass `--resource-profile <class>` and a stable
 `--resource-workload-family <cohort>` to classify an admitted workload without
@@ -121,7 +122,7 @@ converted into PASS.
 - container root: read-only;
 - network: `none` unless explicitly enabled;
 - environment: fixed `TMPDIR=/tmp`, runtime-discovery fields for the Docker
-  client, and only user names declared in `environment.allow`;
+  client, and only values admitted by the normalized environment contract;
 - no Docker socket mount, privileged mode, host networking, or implicit shell.
 
 This is strong containment for trusted project checks, not a security sandbox

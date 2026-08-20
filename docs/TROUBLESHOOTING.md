@@ -102,21 +102,21 @@ Do not synthesize a receipt or reinterpret an absent receipt as PASS.
 
 ## First Rust check fails only inside the read-only container
 
-The repository's own `.commit-ci-preflight.toml` allowlists `CARGO_HOME`,
-`CARGO_TARGET_DIR`, and `RUSTUP_HOME` and provides writable cache mounts at the
-matching relative paths. Export those reviewed values before invoking `run`:
+The repository's own `.commit-ci-preflight.toml` uses schema `1.1` and derives
+`CARGO_HOME`, `CARGO_TARGET_DIR`, and `RUSTUP_HOME` from declared managed-cache
+mounts. Do not export host paths for these variables. First confirm the exact
+normalized bindings without starting Docker:
 
 ```console
-export CARGO_HOME=.ccp-mounts/cargo-home
-export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
-export RUSTUP_HOME=.ccp-mounts/rustup-home
+commit-ci-preflight plan --config .commit-ci-preflight.toml --json
+commit-ci-preflight dry-run --config .commit-ci-preflight.toml --repository . --json
 ```
 
-If they are absent, Cargo or Rustup can select a read-only path from the image
-and an otherwise valid `format` check can exit `1`. Preserve that failed
-receipt, confirm the exact configuration and mounts with `dry-run --json`, and
-start a new monotonically higher generation only after correcting the operator
-environment. Do not make the repository mount writable.
+If a check still exits `1`, preserve the failed receipt if it exists, confirm
+the cache destinations and image are the expected reviewed values, then start a
+new monotonically higher generation only after correcting the configuration or
+cache state. Do not make the repository mount writable or bypass the
+environment contract with host exports.
 
 ## Workspace lock after a forced stop
 
