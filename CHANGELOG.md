@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added ADR 0004 and a T8 TRIZ ledger defining fixed, runtime-internal, and
+  remote-secret-only environment classes. The decision preserves v1 parsing,
+  prohibits silent host-value synthesis, and gates the cache-backed Rust
+  ergonomics fix on trusted-plan verification.
 - Added vendor-neutral coding-harness reference documentation: a common CCP
   contract, evidence matrix, fourteen truthful L0/L1 harness pages, activity
   handoff template, and a deterministic public-boundary contract test. No page

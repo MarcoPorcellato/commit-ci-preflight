@@ -364,7 +364,9 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 - [Architecture and implementation plan](docs/IMPLEMENTATION_PLAN.md)
 - [Reliability hardening roadmap](docs/RELIABILITY_HARDENING_PLAN.md)
 - [T2 immutable source snapshot ADR](docs/adr/0002-immutable-git-object-snapshots.md)
+- [T8 attestable environment classes ADR](docs/adr/0004-attestable-environment-classes.md)
 - [T2 contradictions analysis](docs/TRIZ_CONTRADICTIONS.md)
+- [T8 environment contradictions analysis](docs/TRIZ_ENVIRONMENT_CONTRACTS.md)
 - [T2 invariant evidence matrix](docs/INVARIANT_EVIDENCE_MATRIX.md)
 - [Testing and fault-injection contract](docs/TESTING_AND_FAULT_INJECTION.md)
 
