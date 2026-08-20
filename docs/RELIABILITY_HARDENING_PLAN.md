@@ -708,6 +708,14 @@ grammar without shell escaping. These are deterministic source-level facts,
 not native runtime qualification. This status does not close T8 or its exit
 gate.
 
+**T8-C closeout boundary:** schema policy, bounded preflight, receipt binding,
+and mount grammar are source-verified with deterministic fake ports. They do
+not replace exact-commit native receipts and independent verification for
+macOS/OrbStack, Linux/Docker, or Windows. Initial artifact-state evidence,
+inode reserve, and owned cache-total enforcement remain open T8 work. A
+Docker, OrbStack, CCP, container, network, or release claim must not be inferred
+from the source suite.
+
 Deliverables:
 
 - environment classes: fixed, runtime-internal, and remote-secret-only;
