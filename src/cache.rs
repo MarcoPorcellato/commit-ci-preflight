@@ -929,9 +929,9 @@ fn write_generation_manifest_replacing(
     durable_bytes.push(b'\n');
     #[cfg(unix)]
     {
-        return DurableFileSystem::default()
+        DurableFileSystem::default()
             .atomic_replace(path, &durable_bytes)
-            .map_err(map_durable_manifest_error);
+            .map_err(map_durable_manifest_error)
     }
     #[cfg(not(unix))]
     {
