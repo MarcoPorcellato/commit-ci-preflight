@@ -154,6 +154,11 @@ with `--no-resource-history`; see the
 Official launchers must pass through `guard exec` to be covered. CCP does not
 claim visibility into direct Docker or OrbStack processes that bypass it; see
 the [coverage and adoption inventory](docs/ORBSTACK_TELEMETRY_COVERAGE.md).
+When multiple agent activities or repositories share the Mac, follow the
+[cross-activity coordination runbook](docs/COORDINATION_RUNBOOK.md). It defines
+the owner/lease interpretation, reservation handoff, worktree isolation, and
+safe recovery rules; a process list from one terminal is not a host-wide
+ownership proof.
 Inspect the bounded local records without starting work:
 
 ```console
@@ -336,6 +341,7 @@ Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
   local receipt for independently pinned compatibility runtimes.
 
 - [Complete adoption guide for another repository](docs/ADOPTION_GUIDE.md)
+- [Cross-activity coordination runbook](docs/COORDINATION_RUNBOOK.md)
 - [Proof-carrying CI product roadmap](docs/PRODUCT_ROADMAP.md)
 - [Repository presentation and social preview](docs/REPOSITORY_PRESENTATION.md)
 - [Troubleshooting and safe recovery](docs/TROUBLESHOOTING.md)

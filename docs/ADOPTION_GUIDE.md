@@ -118,7 +118,11 @@ commit-ci-preflight cache init \
 
 The platform-wide admission coordinator is intentionally separate from the
 build cache. Multiple repositories share its single heavy-work slot. See
-[cache and workspace](CACHE_AND_WORKSPACE.md).
+[cache and workspace](CACHE_AND_WORKSPACE.md). If several agent activities or
+repositories use the same machine, read the [cross-activity coordination
+runbook](COORDINATION_RUNBOOK.md) before starting a heavy command. It is the
+authoritative procedure for status interpretation, owner handoff, worktree
+isolation, and safe recovery.
 
 ## 5. Inspect without executing project checks
 
@@ -166,6 +170,12 @@ On success, the configured output (normally `.ccp/receipt.json`) is created
 atomically. CCP does not overwrite an unrelated valid result silently and does
 not place raw command output, environment values, source contents, personal
 identity, or absolute home paths in the receipt.
+
+Do not start this command from an activity that sees another active or queued
+owner. `resource status` is only a point-in-time admission sample; the
+host-wide CCP slot is acquired by the command itself. Repeat both resource and
+admission checks immediately before the run and record the exact source SHA.
+Never infer global inactivity from a missing process in one terminal.
 
 ## 7. Create and pin repository policy
 

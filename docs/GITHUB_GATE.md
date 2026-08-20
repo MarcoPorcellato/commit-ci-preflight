@@ -73,6 +73,13 @@ it is never used to test the pull-request checkout.
 
 ## Produce the repository receipt
 
+The receipt run is a host-wide heavy operation. Before starting it, follow the
+[cross-activity coordination runbook](COORDINATION_RUNBOOK.md): confirm the
+exact source worktree and SHA, obtain fresh `resource status` and `admission
+status` evidence, and wait for any other Codex activity or repository to
+release the shared slot. A receipt produced by an overlapping or uncertain run
+must not be published merely because an inner check appears green.
+
 Start from a clean source commit and a working Docker-compatible runtime. The
 repository configuration intentionally enables network access because a clean
 Rust dependency cache and pinned toolchain may need an initial download. Cargo

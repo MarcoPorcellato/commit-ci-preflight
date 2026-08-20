@@ -41,28 +41,40 @@ cleanup is uncertain.
 `active` reports that the platform-wide admission slot lock was busy at the
 instant sampled. It is not a durable statement that a named process still
 exists, and the privacy-bounded status intentionally omits process inventory,
-commands, repository names, usernames, and absolute paths.
+commands, repository names, usernames, and absolute paths. Schema `2.0` now
+separates `slot_lock` from `queue_lock` and exposes an opaque owner/run ID,
+acquisition time, heartbeat, and lease state. These fields coordinate
+activities; they do not turn a lease into the authority that the OS lock
+already provides.
 
 Safe diagnosis:
 
-1. poll `admission status --json` again after the suspected command exits;
+1. preserve the complete status JSON, including `owner_run_id`, heartbeat, and
+   lease state;
 2. check the terminal or orchestrator that launched the heavy command;
 3. inspect the relevant Docker/OrbStack container list using the runtime's
    normal operator tooling;
-4. confirm no `commit-ci-preflight run`, `benchmark`, or `guard exec` process
+4. poll `admission status --json` again after the suspected command exits;
+5. confirm no `commit-ci-preflight run`, `benchmark`, or `guard exec` process
    owned by you is still executing;
-5. retry the intended guarded command with a bounded admission timeout.
+6. retry the intended guarded command with a bounded admission timeout only
+   after a fresh handoff and preflight.
 
 Admission tickets use advisory locks. A crashed waiter or reboot releases its
-lock, and a later coordinator pass reclaims that certainly stale ticket. Do not
-delete ticket files, lock files, counters, ownership markers, or the admission
-root by hand merely because one status snapshot showed `active: true`.
+lock, and a later coordinator pass reclaims that certainly stale ticket only
+when the valid lease is definitely expired. Do not delete ticket files, lock
+files, lease files, counters, ownership markers, or the admission root by hand
+merely because one status snapshot showed `active: true` or because your local
+shell cannot see a process. The absence of a process in one activity does not
+prove global inactivity.
 
 If repeated fresh status calls report active while no owned process/container
 can be found, preserve the outputs and report the exact CCP version and host
 platform. If CCP reports a foreign, malformed, unsafe, or uncertain coordinator
 layout, it intentionally fails closed with code `70`; manual deletion is not a
 supported recovery procedure.
+Use the [cross-activity coordination runbook](COORDINATION_RUNBOOK.md) for the
+owner handoff and safe-recovery matrix.
 
 ## Run ended but no receipt exists
 

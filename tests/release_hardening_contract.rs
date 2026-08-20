@@ -127,6 +127,7 @@ fn release_candidate_builder_is_local_bounded_and_non_publishing() {
         "SBOM.spdx.json",
         "THIRD_PARTY_NOTICES.md",
         "docs/ADOPTION_GUIDE.md",
+        "docs/COORDINATION_RUNBOOK.md",
         "docs/INSTALLATION.md",
         "docs/TROUBLESHOOTING.md",
         "docs/UPGRADE_AND_ROLLBACK.md",
