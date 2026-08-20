@@ -7,6 +7,13 @@ candidate. Future signing, package distribution, additional runtime adapters,
 and full GitHub Actions compatibility are not part of the architecture claimed
 here.
 
+T2 is implemented in source; native qualification remains pending. The
+immutable source snapshot work is documented in
+[`docs/adr/0002-immutable-git-object-snapshots.md`](adr/0002-immutable-git-object-snapshots.md),
+[`docs/TRIZ_CONTRADICTIONS.md`](TRIZ_CONTRADICTIONS.md), and
+[`docs/INVARIANT_EVIDENCE_MATRIX.md`](INVARIANT_EVIDENCE_MATRIX.md). This page
+includes the implemented 0.1.0 source candidate and T2 source boundary.
+
 ## System purpose
 
 Commit CI Preflight moves deterministic, resource-intensive checks to

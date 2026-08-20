@@ -21,6 +21,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 pub const RECEIPT_SCHEMA_VERSION: &str = "1.0";
+pub const RECEIPT_V2_SCHEMA_VERSION: &str = "2.0";
+pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: &str = "1.0";
 pub const RECEIPT_ID_PREFIX: &str = "sha256:";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -43,6 +45,46 @@ pub struct ReceiptV1 {
     pub overall_status: EvidenceStatus,
     pub incomplete_reason: Option<String>,
     pub redaction_policy_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptEnvelopeV2 {
+    pub receipt_id: String,
+    pub receipt: ReceiptV2,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReceiptV2 {
+    pub schema_version: String,
+    pub producer: ProducerEvidence,
+    pub repository: RepositoryEvidence,
+    pub run: RunEvidence,
+    pub source_snapshot: SourceSnapshotEvidence,
+    pub platform: PlatformEvidence,
+    pub configuration_digest: String,
+    pub checks: Vec<CheckEvidence>,
+    pub overall_status: EvidenceStatus,
+    pub incomplete_reason: Option<String>,
+    pub redaction_policy_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSnapshotEvidence {
+    pub schema_version: String,
+    pub strategy: SourceSnapshotStrategy,
+    pub manifest_digest: String,
+    pub entry_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceSnapshotStrategy {
+    GitObject,
+    GitArchive,
+    DetachedWorktree,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -133,74 +175,89 @@ impl ReceiptEnvelopeV1 {
     }
 }
 
+impl ReceiptEnvelopeV2 {
+    pub fn seal(receipt: ReceiptV2) -> Result<Self, ReceiptError> {
+        receipt.validate()?;
+        let receipt_id = canonical_digest(&receipt)?;
+        Ok(Self {
+            receipt_id,
+            receipt,
+        })
+    }
+
+    pub fn verify(&self) -> Result<(), ReceiptError> {
+        self.receipt.validate()?;
+        let expected = canonical_digest(&self.receipt)?;
+        if self.receipt_id != expected {
+            return Err(ReceiptError::DigestMismatch {
+                expected,
+                actual: self.receipt_id.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ReceiptError> {
+        self.verify()?;
+        canonical_json(self)
+    }
+}
+
 impl ReceiptV1 {
     pub fn validate(&self) -> Result<(), ReceiptError> {
-        if self.schema_version != RECEIPT_SCHEMA_VERSION {
-            return Err(ReceiptError::UnsupportedSchemaVersion(
+        ReceiptCommon {
+            expected_schema_version: RECEIPT_SCHEMA_VERSION,
+            schema_version: &self.schema_version,
+            producer: &self.producer,
+            repository: &self.repository,
+            run: &self.run,
+            platform: &self.platform,
+            configuration_digest: &self.configuration_digest,
+            checks: &self.checks,
+            overall_status: self.overall_status,
+            incomplete_reason: self.incomplete_reason.as_deref(),
+            redaction_policy_version: &self.redaction_policy_version,
+        }
+        .validate()
+    }
+}
+
+impl ReceiptV2 {
+    pub fn validate(&self) -> Result<(), ReceiptError> {
+        ReceiptCommon {
+            expected_schema_version: RECEIPT_V2_SCHEMA_VERSION,
+            schema_version: &self.schema_version,
+            producer: &self.producer,
+            repository: &self.repository,
+            run: &self.run,
+            platform: &self.platform,
+            configuration_digest: &self.configuration_digest,
+            checks: &self.checks,
+            overall_status: self.overall_status,
+            incomplete_reason: self.incomplete_reason.as_deref(),
+            redaction_policy_version: &self.redaction_policy_version,
+        }
+        .validate()?;
+        self.source_snapshot.validate()
+    }
+}
+
+impl SourceSnapshotEvidence {
+    fn validate(&self) -> Result<(), ReceiptError> {
+        if self.schema_version != SOURCE_SNAPSHOT_SCHEMA_VERSION {
+            return Err(ReceiptError::UnsupportedSourceSnapshotSchemaVersion(
                 self.schema_version.clone(),
             ));
         }
 
-        require_text("producer.name", &self.producer.name)?;
-        require_text("producer.version", &self.producer.version)?;
-        validate_repository_identity(&self.repository.repository)?;
-        validate_commit_sha(&self.repository.commit_sha)?;
-        require_text("run.run_id", &self.run.run_id)?;
-        require_timestamp("run.started_at_utc", &self.run.started_at_utc)?;
-        require_timestamp("run.finished_at_utc", &self.run.finished_at_utc)?;
-        if self.run.finished_at_utc < self.run.started_at_utc {
-            return Err(ReceiptError::InvalidRunWindow);
-        }
-        require_text("platform.host_os", &self.platform.host_os)?;
-        require_text("platform.host_arch", &self.platform.host_arch)?;
-        require_text("platform.runtime_kind", &self.platform.runtime_kind)?;
-        require_text("platform.runtime_version", &self.platform.runtime_version)?;
-        require_text("platform.image_reference", &self.platform.image_reference)?;
-        validate_sha256("platform.image_digest", &self.platform.image_digest)?;
-        let image_reference_digest = self
-            .platform
-            .image_reference
-            .rsplit_once('@')
-            .map(|(_, digest)| digest);
-        if image_reference_digest != Some(self.platform.image_digest.as_str()) {
-            return Err(ReceiptError::ImageDigestMismatch);
-        }
-        validate_sha256("configuration_digest", &self.configuration_digest)?;
-        require_text("redaction_policy_version", &self.redaction_policy_version)?;
-
-        if self.checks.is_empty() {
-            return Err(ReceiptError::NoChecks);
+        require_text("source_snapshot.manifest_digest", &self.manifest_digest)?;
+        validate_sha256("source_snapshot.manifest_digest", &self.manifest_digest)?;
+        if self.entry_count == 0 {
+            return Err(ReceiptError::InvalidSourceSnapshotEntryCount(
+                self.entry_count,
+            ));
         }
 
-        let mut check_ids = BTreeSet::new();
-        let mut required_statuses = Vec::new();
-        for check in &self.checks {
-            check.validate()?;
-            if !check_ids.insert(check.id.as_str()) {
-                return Err(ReceiptError::DuplicateCheckId(check.id.clone()));
-            }
-            if check.required {
-                required_statuses.push(check.status);
-            }
-        }
-
-        if required_statuses.is_empty() {
-            return Err(ReceiptError::NoRequiredChecks);
-        }
-
-        let expected_status = derive_overall_status(&required_statuses);
-        if self.overall_status != expected_status {
-            return Err(ReceiptError::OverallStatusMismatch {
-                expected: expected_status,
-                actual: self.overall_status,
-            });
-        }
-
-        validate_incomplete_reason(
-            "receipt.incomplete_reason",
-            self.overall_status,
-            self.incomplete_reason.as_deref(),
-        )?;
         Ok(())
     }
 }
@@ -248,6 +305,92 @@ impl CheckEvidence {
     }
 }
 
+struct ReceiptCommon<'a> {
+    expected_schema_version: &'static str,
+    schema_version: &'a str,
+    producer: &'a ProducerEvidence,
+    repository: &'a RepositoryEvidence,
+    run: &'a RunEvidence,
+    platform: &'a PlatformEvidence,
+    configuration_digest: &'a str,
+    checks: &'a [CheckEvidence],
+    overall_status: EvidenceStatus,
+    incomplete_reason: Option<&'a str>,
+    redaction_policy_version: &'a str,
+}
+
+impl ReceiptCommon<'_> {
+    fn validate(self) -> Result<(), ReceiptError> {
+        if self.schema_version != self.expected_schema_version {
+            return Err(ReceiptError::UnsupportedSchemaVersion(
+                self.schema_version.to_owned(),
+            ));
+        }
+
+        require_text("producer.name", &self.producer.name)?;
+        require_text("producer.version", &self.producer.version)?;
+        validate_repository_identity(&self.repository.repository)?;
+        validate_commit_sha(&self.repository.commit_sha)?;
+        require_text("run.run_id", &self.run.run_id)?;
+        require_timestamp("run.started_at_utc", &self.run.started_at_utc)?;
+        require_timestamp("run.finished_at_utc", &self.run.finished_at_utc)?;
+        if self.run.finished_at_utc < self.run.started_at_utc {
+            return Err(ReceiptError::InvalidRunWindow);
+        }
+        require_text("platform.host_os", &self.platform.host_os)?;
+        require_text("platform.host_arch", &self.platform.host_arch)?;
+        require_text("platform.runtime_kind", &self.platform.runtime_kind)?;
+        require_text("platform.runtime_version", &self.platform.runtime_version)?;
+        require_text("platform.image_reference", &self.platform.image_reference)?;
+        validate_sha256("platform.image_digest", &self.platform.image_digest)?;
+        let image_reference_digest = self
+            .platform
+            .image_reference
+            .rsplit_once('@')
+            .map(|(_, digest)| digest);
+        if image_reference_digest != Some(self.platform.image_digest.as_str()) {
+            return Err(ReceiptError::ImageDigestMismatch);
+        }
+        validate_sha256("configuration_digest", self.configuration_digest)?;
+        require_text("redaction_policy_version", self.redaction_policy_version)?;
+
+        if self.checks.is_empty() {
+            return Err(ReceiptError::NoChecks);
+        }
+
+        let mut check_ids = BTreeSet::new();
+        let mut required_statuses = Vec::new();
+        for check in self.checks {
+            check.validate()?;
+            if !check_ids.insert(check.id.as_str()) {
+                return Err(ReceiptError::DuplicateCheckId(check.id.clone()));
+            }
+            if check.required {
+                required_statuses.push(check.status);
+            }
+        }
+
+        if required_statuses.is_empty() {
+            return Err(ReceiptError::NoRequiredChecks);
+        }
+
+        let expected_status = derive_overall_status(&required_statuses);
+        if self.overall_status != expected_status {
+            return Err(ReceiptError::OverallStatusMismatch {
+                expected: expected_status,
+                actual: self.overall_status,
+            });
+        }
+
+        validate_incomplete_reason(
+            "receipt.incomplete_reason",
+            self.overall_status,
+            self.incomplete_reason,
+        )?;
+        Ok(())
+    }
+}
+
 pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ReceiptError> {
     let value = serde_json::to_value(value).map_err(ReceiptError::Serialization)?;
     let normalized = normalize_json(value);
@@ -257,6 +400,10 @@ pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ReceiptError> 
 pub fn receipt_schema_json() -> Result<String, ReceiptError> {
     let schema = schema_for!(ReceiptEnvelopeV1);
     serde_json::to_string_pretty(&schema).map_err(ReceiptError::Serialization)
+}
+
+pub fn receipt_v2_schema_json() -> Result<String, ReceiptError> {
+    crate::schema_contract::combined_receipt_v2_schema_json().map_err(ReceiptError::Serialization)
 }
 
 pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String, ReceiptError> {
@@ -442,6 +589,7 @@ fn validate_relative_path(field: &'static str, value: &str) -> Result<(), Receip
 pub enum ReceiptError {
     Serialization(serde_json::Error),
     UnsupportedSchemaVersion(String),
+    UnsupportedSourceSnapshotSchemaVersion(String),
     EmptyField(&'static str),
     ControlCharacter(&'static str),
     InvalidCommitSha(String),
@@ -458,6 +606,7 @@ pub enum ReceiptError {
     InvalidCheckResult(String),
     MissingIncompleteReason(&'static str),
     UnexpectedIncompleteReason(&'static str),
+    InvalidSourceSnapshotEntryCount(u64),
     OverallStatusMismatch {
         expected: EvidenceStatus,
         actual: EvidenceStatus,
@@ -476,6 +625,12 @@ impl fmt::Display for ReceiptError {
             }
             Self::UnsupportedSchemaVersion(version) => {
                 write!(formatter, "unsupported receipt schema version: {version}")
+            }
+            Self::UnsupportedSourceSnapshotSchemaVersion(version) => {
+                write!(
+                    formatter,
+                    "unsupported source snapshot schema version: {version}"
+                )
             }
             Self::EmptyField(field) => write!(formatter, "receipt field is empty: {field}"),
             Self::ControlCharacter(field) => {
@@ -505,6 +660,9 @@ impl fmt::Display for ReceiptError {
             }
             Self::UnexpectedIncompleteReason(field) => {
                 write!(formatter, "unexpected incomplete reason: {field}")
+            }
+            Self::InvalidSourceSnapshotEntryCount(count) => {
+                write!(formatter, "invalid source snapshot entry count: {count}")
             }
             Self::OverallStatusMismatch { expected, actual } => write!(
                 formatter,
@@ -555,6 +713,62 @@ mod tests {
                 started_at_utc: "2026-08-08T12:00:00Z".to_owned(),
                 finished_at_utc: "2026-08-08T12:00:01Z".to_owned(),
             },
+            platform: PlatformEvidence {
+                host_os: "macos".to_owned(),
+                host_arch: "aarch64".to_owned(),
+                runtime_kind: "orbstack".to_owned(),
+                runtime_version: "fixture-1".to_owned(),
+                image_reference: format!("example.invalid/ci@{}", digest('a')),
+                image_digest: digest('a'),
+            },
+            configuration_digest: digest('b'),
+            checks: vec![CheckEvidence {
+                id: "rust-test".to_owned(),
+                required: true,
+                argv: vec!["cargo".to_owned(), "test".to_owned()],
+                working_directory: ".".to_owned(),
+                status: EvidenceStatus::Pass,
+                exit_code: Some(0),
+                duration_ms: 1000,
+                timed_out: false,
+                cancelled: false,
+                output_digest: Some(digest('c')),
+                incomplete_reason: None,
+            }],
+            overall_status: EvidenceStatus::Pass,
+            incomplete_reason: None,
+            redaction_policy_version: "1".to_owned(),
+        }
+    }
+
+    fn source_snapshot() -> SourceSnapshotEvidence {
+        SourceSnapshotEvidence {
+            schema_version: SOURCE_SNAPSHOT_SCHEMA_VERSION.to_owned(),
+            strategy: SourceSnapshotStrategy::GitObject,
+            manifest_digest: digest('d'),
+            entry_count: 1,
+        }
+    }
+
+    fn passing_receipt_v2() -> ReceiptV2 {
+        ReceiptV2 {
+            schema_version: RECEIPT_V2_SCHEMA_VERSION.to_owned(),
+            producer: ProducerEvidence {
+                name: "commit-ci-preflight".to_owned(),
+                version: "0.1.0".to_owned(),
+            },
+            repository: RepositoryEvidence {
+                repository: "example/project".to_owned(),
+                commit_sha: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                dirty: false,
+            },
+            run: RunEvidence {
+                run_id: "fixture-run-0001".to_owned(),
+                generation: 1,
+                started_at_utc: "2026-08-08T12:00:00Z".to_owned(),
+                finished_at_utc: "2026-08-08T12:00:01Z".to_owned(),
+            },
+            source_snapshot: source_snapshot(),
             platform: PlatformEvidence {
                 host_os: "macos".to_owned(),
                 host_arch: "aarch64".to_owned(),
@@ -776,5 +990,34 @@ mod tests {
         assert!(schema.contains("ReceiptEnvelopeV1"));
         assert!(schema.contains("receipt_id"));
         assert!(!schema.contains("SCREAMING_SNAKE_CASE"));
+    }
+
+    #[test]
+    fn v2_deterministic_replay_produces_identical_bytes_and_id() {
+        let first = ReceiptEnvelopeV2::seal(passing_receipt_v2()).expect("first receipt");
+        let second = ReceiptEnvelopeV2::seal(passing_receipt_v2()).expect("second receipt");
+
+        assert_eq!(first, second);
+        assert_eq!(
+            first.canonical_bytes().expect("first bytes"),
+            second.canonical_bytes().expect("second bytes")
+        );
+    }
+
+    #[test]
+    fn v2_source_snapshot_validation_is_strict() {
+        let mut receipt = passing_receipt_v2();
+        receipt.source_snapshot.schema_version = "9.9".to_owned();
+        assert!(matches!(
+            receipt.validate(),
+            Err(ReceiptError::UnsupportedSourceSnapshotSchemaVersion(version)) if version == "9.9"
+        ));
+
+        let mut receipt = passing_receipt_v2();
+        receipt.source_snapshot.entry_count = 0;
+        assert!(matches!(
+            receipt.validate(),
+            Err(ReceiptError::InvalidSourceSnapshotEntryCount(0))
+        ));
     }
 }

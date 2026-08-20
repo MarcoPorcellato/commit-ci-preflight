@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **IN PROGRESS — T0/T1 and macOS-v4, multi-runtime, and admission-ownership slices are on main; T2 source work is unmerged and requires reconciliation; T3-T11 remain** |
+| Status | **IN PROGRESS — T0/T1 and macOS-v4, multi-runtime, and admission-ownership slices are on main; T2 is published as draft PR #40 and awaits exact-head qualification; T3-T11 remain** |
 | Baseline date | 2026-08-14 |
 | Baseline branch | `main` |
 | Baseline commit | `641a0eed29075696eec1e4e07f8de554f6ce9459` |
@@ -198,6 +198,26 @@ result is not native PASS evidence. That same sample motivated the approved
 compound pre-start correction: it retained 40% available memory,
 7,594,246,144 reclaimable bytes and zero swap, so compression alone was not a
 credible reason to discard the next run before the watchdog could observe it.
+
+### 3.8 T2 publication checkpoint — 2026-08-19
+
+The T2 implementation and its documentation reconciliation are now published
+as draft PR #40, stacked on the clean draft PR #39. The current T2 head is
+`678be576e261b4ee5a62fd105387489ebc5937d5`; its conflict-resolution merge
+preserves both the live-plan reconciliation and the immutable-snapshot source
+work.
+
+The preceding exact source commit `c6ad72bb067651cee6fcbf540fb3a953b1da432a`
+has a valid v2 receipt and independent verification, but that receipt is not
+evidence for the current head. A fresh exact-head run was not started because
+the local CCP control plane returned `resource decision=unknown` and failed to
+read `queue.lock`; the fail-closed policy therefore prevented heavy execution.
+The current head remains **PUBLISHED / NOT QUALIFIED** until a fresh receipt,
+independent verification, and post-run cleanup evidence exist.
+
+T3 must not start as an accepted dependency milestone until T2 has that exact
+head evidence and the stacked publication path has been reviewed. No skipped
+GitHub check or historical receipt changes this boundary.
 
 ## 4. Reliability gap register
 
@@ -401,7 +421,8 @@ Exit gate:
 Source-side checkpoint on `codex/reliability-hardening-t1`:
 
 - immutable create-new journal events are active on the real `run` lifecycle;
-- receipt v1 remains unchanged and separate from recovery state;
+- receipt v1 remains unchanged and separate from recovery state; T2 adds a
+  strict v2 publication path for snapshot-backed runs without rewriting v1;
 - `recover status` opens only an initialized managed cache and performs no
   mutation;
 - `recover apply <run-id>` quarantines one exact CCP-owned unfinished journal;
@@ -417,15 +438,10 @@ Source-side checkpoint on `codex/reliability-hardening-t1`:
 
 ### PR T2 — Immutable source snapshot and byte identity
 
-Status (reconciled 2026-08-19): deterministic source implementation exists in
-PR #34 and in a separate clean local continuation, but the public PR is stale
-and conflicting against current `main`. The source branch is not yet an
-accepted mainline milestone. Reconciliation must happen in a fresh worktree
-from the exact current `origin/main`, preserving the local continuation as an
-independent source of candidate fixes. The merge simulation identifies
-conflicts in the receipt-v2 schema and run orchestration. Until those conflicts
-are resolved and a new exact-head receipt is accepted, T2 is **IMPLEMENTED
-CANDIDATE / NOT QUALIFIED**.
+Status (reconciled 2026-08-20): implemented in this PR with deterministic
+contract tests. Native platform and crash/power-loss qualification remain
+pending and are not represented as PASS. Until the rebased exact head has an
+accepted receipt, T2 remains **IMPLEMENTED CANDIDATE / NOT QUALIFIED**.
 
 Deliverables:
 
@@ -745,18 +761,15 @@ Stop a tranche and report evidence when:
 
 ## 13. Immediate next actions
 
-1. Publish the reconciled canonical plan only after exact diff review; retain
-   the live anchors and the PR #34 conflict/non-qualification facts above.
-2. Reconcile T2 in a fresh worktree from `origin/main=73ec2a3`, preserving the
-   clean local `codex/reliability-hardening-t2` continuation and the public PR
-   head as separate evidence sources.
-3. Resolve the schema/run conflicts, run deterministic T2 tests and policy
-   checks, then produce a new exact-head receipt; do not reuse the skipped PR
-   #34 run or any pre-rebase evidence branch.
-4. Qualify T2 natively only on supported hosts with terminal receipts; keep
-   crash, power-loss, Windows, and release claims explicitly pending when not
-   executed.
-5. Open the next dependency-ordered milestone only after T2 is merged or
-   formally held with its residual gaps recorded. Keep telemetry intelligence,
-   predictive admission, signing, and unrelated runner features frozen until
-   the current milestone's exit gate is proven.
+1. Restore or wait for a healthy CCP control plane, then recheck resource and
+   admission status without quarantining locks whose ownership is unknown.
+2. Run the official T2 gate on exact head `678be576e261b4ee5a62fd105387489ebc5937d5`
+   with the reviewed cache environment and pinned image.
+3. Independently verify that fresh receipt and record post-run admission,
+   runtime-cleanup, and lock-state evidence; keep the earlier `c6ad72b` receipt
+   historical only.
+4. Review and accept PR #39 before treating the stacked PR #40 as a current
+   mainline candidate; do not merge either PR on skipped or missing evidence.
+5. Start T3 only after the exact-head T2 exit gate is proven and the base/head
+   relationship is refreshed. Keep telemetry intelligence, predictive
+   admission, signing, and unrelated runner features frozen until then.

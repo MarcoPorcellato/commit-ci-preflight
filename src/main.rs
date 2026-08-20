@@ -63,6 +63,7 @@ use commit_ci_preflight::run_journal::{
 use commit_ci_preflight::runtime::{
     DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
 };
+use commit_ci_preflight::source_snapshot::{SourceSnapshot, resolve_clean_head};
 use commit_ci_preflight::verify::{
     VerificationDecision, VerificationError, load_verification_policy_document,
     receipt_input_failure_report, system_evaluated_at_utc, verify_receipt_document_for_policy,
@@ -862,6 +863,69 @@ fn print_run(
     let supervisor = Arc::new(ProcessSupervisor::standard());
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
+    let source_identity = RunIdentity {
+        project: envelope.plan.project.clone(),
+        commit: None,
+        config_digest: envelope.plan_digest.clone(),
+        generation: generation.to_string(),
+    };
+    let source_generation = GenerationGuard::new(source_identity.clone());
+    let commit = match resolve_clean_head(
+        &location.repository,
+        &envelope.plan.receipt.output,
+        supervisor.as_ref(),
+        &cancellation,
+        &source_generation,
+        &source_identity,
+    ) {
+        Ok(commit) => commit,
+        Err(error) => {
+            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::Run(RunError::SourceSnapshot(error)));
+        }
+    };
+    let source_identity = RunIdentity {
+        commit: Some(commit.clone()),
+        ..source_identity
+    };
+    source_generation
+        .replace(source_identity.clone())
+        .map_err(|error| CliError::Run(RunError::Process(error)))?;
+    let source_resource = match journal.reserve_resource(&journal_id, "source-snapshot-v1") {
+        Ok(path) => path,
+        Err(error) => {
+            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::RunJournal(error));
+        }
+    };
+    let mut source_snapshot = match SourceSnapshot::materialize(
+        &location.repository,
+        &commit,
+        &source_resource,
+        supervisor.as_ref(),
+        &cancellation,
+        &source_generation,
+        &source_identity,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::Run(RunError::SourceSnapshot(error)));
+        }
+    };
+    if let Err(error) = source_snapshot.prepare_mount_overlay(&envelope) {
+        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        return Err(CliError::Run(RunError::SourceSnapshot(error)));
+    }
+    if let Err(error) = journal.bind_source(
+        &journal_id,
+        &commit,
+        &source_snapshot.evidence().manifest_digest,
+        source_snapshot.evidence().entry_count,
+    ) {
+        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        return Err(CliError::RunJournal(error));
+    }
     let admission =
         AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
     let guard = match admission.acquire(
@@ -915,6 +979,7 @@ fn print_run(
             repository: &location.repository,
             cache: &cache,
             generation,
+            source_snapshot: Some(&source_snapshot),
         },
         runtime.as_ref(),
         supervisor.as_ref(),
@@ -939,13 +1004,16 @@ fn print_run(
             return Err(CliError::Admission(error));
         }
     };
+    if let Err(error) = source_snapshot.cleanup() {
+        lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
+        return Err(CliError::Run(RunError::SourceSnapshot(error)));
+    }
     lifecycle
         .transition(RunLifecyclePhase::Sealed)
         .map_err(CliError::Run)?;
     if json {
         let bytes = outcome
-            .receipt
-            .canonical_bytes()
+            .published_canonical_bytes()
             .map_err(CliError::internal)?;
         println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
     } else {

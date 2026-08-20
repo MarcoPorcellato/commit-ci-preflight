@@ -12,6 +12,18 @@ Semantic Versioning after its first public release.
 - Reconciled the reliability-hardening plan with live `origin/main` and the
   still-conflicting T2 PR, preserving exact anchors and qualification
   boundaries for the next milestone.
+
+- T2 immutable Git-object source materialization with a canonical path/mode/OID
+  manifest, fail-closed LFS/submodule/symlink policy, pre-admission snapshot
+  preparation, read-only runtime binding, post-run byte revalidation, and
+  journal-owned cleanup/recovery. The accompanying ADR, TRIZ contradiction
+  ledger, and invariant/evidence matrix distinguish deterministic proof from
+  still-pending native qualification.
+- Receipt v2 source-snapshot evidence with preserved v1 golden compatibility,
+  strict v1/v2 verifier dispatch, snapshot-digest tamper detection, and a
+  privacy-minimized journal binding for commit, manifest digest, entry count,
+  and the fixed CCP-owned resource identifier.
+
 - Durable filesystem primitives with deterministic operation-failure tests,
   append-only run-journal v1 state transitions, and bounded `recover status`
   / `recover apply <run-id>` commands. Recovery status is read-only; apply
@@ -59,6 +71,10 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Refreshed the reliability-hardening checkpoint after T2 conflict resolution:
+  draft PR #40 is stacked on PR #39, its exact-head qualification remains
+  pending when the local CCP control plane reports `unknown`, and the previous
+  exact-head receipt is retained only as historical evidence.
 - Version the macOS resource policy as `macos-v4`: keep the 20% available,
   3 GiB reclaimable and bounded-swap pre-start limits, but make compressor
   occupancy advisory unless at least 70% compression accompanies another
