@@ -32,7 +32,10 @@ use crate::process::{
     ProcessTermination, RunIdentity, SupervisorPort,
 };
 use crate::receipt::canonical_digest;
-use crate::workspace::{MountAccess, WorkspaceError, WorkspacePlanV1, validate_host_path};
+use crate::workspace::{
+    MountAccess, WorkspaceError, WorkspacePlanV1, validate_container_mount_target,
+    validate_host_path,
+};
 
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
 const DOCTOR_CAPTURE_BYTES: usize = 65_536;
@@ -755,6 +758,7 @@ fn docker_dry_run_check(
 
 fn docker_mount_argument(mount: &crate::workspace::MountBinding) -> Result<String, RuntimeError> {
     validate_host_path(&mount.source).map_err(RuntimeError::Workspace)?;
+    validate_container_mount_target(&mount.target).map_err(RuntimeError::Workspace)?;
     let source = mount
         .source
         .to_str()
@@ -1682,6 +1686,43 @@ timeout_seconds = 60
                 .iter()
                 .any(|part| part == "sh" || part == "-c")
         );
+    }
+
+    #[test]
+    fn mount_renderer_rejects_ambiguous_source_and_target_bindings() {
+        let base = crate::workspace::MountBinding {
+            source: std::path::PathBuf::from("/safe/source"),
+            target: "/workspace/safe-target".to_owned(),
+            access: MountAccess::ReadOnly,
+            purpose: crate::workspace::MountPurpose::Repository,
+            logical_id: None,
+        };
+        for source in [
+            "/safe,comma",
+            "/safe=equals",
+            "/safe\nnewline",
+            "/safe\0nul",
+        ] {
+            let mut mount = base.clone();
+            mount.source = std::path::PathBuf::from(source);
+            assert!(matches!(
+                docker_mount_argument(&mount),
+                Err(RuntimeError::Workspace(WorkspaceError::UnsupportedHostPath))
+            ));
+        }
+        for target in [
+            "/workspace/safe,comma",
+            "/workspace/safe=equals",
+            "/workspace/../escape",
+            "/not-workspace/safe",
+        ] {
+            let mut mount = base.clone();
+            mount.target = target.to_owned();
+            assert!(matches!(
+                docker_mount_argument(&mount),
+                Err(RuntimeError::Workspace(WorkspaceError::InvalidLogicalPath))
+            ));
+        }
     }
 
     #[test]

@@ -12,8 +12,12 @@ Semantic Versioning after its first public release.
 - T8 runtime-capability source sub-slice: opt-in schema `1.3` binds
   `pull_policy = "never"` and `swap_mode = "disabled"` into the normalized
   single-runtime plan, renders Docker no-pull and explicit disabled-swap argv,
-  and preserves schema `1.0`–`1.2` plan and argv compatibility. Daemon/image
-  capability evidence and native qualification remain pending.
+  preserves schema `1.0`–`1.2` plan and argv compatibility, and performs a
+  bounded read-only daemon/context/local-image preflight before journal,
+  snapshot, workspace, or container mutation. Matching privacy-bounded evidence
+  is sealed only in schema-`1.3` receipt v2; historical plans forbid it.
+  Deterministic mount grammar checks reject ambiguous delimiter, control, and
+  traversal inputs. Native qualification remains pending.
 - T8 artifact-evidence sub-slice: typed regular-file and directory contracts
   are normalized into the execution plan; snapshot-backed receipt v2 records a
   bounded, producer-linked canonical final-state manifest from CCP-owned

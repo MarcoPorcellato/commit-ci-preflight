@@ -56,10 +56,29 @@ contained by the resolved managed cache root. The output labels this policy
 For opt-in configuration schema `1.3`, the rendered argv also contains
 `--pull never` and `--memory-swap <memory_mib>m`. The latter equals the
 declared `--memory` value and expresses disabled container swap; schemas
-`1.0`–`1.2` retain their historical argv unchanged. Rendering does not itself
-claim that the selected daemon supports those controls or that the pinned image
-is locally available; later T8-C preflight and receipt work must establish that
-evidence before a run starts.
+`1.0`–`1.2` retain their historical argv unchanged. Before a schema-`1.3` run
+creates a journal, source snapshot, workspace, or container, CCP performs only
+these bounded read-only Docker calls:
+
+```text
+docker info --format {{json .}}
+docker context show
+docker image inspect --format {{json .}} <configured-pinned-image>
+```
+
+The preflight requires daemon memory and swap limits, hashes the context and
+discards its literal, and requires the locally resolved image metadata to carry
+the exact configured digest reference. Snapshot-backed receipt v2 seals only
+the two capability booleans, the context digest, the resolved image ID, and
+that exact image reference. It never stores raw Docker output, a context name,
+host paths, credentials, or a claim that the host or daemon is trusted.
+
+All preflight failures stop before workspace/container mutation and no receipt
+is sealed. A schema-`1.3` receipt must contain the matching capability evidence;
+historical receipt plans forbid it, preserving their existing meaning and
+fixture bytes. Source-level tests are not native qualification: a genuine
+exact-commit receipt is still required for macOS/OrbStack, Linux/Docker, and
+Windows before any platform PASS claim.
 
 Live runs preserve that argv. They add a private, non-host-backed tmpfs at
 `/tmp`, bounded to 64 MiB with `noexec`, `nosuid`, and `nodev`, and set the
@@ -76,6 +95,11 @@ a container mount possible.
 Absolute host paths are shown only in local dry-run output because an operator
 must be able to audit the exact mount. They must not be copied into receipts or
 telemetry. See [`CACHE_AND_WORKSPACE.md`](CACHE_AND_WORKSPACE.md).
+
+The structured `--mount` grammar rejects host source or container target
+strings containing a comma, equals sign, backslash, or control character. A
+target must be exactly `/workspace` or a non-empty, non-traversing descendant.
+CCP does not quote or escape a potentially ambiguous mount value.
 
 ## Lifecycle and fail-closed rules
 
