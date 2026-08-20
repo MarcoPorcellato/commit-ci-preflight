@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added a canonical programme execution ledger that distinguishes implemented,
+  qualified, and released states; protects divergent local Receipt v2 work;
+  and orders reliability, environment, harness, cost, platform, and stable
+  release milestones without converting missing evidence into a PASS claim.
 - T6 admission candidate: queue, status, ticket publication, slot contention,
   and release use a cooperative bounded lock primitive; ticket markers are
   published only after durable staging; the high-water ticket counter uses
