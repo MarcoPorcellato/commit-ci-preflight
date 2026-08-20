@@ -645,14 +645,8 @@ mod tests {
                     success: true,
                     code: Some(0),
                 }),
-                stdout: CapturedStream {
-                    bytes: stdout,
-                    truncated: false,
-                },
-                stderr: CapturedStream {
-                    bytes: Vec::new(),
-                    truncated: false,
-                },
+                stdout: CapturedStream::from_captured(stdout, false),
+                stderr: CapturedStream::from_captured(Vec::new(), false),
                 elapsed_millis: 1,
             })
         }

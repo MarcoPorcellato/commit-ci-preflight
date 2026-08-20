@@ -940,14 +940,8 @@ timeout_seconds = 60
                     success,
                     code: Some(if success { 0 } else { 1 }),
                 }),
-                stdout: CapturedStream {
-                    bytes: stdout,
-                    truncated,
-                },
-                stderr: CapturedStream {
-                    bytes: Vec::new(),
-                    truncated: false,
-                },
+                stdout: CapturedStream::from_captured(stdout, truncated),
+                stderr: CapturedStream::from_captured(Vec::new(), false),
                 elapsed_millis: 1,
             })
         }
@@ -1243,14 +1237,8 @@ timeout_seconds = 60
                     success,
                     code: Some(code),
                 }),
-                stdout: CapturedStream {
-                    bytes: stdout,
-                    truncated: false,
-                },
-                stderr: CapturedStream {
-                    bytes: Vec::new(),
-                    truncated: false,
-                },
+                stdout: CapturedStream::from_captured(stdout, false),
+                stderr: CapturedStream::from_captured(Vec::new(), false),
                 elapsed_millis: 1,
             })
         }

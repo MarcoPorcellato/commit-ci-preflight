@@ -9,6 +9,11 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T4 candidate supervisor hardening: complete stdout/stderr SHA-256 digests and
+  byte counts are computed while retaining only bounded previews; process
+  execution and cleanup share one wall deadline; reader joins are bounded; and
+  monitor or force-stop failures still attempt descendant cleanup before failing
+  closed. RAII finalization and native fault-path qualification remain pending.
 - T3 candidate daemon-owned Docker lifecycle contract with deterministic
   container naming, exact CCP ownership labels, explicit create/start/attach/
   wait/inspect/stop/kill/remove sequencing, and fail-closed final absence
