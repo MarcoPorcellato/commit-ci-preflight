@@ -2415,14 +2415,8 @@ mod tests {
                 success: true,
                 code: Some(0),
             }),
-            stdout: commit_ci_preflight::process::CapturedStream {
-                bytes: Vec::new(),
-                truncated: false,
-            },
-            stderr: commit_ci_preflight::process::CapturedStream {
-                bytes: Vec::new(),
-                truncated: false,
-            },
+            stdout: commit_ci_preflight::process::CapturedStream::from_captured(Vec::new(), false),
+            stderr: commit_ci_preflight::process::CapturedStream::from_captured(Vec::new(), false),
             elapsed_millis: 0,
         }
     }

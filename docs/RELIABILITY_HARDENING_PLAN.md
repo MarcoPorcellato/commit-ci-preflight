@@ -518,6 +518,28 @@ Exit gate:
 
 ### PR T4 — Supervisor and output evidence hardening
 
+Status (candidate slice 2026-08-19): process readers now retain only a bounded
+preview while hashing and counting the complete stdout/stderr streams. Receipt
+output digests bind those full-stream digests and byte counts, so equal previews
+with different suffixes cannot collide. A single wall deadline now bounds the
+execution and cleanup sub-budgets; pipe-reader joins are bounded; and monitor or
+force-stop failures still attempt descendant cleanup before failing closed.
+Deterministic process tests cover these invariants and the full locked Rust
+suite passes. This does **not** yet close T4: RAII finalization, stronger
+interruptible drain semantics, native fault-path qualification, and exact-head
+OrbStack evidence for this new candidate remain pending.
+
+The implementation commit `d7d72e8` was then qualified independently on genuine
+macOS arm64 with OrbStack 29.4.0: the exact-head receipt run ID was
+`sha256:712e392ab0d1456803b9b1acff249dc8d860a8891655f637639bd33308941ff4`,
+all five required checks were `PASS`, the source snapshot contained 147 Git
+objects with manifest
+`sha256:bb7501143f7834e736e92a594912fd9c700ecf54c40e019fcdacc6a368b57226`,
+and independent integrity/policy verification passed. Admission was released
+with no remaining Docker container. This evidence qualifies that exact source
+commit only; any later candidate commit, including documentation-only changes,
+requires its own exact-head receipt before acceptance.
+
 Deliverables:
 
 - RAII containment/finalization object;

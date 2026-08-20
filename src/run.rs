@@ -604,8 +604,10 @@ fn evidence_from_result(
         ),
     };
     let output_digest = canonical_digest(&OutputDigestInput {
-        stdout: &result.stdout.bytes,
-        stderr: &result.stderr.bytes,
+        stdout_full_digest: &result.stdout.full_digest,
+        stdout_byte_count: result.stdout.byte_count,
+        stderr_full_digest: &result.stderr.full_digest,
+        stderr_byte_count: result.stderr.byte_count,
         stdout_truncated: result.stdout.truncated,
         stderr_truncated: result.stderr.truncated,
     })
@@ -627,8 +629,10 @@ fn evidence_from_result(
 
 #[derive(Serialize)]
 struct OutputDigestInput<'a> {
-    stdout: &'a [u8],
-    stderr: &'a [u8],
+    stdout_full_digest: &'a str,
+    stdout_byte_count: u64,
+    stderr_full_digest: &'a str,
+    stderr_byte_count: u64,
     stdout_truncated: bool,
     stderr_truncated: bool,
 }
@@ -1184,14 +1188,8 @@ mod tests {
                 success,
                 code: Some(if success { 0 } else { 9 }),
             }),
-            stdout: CapturedStream {
-                bytes: stdout,
-                truncated: false,
-            },
-            stderr: CapturedStream {
-                bytes: Vec::new(),
-                truncated: false,
-            },
+            stdout: CapturedStream::from_captured(stdout, false),
+            stderr: CapturedStream::from_captured(Vec::new(), false),
             elapsed_millis: 25,
         }
     }
