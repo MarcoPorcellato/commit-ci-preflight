@@ -53,6 +53,14 @@ cache and artifact bindings are read-write, and every writable source is
 contained by the resolved managed cache root. The output labels this policy
 `explicit_bindings`.
 
+For opt-in configuration schema `1.3`, the rendered argv also contains
+`--pull never` and `--memory-swap <memory_mib>m`. The latter equals the
+declared `--memory` value and expresses disabled container swap; schemas
+`1.0`–`1.2` retain their historical argv unchanged. Rendering does not itself
+claim that the selected daemon supports those controls or that the pinned image
+is locally available; later T8-C preflight and receipt work must establish that
+evidence before a run starts.
+
 Live runs preserve that argv. They add a private, non-host-backed tmpfs at
 `/tmp`, bounded to 64 MiB with `noexec`, `nosuid`, and `nodev`, and set the
 fixed container value `TMPDIR=/tmp`. This permits compiler temporary files

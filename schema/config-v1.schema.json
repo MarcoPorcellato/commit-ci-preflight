@@ -230,6 +230,28 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0
+        },
+        "pull_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimePullPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "swap_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeSwapMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "additionalProperties": false,
@@ -262,6 +284,18 @@
       "enum": [
         "docker_compatible",
         "host"
+      ]
+    },
+    "RuntimePullPolicy": {
+      "type": "string",
+      "enum": [
+        "never"
+      ]
+    },
+    "RuntimeSwapMode": {
+      "type": "string",
+      "enum": [
+        "disabled"
       ]
     },
     "StorageConfig": {

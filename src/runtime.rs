@@ -22,7 +22,10 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::config::{ExecutionPlanEnvelopeV1, NormalizedCheck, NormalizedRuntime, RuntimeKind};
+use crate::config::{
+    ExecutionPlanEnvelopeV1, NormalizedCheck, NormalizedRuntime, RuntimeKind, RuntimePullPolicy,
+    RuntimeSwapMode,
+};
 use crate::process::{
     CancellationToken, CleanupStatus, GenerationGuard, ProcessError, ProcessRequest, ProcessResult,
     ProcessTermination, RunIdentity, SupervisorPort,
@@ -481,13 +484,27 @@ fn docker_dry_run_check(
         },
         "--cpus".to_owned(),
         runtime.cpu_count.to_string(),
-        "--memory".to_owned(),
-        format!("{}m", runtime.memory_mib),
+    ];
+    if runtime.pull_policy == Some(RuntimePullPolicy::Never)
+        && runtime.swap_mode == Some(RuntimeSwapMode::Disabled)
+    {
+        argv.extend(["--pull".to_owned(), "never".to_owned()]);
+    }
+    argv.extend(["--memory".to_owned(), format!("{}m", runtime.memory_mib)]);
+    if runtime.pull_policy == Some(RuntimePullPolicy::Never)
+        && runtime.swap_mode == Some(RuntimeSwapMode::Disabled)
+    {
+        argv.extend([
+            "--memory-swap".to_owned(),
+            format!("{}m", runtime.memory_mib),
+        ]);
+    }
+    argv.extend([
         "--pids-limit".to_owned(),
         runtime.pids_limit.to_string(),
         "--tmpfs".to_owned(),
         "/tmp:rw,noexec,nosuid,nodev,size=64m".to_owned(),
-    ];
+    ]);
     for name in environment_allow {
         argv.push("--env".to_owned());
         argv.push(name.clone());
@@ -1239,6 +1256,44 @@ timeout_seconds = 60
                 .argv
                 .iter()
                 .any(|part| part == "sh" || part == "-c")
+        );
+    }
+
+    #[test]
+    fn schema_1_3_dry_run_declares_no_pull_and_disabled_swap() {
+        let envelope = ConfigV1::parse(
+            &CONFIG.replace("schema_version = \"1.0\"", "schema_version = \"1.3\"")
+                .replace("memory_mib = 8192", "memory_mib = 256")
+                .replace(
+                    "network = false\n\n[[checks]]",
+                    "network = false\npull_policy = \"never\"\nswap_mode = \"disabled\"\n\n[storage]\nmin_free_bytes = 1073741824\nreceipt_journal_reserve_bytes = 1048576\nmax_cache_growth_bytes = 2147483648\n\n[[checks]]",
+                ),
+        )
+        .expect("config")
+        .into_plan()
+        .expect("schema 1.3 plan");
+        let workspace = workspace(&envelope);
+        let dry_run = DockerCompatibleRuntime
+            .dry_run(&envelope, &workspace)
+            .expect("dry run");
+
+        assert!(
+            dry_run.checks[0]
+                .argv
+                .windows(2)
+                .any(|pair| { pair == ["--pull", "never"] })
+        );
+        assert!(
+            dry_run.checks[0]
+                .argv
+                .windows(2)
+                .any(|pair| { pair == ["--memory", "256m"] })
+        );
+        assert!(
+            dry_run.checks[0]
+                .argv
+                .windows(2)
+                .any(|pair| { pair == ["--memory-swap", "256m"] })
         );
     }
 

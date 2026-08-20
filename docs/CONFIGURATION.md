@@ -5,8 +5,10 @@
 `.commit-ci-preflight.toml` schema `1.0` remains supported for legacy planning,
 runtime diagnosis, deterministic container argv rendering, and local execution.
 Schema `1.1` adds explicit environment classes. Schema `1.2` additionally
-requires an explicit storage-capacity policy for the same single-runtime
-contract; neither changes the separate v2 matrix schema.
+requires an explicit storage-capacity policy. Schema `1.3` is an opt-in
+extension of the same single-runtime contract: it requires the `1.2` storage
+policy plus an explicit no-pull, disabled-swap runtime declaration; none of
+these v1 schemas changes the separate v2 matrix schema.
 `doctor` performs only the bounded runtime probe described in `docs/RUNTIME.md`;
 `run` performs the separately documented execution flow in `docs/LOCAL_RUN.md`.
 
@@ -41,13 +43,13 @@ starting the runtime.
 
 | Field | Requirement |
 |---|---|
-| `schema_version` | `1.0`, `1.1` for explicit environment classes, or `1.2` for an explicit storage policy |
+| `schema_version` | `1.0`; `1.1` for explicit environment classes; `1.2` for explicit storage; or opt-in `1.3` for explicit storage and runtime capability policy |
 | `project` | Logical `owner/name`; never a URL or credential-bearing remote |
 | `runtime` | Required runtime type, pinned image, and resource limits |
 | `receipt` | Optional output/freshness table with fail-safe defaults |
 | `environment` | Optional environment contract; `1.0` permits legacy `allow`, while `1.1` uses `fixed`, `runtime_internal`, and `remote_secret_only` |
 | `caches` | Up to 32 unique logical caches |
-| `storage` | Required only by `1.2`; preflight reserve and bounded owned-growth declaration |
+| `storage` | Required by `1.2` and `1.3`; preflight reserve and bounded owned-growth declaration |
 | `checks` | 1–128 explicit checks |
 
 ## Runtime
@@ -69,6 +71,27 @@ no project process.
 `dry-run` resolves a persistent cache path and renders the exact repository,
 cache, and artifact mount bindings without creating them. No project check or
 container is started yet.
+
+### Schema 1.3 runtime policy
+
+Schema `1.3` is opt-in and accepts exactly these two declarations:
+
+```toml
+schema_version = "1.3"
+
+[runtime]
+pull_policy = "never"
+swap_mode = "disabled"
+```
+
+The same configuration must include the explicit environment-class and
+`[storage]` rules used by schema `1.2`. Historical schemas reject both runtime
+policy fields, preserving their normalized plan and argv shape. A `1.3`
+`dry-run` renders `--pull never`; with the declared `memory_mib`, it also
+renders `--memory-swap <same-memory>m`, so the container does not inherit a
+daemon swap default. The declaration changes the plan digest, but it alone is
+not runtime capability evidence; the bounded read-only preflight and receipt
+binding are subsequent T8-C work.
 
 ## Checks
 
@@ -146,11 +169,11 @@ precedence, ownership, persistence, inventory, and cleanup rules.
 
 ### Storage-capacity policy
 
-Schema `1.2` requires one explicit policy. It is normalized into the plan and
+Schemas `1.2` and `1.3` require one explicit policy. It is normalized into the plan and
 therefore changes the plan digest and any snapshot-backed receipt v2.
 
 ```toml
-schema_version = "1.2"
+schema_version = "1.2" # or "1.3" with the explicit runtime policy above
 
 [storage]
 min_free_bytes = 1073741824          # Keep at least 1 GiB free after the declared run allowance.

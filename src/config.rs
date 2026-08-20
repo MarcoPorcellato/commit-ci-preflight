@@ -62,6 +62,10 @@ pub struct RuntimeConfig {
     pub pids_limit: u32,
     #[serde(default)]
     pub network: bool,
+    #[serde(default)]
+    pub pull_policy: Option<RuntimePullPolicy>,
+    #[serde(default)]
+    pub swap_mode: Option<RuntimeSwapMode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -69,6 +73,18 @@ pub struct RuntimeConfig {
 pub enum RuntimeKind {
     DockerCompatible,
     Host,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimePullPolicy {
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeSwapMode {
+    Disabled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -181,6 +197,10 @@ pub struct NormalizedRuntime {
     pub memory_mib: u64,
     pub pids_limit: u32,
     pub network: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_policy: Option<RuntimePullPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_mode: Option<RuntimeSwapMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -303,6 +323,7 @@ impl ConfigV1 {
         let schema_version = self.schema_version.clone();
         let fixed_environment = self.environment.fixed.clone();
         let caches = normalize_caches(self.caches)?;
+        let runtime = normalize_runtime(&schema_version, self.runtime)?;
         let environment = normalize_environment(&schema_version, self.environment, &caches)?;
         let checks = normalize_checks(self.checks)?;
         let storage = normalize_storage(&schema_version, self.storage, &checks)?;
@@ -314,14 +335,7 @@ impl ConfigV1 {
         let plan = ExecutionPlanV1 {
             schema_version,
             project: self.project,
-            runtime: NormalizedRuntime {
-                kind: self.runtime.kind,
-                image: self.runtime.image,
-                cpu_count: self.runtime.cpu_count,
-                memory_mib: self.runtime.memory_mib,
-                pids_limit: self.runtime.pids_limit,
-                network: self.runtime.network,
-            },
+            runtime,
             receipt,
             environment,
             caches,
@@ -339,7 +353,7 @@ impl ConfigV1 {
     fn validate_top_level(&self) -> Result<(), ConfigError> {
         if !matches!(
             self.schema_version.as_str(),
-            CONFIG_SCHEMA_VERSION | "1.1" | "1.2"
+            CONFIG_SCHEMA_VERSION | "1.1" | "1.2" | "1.3"
         ) {
             return Err(ConfigError::UnsupportedSchemaVersion(
                 self.schema_version.clone(),
@@ -376,6 +390,45 @@ impl ConfigV1 {
             31_536_000,
         )
     }
+}
+
+fn normalize_runtime(
+    schema_version: &str,
+    runtime: RuntimeConfig,
+) -> Result<NormalizedRuntime, ConfigError> {
+    let (pull_policy, swap_mode) = if schema_version == "1.3" {
+        (
+            Some(
+                runtime
+                    .pull_policy
+                    .ok_or(ConfigError::MissingRuntimeCapabilityPolicy)?,
+            ),
+            Some(
+                runtime
+                    .swap_mode
+                    .ok_or(ConfigError::MissingRuntimeCapabilityPolicy)?,
+            ),
+        )
+    } else {
+        if runtime.pull_policy.is_some() {
+            return Err(ConfigError::InvalidField("runtime.pull_policy"));
+        }
+        if runtime.swap_mode.is_some() {
+            return Err(ConfigError::InvalidField("runtime.swap_mode"));
+        }
+        (None, None)
+    };
+
+    Ok(NormalizedRuntime {
+        kind: runtime.kind,
+        image: runtime.image,
+        cpu_count: runtime.cpu_count,
+        memory_mib: runtime.memory_mib,
+        pids_limit: runtime.pids_limit,
+        network: runtime.network,
+        pull_policy,
+        swap_mode,
+    })
 }
 
 impl ExecutionPlanEnvelopeV1 {
@@ -477,7 +530,7 @@ fn normalize_storage(
     storage: Option<StorageConfig>,
     checks: &[NormalizedCheck],
 ) -> Result<Option<NormalizedStorage>, ConfigError> {
-    if schema_version != "1.2" {
+    if !matches!(schema_version, "1.2" | "1.3") {
         if storage.is_some() {
             return Err(ConfigError::InvalidField("storage"));
         }
@@ -973,6 +1026,7 @@ pub enum ConfigError {
         cache_id: String,
     },
     MissingStoragePolicy,
+    MissingRuntimeCapabilityPolicy,
     DependencyCycle(Vec<String>),
     PlanDigestMismatch,
 }
@@ -1009,8 +1063,15 @@ impl fmt::Display for ConfigError {
                 "runtime-internal environment {name} references unknown cache {cache_id}"
             ),
             Self::MissingStoragePolicy => {
-                write!(formatter, "schema 1.2 requires an explicit storage policy")
+                write!(
+                    formatter,
+                    "schemas 1.2 and 1.3 require an explicit storage policy"
+                )
             }
+            Self::MissingRuntimeCapabilityPolicy => write!(
+                formatter,
+                "schema 1.3 requires pull_policy = never and swap_mode = disabled"
+            ),
             Self::OutOfRange {
                 field,
                 minimum,
@@ -1380,6 +1441,74 @@ max_cache_growth_bytes = 2147483648
             .expect("second plan");
 
         assert_ne!(first.plan_digest, second.plan_digest);
+    }
+
+    #[test]
+    fn v1_3_requires_explicit_runtime_capability_policy() {
+        let input = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.3\"")
+            + r#"
+
+[storage]
+min_free_bytes = 1073741824
+receipt_journal_reserve_bytes = 1048576
+max_cache_growth_bytes = 2147483648
+"#;
+
+        assert!(matches!(
+            ConfigV1::parse(&input).and_then(ConfigV1::into_plan),
+            Err(ConfigError::MissingRuntimeCapabilityPolicy)
+        ));
+    }
+
+    #[test]
+    fn v1_3_runtime_policy_changes_the_plan_digest() {
+        let base = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.3\"")
+            .replace(
+                "pids_limit = 512\n",
+                "pids_limit = 512\npull_policy = \"never\"\nswap_mode = \"disabled\"\n",
+            )
+            + r#"
+
+[storage]
+min_free_bytes = 1073741824
+receipt_journal_reserve_bytes = 1048576
+max_cache_growth_bytes = 2147483648
+"#;
+        let first = ConfigV1::parse(&base)
+            .and_then(ConfigV1::into_plan)
+            .expect("first schema 1.3 plan");
+        let mut changed = first.plan.clone();
+        changed.runtime.swap_mode = None;
+
+        assert_ne!(
+            canonical_digest(&first.plan).expect("first digest"),
+            canonical_digest(&changed).expect("changed digest")
+        );
+    }
+
+    #[test]
+    fn v1_3_requires_storage_and_historical_schemas_reject_runtime_policy() {
+        let missing_storage = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.3\"")
+            .replace(
+                "pids_limit = 512\n",
+                "pids_limit = 512\npull_policy = \"never\"\nswap_mode = \"disabled\"\n",
+            );
+        assert!(matches!(
+            ConfigV1::parse(&missing_storage).and_then(ConfigV1::into_plan),
+            Err(ConfigError::MissingStoragePolicy)
+        ));
+
+        let historical = valid_config(&check("format", &[])).replace(
+            "pids_limit = 512\n",
+            "pids_limit = 512\npull_policy = \"never\"\nswap_mode = \"disabled\"\n",
+        );
+        assert!(matches!(
+            ConfigV1::parse(&historical).and_then(ConfigV1::into_plan),
+            Err(ConfigError::InvalidField("runtime.pull_policy"))
+        ));
     }
 
     #[test]
