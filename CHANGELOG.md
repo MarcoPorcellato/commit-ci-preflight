@@ -9,6 +9,11 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T5 recovery candidate: owned cache entries and promotion use advisory
+  operating-system locks that are released automatically when the owning
+  process exits; concurrent preparation of one cache entry and concurrent
+  promotion attempts now fail closed instead of interleaving. Promotion
+  journaling and cross-process recovery remain pending.
 - T5 candidate generational cache slice: runs stage cache data in owned
   `.staging-*` generations, persist a strict versioned manifest, and promote a
   validated generation only after all checks pass; failed in-process stages are

@@ -17,10 +17,14 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -38,6 +42,8 @@ const COMPLETE_FILE: &str = ".complete-v1";
 const COMPLETE_BYTES: &[u8] = b"complete-v1\n";
 const GENERATION_MANIFEST_FILE: &str = ".generation-v1.json";
 const GENERATION_SCHEMA_VERSION: &str = "1.0";
+const ENTRY_LOCK_FILE: &str = ".entry-lock-v1";
+const PROMOTION_LOCK_FILE: &str = ".promotion-lock-v1";
 const MAX_INVENTORY_NODES: usize = 100_000;
 const INIT_RETRIES: usize = 40;
 const INIT_RETRY_DELAY: Duration = Duration::from_millis(5);
@@ -357,6 +363,7 @@ impl ManagedCache {
             Err(error) => return Err(CacheError::Io(error)),
         }
         validated_digest_hex(plan_digest)?;
+        let entry_lock = acquire_entry_lock(&path)?;
         let complete = entry_status(&path, &key.directory_name())? == CacheEntryStatus::Complete;
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let staging_path = path.join(format!(".staging-{}-{sequence}", std::process::id()));
@@ -381,12 +388,14 @@ impl ManagedCache {
             key_digest: key.digest.clone(),
             plan_digest: plan_digest.to_owned(),
             generation,
+            _entry_lock: entry_lock,
             was_complete: complete,
         })
     }
 
     pub fn promote_entry(&self, prepared: &PreparedCacheEntry) -> Result<(), CacheError> {
         validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
+        let _promotion_lock = acquire_promotion_lock(&self.root.path)?;
         validate_plain_directory(&prepared.path)?;
         validate_plain_directory(&prepared.staging_path)?;
         validate_plain_directory(&prepared.data_path)?;
@@ -581,7 +590,7 @@ impl ManagedCache {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PreparedCacheEntry {
     pub path: PathBuf,
     pub data_path: PathBuf,
@@ -589,6 +598,7 @@ pub struct PreparedCacheEntry {
     key_digest: String,
     plan_digest: String,
     generation: u64,
+    _entry_lock: Arc<File>,
     pub was_complete: bool,
 }
 
@@ -844,6 +854,48 @@ fn ensure_managed_directory(path: &Path) -> Result<(), CacheError> {
     }
 }
 
+fn acquire_entry_lock(entry: &Path) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock(&entry.join(ENTRY_LOCK_FILE), "cache entry")
+}
+
+fn acquire_promotion_lock(root: &Path) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock(&root.join(PROMOTION_LOCK_FILE), "cache promotion")
+}
+
+fn acquire_advisory_lock(path: &Path, label: &'static str) -> Result<Arc<File>, CacheError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(CacheError::UnexpectedEntry(path.to_path_buf()));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(CacheError::Io(error)),
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)
+        .map_err(CacheError::Io)?;
+    if let Err(error) = file.try_lock_exclusive() {
+        if error.kind() == io::ErrorKind::WouldBlock {
+            return Err(CacheError::LockBusy(path.to_path_buf()));
+        }
+        return Err(CacheError::Io(error));
+    }
+    file.set_len(0).map_err(CacheError::Io)?;
+    let owner = format!(
+        "{{\"schema_version\":\"1.0\",\"owner\":\"commit-ci-preflight\",\"purpose\":\"{label}\",\"pid\":{}}}\n",
+        std::process::id()
+    );
+    file.write_all(owner.as_bytes()).map_err(CacheError::Io)?;
+    file.sync_all().map_err(CacheError::Io)?;
+    Ok(Arc::new(file))
+}
+
 fn validate_plain_directory(path: &Path) -> Result<(), CacheError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1062,6 +1114,7 @@ pub enum CacheError {
     InvalidBudget,
     InvalidDigest,
     GenerationMismatch,
+    LockBusy(PathBuf),
     PromotionUncertain,
     SizeOverflow,
     Canonical(ReceiptError),
@@ -1081,6 +1134,7 @@ impl CacheError {
             | Self::UnexpectedEntry(_)
             | Self::InventoryLimitExceeded
             | Self::GenerationMismatch
+            | Self::LockBusy(_)
             | Self::PromotionUncertain
             | Self::SizeOverflow
             | Self::Canonical(_)
@@ -1118,6 +1172,7 @@ impl fmt::Display for CacheError {
             Self::GenerationMismatch => {
                 formatter.write_str("cache generation manifest does not match the prepared entry")
             }
+            Self::LockBusy(path) => write!(formatter, "cache lock is busy: {}", path.display()),
             Self::PromotionUncertain => {
                 formatter.write_str("cache generation promotion could not be rolled back safely")
             }
@@ -1529,6 +1584,7 @@ timeout_seconds = 60
                 .state,
             "complete"
         );
+        drop(prepared);
         assert!(
             cache
                 .prepare_entry(&key, &envelope.plan_digest, 2)
@@ -1552,6 +1608,7 @@ timeout_seconds = 60
         let payload = prepared.data_path.join("payload.bin");
         fs::write(&payload, b"known-good").expect("write known-good payload");
         cache.promote_entry(&prepared).expect("promote known-good");
+        drop(prepared);
 
         let failed = cache
             .prepare_entry(&key, &envelope.plan_digest, 2)
@@ -1569,6 +1626,30 @@ timeout_seconds = 60
         let inventory = cache.inventory().expect("inventory");
         assert_eq!(inventory.entries.len(), 1);
         assert_eq!(inventory.entries[0].status, CacheEntryStatus::Complete);
+
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn active_entry_lock_blocks_a_second_preparation_until_release() {
+        let (repo, resolved) = resolved_fixture("entry-lock");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let envelope = envelope();
+        let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
+
+        let first = cache
+            .prepare_entry(&key, &envelope.plan_digest, 1)
+            .expect("first preparation");
+        assert!(matches!(
+            cache.prepare_entry(&key, &envelope.plan_digest, 2),
+            Err(CacheError::LockBusy(_))
+        ));
+        drop(first);
+        let second = cache
+            .prepare_entry(&key, &envelope.plan_digest, 2)
+            .expect("preparation after release");
+        drop(second);
 
         clean(&resolved.path);
         clean(&repo);
