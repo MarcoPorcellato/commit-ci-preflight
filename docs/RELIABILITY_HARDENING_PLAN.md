@@ -567,9 +567,8 @@ complete data with symlink rejection, and promotes only a validated generation
 after the run's checks pass. The owning prepared handle removes an unfinished
 staging generation on ordinary failure, while a failed generation cannot alter
 the previous complete data. This is not yet the T5 exit gate: cross-process
-crash recovery, reflink/clonefile optimization, journaled multi-cache
-promotion/rollback, durable manifests, and exact-head qualification remain
-pending.
+crash recovery, journaled multi-cache promotion/rollback, and exact-head
+qualification remain pending.
 
 The next recovery slice adds owned advisory OS locks for each prepared cache
 entry and for the promotion boundary. A second process cannot prepare the same
@@ -584,14 +583,23 @@ entries are promoted while the journal remains present; backups and staging
 directories are removed only after the complete set succeeds. A later promoter
 can recover a prepared or partially promoted journal only after acquiring the
 same entry locks; ambiguous state returns a hard error and leaves evidence in
-place. This is still a candidate slice: durable manifest replacement,
-reflink/clonefile optimization, and a public cache-promotion outcome remain
-pending.
+place. Durable manifest replacement now uses the existing durable filesystem
+primitive on Unix/macOS, with the conservative legacy fallback retained on
+non-Unix targets. On macOS, a complete generation attempts an APFS
+`clonefile` copy after bounded tree validation, then falls back to the same
+deterministic symlink-rejecting recursive copy when the filesystem does not
+support cloning.
 
 The public cache API now returns `CachePromotionOutcome` separately from check
 evidence. Empty cache plans report `not_attempted`, successful promotion
 reports `promoted`, and promotion uncertainty remains an error; no cache
 failure is converted into a passing check result.
+
+This remains a candidate slice: exact-head native qualification, crash-point
+subprocess evidence, and platform-specific clone behavior remain pending. A
+clone failure is never treated as a cache success; it either takes the bounded
+copy fallback or returns a hard error, and an incomplete preparation cannot
+replace the previous complete generation.
 
 Deliverables:
 

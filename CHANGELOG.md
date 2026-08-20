@@ -9,6 +9,12 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T5 cache-copy hardening: durable generation manifests now use the existing
+  Unix/macOS durable replacement primitive, and complete macOS generations
+  attempt bounded APFS `clonefile` staging before falling back to the
+  deterministic symlink-rejecting copy path. The public outcome remains
+  separate from check evidence and exact-head native qualification remains
+  pending.
 - T5 outcome contract: cache promotion now returns an explicit
   `CachePromotionOutcome` independent from check evidence; an empty cache set
   is `not_attempted`, successful promotion is `promoted`, and filesystem

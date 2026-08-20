@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use std::collections::BTreeSet;
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -30,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{ExecutionPlanEnvelopeV1, NormalizedCache};
+use crate::durable_fs::{DurableFileSystem, DurableFsError};
 use crate::receipt::{ReceiptError, canonical_json};
 
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 20 * 1024 * 1024 * 1024;
@@ -51,6 +54,15 @@ const MAX_INVENTORY_NODES: usize = 100_000;
 const INIT_RETRIES: usize = 40;
 const INIT_RETRY_DELAY: Duration = Duration::from_millis(5);
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn clonefile(
+        source: *const std::os::raw::c_char,
+        destination: *const std::os::raw::c_char,
+        flags: u32,
+    ) -> i32;
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -374,7 +386,12 @@ impl ManagedCache {
         let data_path = staging_path.join("data");
         ensure_managed_directory(&data_path)?;
         if complete {
-            copy_tree(&path.join("data"), &data_path)?;
+            let source = path.join("data");
+            remove_if_present(&data_path)?;
+            if !try_clone_tree(&source, &data_path)? {
+                ensure_managed_directory(&data_path)?;
+                copy_tree(&source, &data_path)?;
+            }
         }
         let manifest = CacheGenerationManifestV1 {
             schema_version: GENERATION_SCHEMA_VERSION.to_owned(),
@@ -907,21 +924,43 @@ fn write_generation_manifest_replacing(
     path: &Path,
     manifest: &CacheGenerationManifestV1,
 ) -> Result<(), CacheError> {
-    remove_if_present(path)?;
-    write_generation_manifest(
-        path.parent().ok_or(CacheError::PromotionUncertain)?,
-        manifest,
-    )
-    .and_then(|_| {
-        let generated = path
-            .parent()
-            .ok_or(CacheError::PromotionUncertain)?
-            .join(GENERATION_MANIFEST_FILE);
-        if generated != path {
-            return Err(CacheError::PromotionUncertain);
-        }
-        Ok(())
-    })
+    let bytes = canonical_json(manifest).map_err(CacheError::Canonical)?;
+    let mut durable_bytes = bytes;
+    durable_bytes.push(b'\n');
+    #[cfg(unix)]
+    {
+        return DurableFileSystem::default()
+            .atomic_replace(path, &durable_bytes)
+            .map_err(map_durable_manifest_error);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = durable_bytes;
+        remove_if_present(path)?;
+        return write_generation_manifest(
+            path.parent().ok_or(CacheError::PromotionUncertain)?,
+            manifest,
+        )
+        .and_then(|_| {
+            let generated = path
+                .parent()
+                .ok_or(CacheError::PromotionUncertain)?
+                .join(GENERATION_MANIFEST_FILE);
+            if generated != path {
+                return Err(CacheError::PromotionUncertain);
+            }
+            Ok(())
+        });
+    }
+}
+
+fn map_durable_manifest_error(error: DurableFsError) -> CacheError {
+    match error {
+        DurableFsError::Io(error) => CacheError::Io(error),
+        DurableFsError::UnsafePath(_)
+        | DurableFsError::OwnershipMismatch
+        | DurableFsError::AtomicReplacementUnavailable => CacheError::PromotionUncertain,
+    }
 }
 
 fn read_generation_manifest(path: &Path) -> Result<CacheGenerationManifestV1, CacheError> {
@@ -967,6 +1006,43 @@ fn write_complete_marker(path: &Path) -> Result<(), CacheError> {
         .map_err(CacheError::Io)?;
     file.write_all(COMPLETE_BYTES).map_err(CacheError::Io)?;
     file.sync_all().map_err(CacheError::Io)
+}
+
+fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError> {
+    let mut nodes = 0;
+    bounded_tree_size(source, &mut nodes)?;
+    #[cfg(target_os = "macos")]
+    {
+        let source = CString::new(
+            source
+                .to_str()
+                .ok_or(CacheError::UnsafePath("cache path must be UTF-8"))?,
+        )
+        .map_err(|_| CacheError::UnsafePath("cache path contains NUL"))?;
+        let destination_c = CString::new(
+            destination
+                .to_str()
+                .ok_or(CacheError::UnsafePath("cache path must be UTF-8"))?,
+        )
+        .map_err(|_| CacheError::UnsafePath("cache path contains NUL"))?;
+        // clonefile is an optimization only. Unsupported filesystems fall
+        // back to the deterministic symlink-rejecting copy path below.
+        let result = unsafe { clonefile(source.as_ptr(), destination_c.as_ptr(), 0) };
+        if result == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(18 | 22 | 45 | 95)) {
+            remove_if_present(destination)?;
+            return Ok(false);
+        }
+        return Err(CacheError::Io(error));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (source, destination);
+        Ok(false)
+    }
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> Result<(), CacheError> {
@@ -1884,6 +1960,10 @@ timeout_seconds = 60
         let failed = cache
             .prepare_entry(&key, &envelope.plan_digest, 2)
             .expect("prepare failed generation");
+        assert_eq!(
+            fs::read(failed.data_path.join("payload.bin")).expect("copy current payload"),
+            b"known-good"
+        );
         fs::write(failed.data_path.join("payload.bin"), b"failed-run-mutation")
             .expect("simulate failed run mutation");
         let failed_staging = failed.staging_path.clone();
