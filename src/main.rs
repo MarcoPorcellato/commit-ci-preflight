@@ -50,7 +50,8 @@ use commit_ci_preflight::resource::{
 use commit_ci_preflight::resource_history::{
     DEFAULT_RESOURCE_PROFILE, DEFAULT_WORKLOAD_FAMILY, ResourceCacheStateV2,
     ResourceExecutionContextV2, ResourceExecutionModeV2, ResourceExecutorV2,
-    ResourceHistoryRecordV2, ResourceHistoryStore, ResourceRunOutcome, validate_profile,
+    ResourceHistoryRecordV2, ResourceHistoryStore, ResourceRunOutcome, ResourceTerminalDetailV2,
+    validate_profile,
 };
 use commit_ci_preflight::run::{
     Clock, CompletionBarrier, RunError, RunLifecycleObserver, RunLifecyclePhase, RunRequest,
@@ -1631,6 +1632,7 @@ impl GuardResourceObservation {
     fn persist(
         self,
         outcome: ResourceRunOutcome,
+        terminal_detail: Option<ResourceTerminalDetailV2>,
         watchdog_trip_reason: Option<WatchdogTripReason>,
     ) {
         let Some(summary) = self.observation.summary() else {
@@ -1644,6 +1646,7 @@ impl GuardResourceObservation {
             self.started_at_unix_seconds,
             duration_milliseconds,
             outcome,
+            terminal_detail,
             watchdog_trip_reason,
             &summary,
         );
@@ -1726,7 +1729,11 @@ impl GuardExecSession {
         self.watchdog.ensure_joined();
         let trip = self.watchdog.trip();
         if let Some(observation) = self.resource_observation.take() {
-            observation.persist(resource_run_outcome(&result, cancellation, trip), trip);
+            observation.persist(
+                resource_run_outcome(&result, cancellation, trip),
+                resource_terminal_detail(&result, cancellation, trip),
+                trip,
+            );
         }
         let guard = self
             .admission
@@ -1781,6 +1788,62 @@ fn resource_run_outcome(
         ResourceRunOutcome::Completed
     } else {
         ResourceRunOutcome::Failed
+    }
+}
+
+fn resource_terminal_detail(
+    result: &Result<ProcessResult, GuardExecError>,
+    cancellation: &CancellationToken,
+    trip: Option<WatchdogTripReason>,
+) -> Option<ResourceTerminalDetailV2> {
+    if trip.is_some() || cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+        return Some(ResourceTerminalDetailV2::ResourcePressure);
+    }
+    if cancellation.reason() == Some(CancellationReason::User)
+        || matches!(
+            result,
+            Ok(ProcessResult {
+                termination: ProcessTermination::Cancelled,
+                ..
+            }) | Err(GuardExecError::UserCancelled)
+        )
+    {
+        return Some(ResourceTerminalDetailV2::UserCancelled);
+    }
+    if matches!(
+        result,
+        Ok(ProcessResult {
+            termination: ProcessTermination::TimedOut,
+            ..
+        }) | Err(GuardExecError::TimedOut)
+    ) {
+        return Some(ResourceTerminalDetailV2::TimedOut);
+    }
+    match result {
+        Ok(ProcessResult {
+            termination: ProcessTermination::Completed,
+            exit: Some(exit),
+            ..
+        }) if exit.success => None,
+        Ok(ProcessResult {
+            termination: ProcessTermination::Completed,
+            exit: Some(exit),
+            ..
+        }) if exit.code.is_some_and(|code| (1..=255).contains(&code)) => {
+            Some(ResourceTerminalDetailV2::ChildExit {
+                exit_code: exit.code.expect("checked child exit code") as u8,
+            })
+        }
+        Err(GuardExecError::ChildExit(code)) if (1..=255).contains(code) => {
+            Some(ResourceTerminalDetailV2::ChildExit {
+                exit_code: *code as u8,
+            })
+        }
+        Err(GuardExecError::Resource(_)) => Some(ResourceTerminalDetailV2::ResourceMonitorFailure),
+        Err(GuardExecError::Process(_)) => {
+            Some(ResourceTerminalDetailV2::ProcessSupervisionFailure)
+        }
+        _ => Some(ResourceTerminalDetailV2::InternalFailure),
     }
 }
 
@@ -2207,7 +2270,7 @@ mod tests {
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
         ResourceExecutionModeArg, ResourceExecutorArg, WatchdogCompletionBarrier,
         detect_resource_executor, finalize_guard_exec_result, new_journal_id,
-        reconcile_watchdog_outcome, resource_run_outcome,
+        reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::process::CancellationToken;
@@ -2217,7 +2280,7 @@ mod tests {
     use commit_ci_preflight::resource::{
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
-    use commit_ci_preflight::resource_history::ResourceExecutorV2;
+    use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
     use std::ffi::OsString;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2607,8 +2670,16 @@ mod tests {
             code: Some(1),
         });
         assert_eq!(
-            resource_run_outcome(&Ok(failed), &cancellation, None),
+            resource_run_outcome(&Ok(failed.clone()), &cancellation, None),
             commit_ci_preflight::resource_history::ResourceRunOutcome::Failed
+        );
+        assert_eq!(
+            resource_terminal_detail(&Err(GuardExecError::ChildExit(7)), &cancellation, None),
+            Some(ResourceTerminalDetailV2::ChildExit { exit_code: 7 })
+        );
+        assert_eq!(
+            resource_terminal_detail(&Ok(failed), &cancellation, None),
+            Some(ResourceTerminalDetailV2::ChildExit { exit_code: 1 })
         );
 
         let user_cancelled = CancellationToken::default();
@@ -2616,6 +2687,10 @@ mod tests {
         assert_eq!(
             resource_run_outcome(&Ok(completed_process_result()), &user_cancelled, None,),
             commit_ci_preflight::resource_history::ResourceRunOutcome::Cancelled
+        );
+        assert_eq!(
+            resource_terminal_detail(&Ok(completed_process_result()), &user_cancelled, None,),
+            Some(ResourceTerminalDetailV2::UserCancelled)
         );
 
         let resource_cancelled = CancellationToken::default();
@@ -2627,6 +2702,14 @@ mod tests {
                 None,
             ),
             commit_ci_preflight::resource_history::ResourceRunOutcome::ResourcePressure
+        );
+        assert_eq!(
+            resource_terminal_detail(
+                &Err(GuardExecError::ResourcePressure),
+                &resource_cancelled,
+                None,
+            ),
+            Some(ResourceTerminalDetailV2::ResourcePressure)
         );
     }
 

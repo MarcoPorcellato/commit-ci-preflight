@@ -23,7 +23,7 @@ reviewed `macos-v4` policy; an individual record still cannot alter a decision.
 | `macos-v3` | Pre-start admission uses 20% available memory, 40% compressor and `min(8 GiB, 30% RAM)` swap; compressor alone trips the in-run watchdog at 40% soft / 45% hard | Superseded after measured false positives |
 | `macos-v4` | Keeps the v3 available/reclaimable/swap pre-start limits; compressor alone is advisory before and during execution, soft pressure requires two signals for about 30 seconds, and immediate stops use critical memory/swap or compound 70% compression | Current policy |
 | observation history v1 | Per-profile baseline, extrema, duration and outcome; no prediction | Legacy file retained unchanged |
-| observation history v2 | Adds bounded workload/executor context for comparable cross-repository samples | Current tranche |
+| observation history v2 | Adds bounded workload/executor context and an optional closed terminal-failure detail for comparable cross-repository samples | Current tranche |
 | forecast shadow mode | Backtest a deterministic upper-bound forecast without changing admission | Future, requires sufficient comparable samples |
 | workload-aware admission | May forecast workload headroom while retaining the macOS-v4 hard limits and watchdog | Future owner gate |
 
@@ -59,6 +59,13 @@ Direct argv beginning with `docker --context orbstack` or
 `docker --context=orbstack` is classified automatically. Indirect scripts and
 Make targets must pass explicit context because CCP intentionally does not
 inspect script contents, environment values, runtime APIs, or container state.
+
+`guard exec` starts its child in CCP's current working directory. Invoke the
+wrapper from the repository or workspace under test so relative paths, test
+discovery, and project configuration remain comparable. If a build tool is
+selected with an explicit manifest path, that does not change CCP's working
+directory; keep the shell in the target workspace and point only the build tool
+at its manifest.
 
 Do not wrap a command that recursively invokes another CCP `run`, `benchmark`
 or `guard exec`. Host-wide admission is intentionally non-reentrant: the inner
@@ -105,6 +112,10 @@ Each v2 JSONL record contains:
 - Unix start time and elapsed milliseconds;
 - `completed`, `failed`, `cancelled`, `timed_out`, or `resource_pressure`
   outcome, plus an optional hard/soft/probe watchdog-trip reason;
+- for non-completed v2 records only, an optional closed terminal detail:
+  `child_exit` with an exit code from `1` through `255`, `user_cancelled`,
+  `timed_out`, `resource_pressure`, `resource_monitor_failure`,
+`process_supervision_failure`, or `internal_failure`;
 - sample count;
 - baseline and minimum available-memory percentage;
 - baseline and minimum reclaimable uncompressed bytes;
@@ -120,8 +131,11 @@ sample are retained; the complete time series is not written.
 
 History deliberately excludes commands, arguments, environment names or
 values, repository names, paths, commit identifiers, usernames, hostnames,
-container identifiers, output, and file contents. It is local operational
+container identifiers, output, and file contents. Terminal detail is a closed
+classification, not a raw error or command result. History is local operational
 telemetry, never a receipt or attestation, and is never transmitted by CCP.
+Records written before this optional field existed remain valid v2 history and
+retain no inferred terminal detail.
 
 ## Integrity and failure behavior
 
