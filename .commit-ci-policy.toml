@@ -1,9 +1,15 @@
-schema_version = "1.0"
+schema_version = "1.1"
 project = "MarcoPorcellato/commit-ci-preflight"
 configuration_digest = "sha256:bc348df299ee58ecc8f7cfc7f2dc743b5c03f1a90f7e5dbff45754017955e901"
 required_checks = ["clippy", "docs", "format", "release-metadata", "test"]
 image_reference = "docker.io/library/rust@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc"
 max_age_seconds = 86400
+trusted_config = ".commit-ci-preflight.toml"
+source_snapshot_strategy = "git-object"
+
+[[supported_producers]]
+name = "commit-ci-preflight"
+version = "0.1.0"
 
 [[platforms]]
 host_os = "macos"

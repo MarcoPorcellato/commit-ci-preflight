@@ -189,6 +189,13 @@ normalized plan. The policy pins:
 - accepted host OS, architecture, and runtime kind;
 - maximum receipt age.
 
+For a new trusted receipt-v2 integration, use policy `1.1` and additionally
+pin a safe policy-relative `trusted_config`, one source-snapshot strategy, and
+the exact supported producer name/version. Policy `1.1` rejects a receipt v1
+instead of silently treating it as a trusted plan. The v1 public fixture remains
+useful only as a historical compatibility example; see
+[verification policy](VERIFICATION_POLICY.md) for the normative v1.1 form.
+
 Use [the public policy fixture](../examples/projects/rust/.commit-ci-policy.toml)
 as syntax reference and [verification policy](VERIFICATION_POLICY.md) as the
 normative field guide. Values must come from the reviewed configuration and

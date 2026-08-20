@@ -74,6 +74,7 @@
       "type": "string"
     },
     "ExecutionPlanV1": {
+      "additionalProperties": false,
       "properties": {
         "caches": {
           "items": {
@@ -180,6 +181,7 @@
       "type": "object"
     },
     "NormalizedCache": {
+      "additionalProperties": false,
       "properties": {
         "id": {
           "type": "string"
@@ -195,6 +197,7 @@
       "type": "object"
     },
     "NormalizedCheck": {
+      "additionalProperties": false,
       "properties": {
         "argv": {
           "items": {
@@ -241,6 +244,7 @@
       "type": "object"
     },
     "NormalizedEnvironment": {
+      "additionalProperties": false,
       "properties": {
         "fixed": {
           "items": {
@@ -276,6 +280,7 @@
       "type": "object"
     },
     "NormalizedFixedEnvironment": {
+      "additionalProperties": false,
       "properties": {
         "name": {
           "type": "string"
@@ -291,6 +296,7 @@
       "type": "object"
     },
     "NormalizedReceipt": {
+      "additionalProperties": false,
       "properties": {
         "freshness_seconds": {
           "format": "uint64",
@@ -308,6 +314,7 @@
       "type": "object"
     },
     "NormalizedRuntime": {
+      "additionalProperties": false,
       "properties": {
         "cpu_count": {
           "format": "uint16",
@@ -346,6 +353,7 @@
       "type": "object"
     },
     "NormalizedRuntimeInternalEnvironment": {
+      "additionalProperties": false,
       "properties": {
         "cache_id": {
           "type": "string"

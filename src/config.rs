@@ -129,6 +129,7 @@ pub struct ExecutionPlanEnvelopeV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionPlanV1 {
     pub schema_version: String,
     pub project: String,
@@ -140,6 +141,7 @@ pub struct ExecutionPlanV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedRuntime {
     pub kind: RuntimeKind,
     pub image: String,
@@ -150,12 +152,14 @@ pub struct NormalizedRuntime {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedReceipt {
     pub output: String,
     pub freshness_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedEnvironment {
     pub inherit: Vec<String>,
     pub fixed: Vec<NormalizedFixedEnvironment>,
@@ -164,12 +168,14 @@ pub struct NormalizedEnvironment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedFixedEnvironment {
     pub name: String,
     pub value_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedRuntimeInternalEnvironment {
     pub name: String,
     pub cache_id: String,
@@ -191,12 +197,14 @@ impl NormalizedEnvironment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedCache {
     pub id: String,
     pub mount_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct NormalizedCheck {
     pub id: String,
     pub required: bool,

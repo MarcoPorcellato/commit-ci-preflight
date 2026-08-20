@@ -97,9 +97,11 @@ cargo run --locked -- verify \
   --expected-commit "$(git rev-parse HEAD)"
 ~~~
 
-The root policy currently accepts genuine Apple Silicon macOS execution
-through the Docker-compatible adapter. It does not claim Linux-host-native,
-Windows-native, GitHub-hosted, or identity evidence.
+The root policy is schema `1.1`: it resolves only the policy-relative trusted
+configuration and requires a receipt v2 whose normalized execution plan agrees
+with it. It accepts genuine Apple Silicon macOS execution through the
+Docker-compatible adapter. It does not claim Linux-host-native, Windows-native,
+GitHub-hosted, or cryptographic identity evidence.
 
 The source checkout stays read-only, and Docker's integrated init process
 reaps terminated descendants so process-supervisor checks remain truthful in a

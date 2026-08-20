@@ -72,9 +72,12 @@ The embedded normalized plan makes the execution claim inspectable and binds
 every plan field into the receipt integrity identifier. A changed plan cannot
 retain the declared configuration digest and remain semantically valid.
 
-This is not yet independent trusted-plan verification: a verifier must
-reconstruct the plan from trusted configuration and compare it against the
-receipt before it can promote the claim beyond receipt self-consistency.
+Receipt self-consistency alone is not trusted-plan verification. Policy `1.1`
+implements the additional boundary: its verifier reconstructs the normalized
+plan from the policy-relative trusted configuration and compares it field by
+field with this public plan. It rejects a mismatch before a PASS decision, while
+continuing to exclude fixed literal and secret values. This comparison does not
+establish cryptographic producer identity or host attestation.
 
 ## Status semantics
 
@@ -142,8 +145,9 @@ Structural and integrity verification MUST:
 - compare it exactly with `receipt_id`.
 
 Policy verification for freshness, accepted platforms, exact externally
-supplied commit SHA, required check sets, image, and configuration is specified
-in [`VERIFICATION_POLICY.md`](VERIFICATION_POLICY.md). It remains distinguishable
+supplied commit SHA, required check sets, image, configuration, and—under
+policy `1.1`—trusted-plan reconstruction is specified in
+[`VERIFICATION_POLICY.md`](VERIFICATION_POLICY.md). It remains distinguishable
 from structural integrity. Trusted identity and signatures belong to later
 phases.
 

@@ -66,8 +66,8 @@ use commit_ci_preflight::runtime::{
 };
 use commit_ci_preflight::source_snapshot::{SourceSnapshot, resolve_clean_head};
 use commit_ci_preflight::verify::{
-    VerificationDecision, VerificationError, load_verification_policy_document,
-    receipt_input_failure_report, system_evaluated_at_utc, verify_receipt_document_for_policy,
+    VerificationDecision, VerificationError, receipt_input_failure_report, system_evaluated_at_utc,
+    validate_verification_policy_path, verify_receipt_document_for_policy_path,
 };
 use commit_ci_preflight::workspace::{WorkspaceError, WorkspacePlanV1};
 use serde::Serialize;
@@ -802,16 +802,19 @@ fn print_verify(
     evaluated_at_utc: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
-    let policy = load_verification_policy_document(policy_path).map_err(CliError::usage)?;
+    validate_verification_policy_path(policy_path).map_err(CliError::Verification)?;
     let evaluated_at = evaluated_at_utc
         .map(str::to_owned)
         .map(Ok)
         .unwrap_or_else(system_evaluated_at_utc)
         .map_err(CliError::Verification)?;
     let report = match fs::read(receipt_path) {
-        Ok(receipt) => {
-            verify_receipt_document_for_policy(&receipt, &policy, expected_commit, &evaluated_at)
-        }
+        Ok(receipt) => verify_receipt_document_for_policy_path(
+            &receipt,
+            policy_path,
+            expected_commit,
+            &evaluated_at,
+        ),
         Err(_) => receipt_input_failure_report(expected_commit, &evaluated_at),
     }
     .map_err(CliError::Verification)?;
@@ -2193,6 +2196,9 @@ impl CliError {
             Self::BenchmarkVerification(_) => 3,
             Self::Guard(error) => error.exit_code(),
             Self::Verification(VerificationError::Policy(_))
+            | Self::Verification(VerificationError::PolicyDocument(_))
+            | Self::Verification(VerificationError::TrustedPlan(_))
+            | Self::Verification(VerificationError::TrustedPolicyPathRequired)
             | Self::Verification(VerificationError::InvalidExpectedCommit)
             | Self::Verification(VerificationError::InvalidEvaluationTime)
             | Self::Verification(VerificationError::Matrix(_)) => 2,

@@ -659,6 +659,15 @@ Exit gate:
 
 ### PR T7 — Trusted plan binding and receipt v2
 
+Status (local implementation tranche): policy `1.1` reconstructs a normalized
+plan only from a regular non-symlink configuration selected relative to the
+trusted policy. It accepts receipt v2 only, independently compares bounded
+field pointers without values, constrains producer name/version and snapshot
+strategy, and keeps v1 policy/receipt behavior historical and separate. The
+root policy has migrated locally to `1.1`. This is deterministic source evidence
+only until the exact candidate has the required independent receipt and review;
+it does not claim signing, producer identity, or native qualification.
+
 Deliverables:
 
 - verifier loads trusted configuration and policy from the trusted base;

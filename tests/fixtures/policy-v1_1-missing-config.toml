@@ -1,0 +1,17 @@
+schema_version = "1.1"
+project = "example/project"
+configuration_digest = "sha256:fc4279049074556d460a6e5db0bd0fbb8912d3f1ceded30418b2d4fbbbbf2240"
+required_checks = ["rust-test"]
+image_reference = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+max_age_seconds = 3600
+trusted_config = "does-not-exist.toml"
+source_snapshot_strategy = "git-object"
+
+[[supported_producers]]
+name = "commit-ci-preflight"
+version = "0.1.0"
+
+[[platforms]]
+host_os = "macos"
+host_arch = "aarch64"
+runtime_kind = "orbstack"

@@ -37,7 +37,7 @@ adopts nor validates it.
 | Order | Workstream | Current evidence | Next source slice | Qualification or authority gate |
 | --- | --- | --- | --- | --- |
 | P0 | Baseline reconciliation | PR 57 design is merged at the local anchor; historical plans contain older anchors and candidate-only language. | Reconcile dated anchors and closed/superseded milestones when a clean current branch is available. | Live remote, open-PR, and exact-head recheck before publication. |
-| P1 | Environment and plan truthfulness | Schema `1.1` distinguishes fixed, runtime-internal, and remote-secret-only values. The repository Rust preflight derives Cargo/Rustup paths from declared cache IDs, and receipt v2 embeds the normalized public execution plan with a matching digest. | Complete T7 trusted-plan reconstruction and independent receipt comparison for every normalized environment field. | T7 golden vectors must prove a changed normative field fails verification. No secret value enters a receipt. |
+| P1 | Environment and plan truthfulness | Schema `1.1` distinguishes fixed, runtime-internal, and remote-secret-only values. Receipt v2 embeds the normalized public plan. Policy `1.1` now reconstructs the policy-relative trusted configuration, compares plan fields without exposing values, and constrains snapshot strategy and producer tuple. | Complete the T7 local contract review and reconcile its protected Receipt v2 counterpart separately. | Fresh exact-head receipt and independent verifier; no secret value enters a receipt. |
 | P2 | Receipt v2 and immutable source | T2/T3/T4/T5/T6 candidate work is described, but qualification is candidate-specific and must not be inherited. | Integrate the independently preserved Receipt v2 work only after conflict review; complete T7 plan reconstruction. | Fresh exact-head receipt, independent verifier, cleanup evidence, and required native evidence. |
 | P3 | Reliability P0/P1 closure | T0-T6 have candidate source progress; T7-T11 retain required work. | Ordered T7, T8, T9, T10, then T11; do not add unrelated runtime features. | Every tranche meets its own deterministic and native exit criteria in the reliability plan. |
 | P4 | One-command adoption | Existing docs describe safe manual commands and receipt publication mechanics. | Product PR 5 and PR 6: deterministic `check`, `init`, adoption proposal, GitHub setup, and transactional publication. | Clean-room Rust, Python, and Node proof; source/ref mutation tests in isolated local bare repositories. |
@@ -48,10 +48,10 @@ adopts nor validates it.
 
 ## Near-term execution order
 
-1. **T7 trusted-plan reconstruction.** Bind the normalized schema `1.1`
-   environment contract to receipt v2 and make an independent verifier reject
-   every changed normative field. The local runtime contract is implemented,
-   but is not yet independently reconstructible.
+1. **T7 trusted-plan reconstruction.** The local source contract is now
+   implemented: policy `1.1` reconstructs the normalized plan from a trusted,
+   policy-relative configuration and rejects every reported field mismatch.
+   Complete its exact-head review/qualification before treating it as released.
 2. **Receipt v2 integration review.** Rebase or reconcile the protected local
    work in a dedicated branch. Preserve v1 parsing and historic fixtures.
 3. **Complete T8 resource contracts.** Add the remaining artifact manifests,

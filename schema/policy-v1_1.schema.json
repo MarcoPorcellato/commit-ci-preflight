@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VerificationPolicyV1_1",
+  "description": "Strict policy version that reconstructs the normalized execution plan from\nthe trusted checkout before accepting a v2 receipt.",
+  "type": "object",
+  "properties": {
+    "configuration_digest": {
+      "type": "string"
+    },
+    "image_reference": {
+      "type": "string"
+    },
+    "max_age_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "platforms": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/AcceptedPlatformV1"
+      }
+    },
+    "project": {
+      "type": "string"
+    },
+    "required_checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "revoked_producers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProducerContractV1_1"
+      }
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "source_snapshot_strategy": {
+      "$ref": "#/$defs/SourceSnapshotStrategy"
+    },
+    "supported_producers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ProducerContractV1_1"
+      }
+    },
+    "trusted_config": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "configuration_digest",
+    "required_checks",
+    "image_reference",
+    "max_age_seconds",
+    "platforms",
+    "trusted_config",
+    "source_snapshot_strategy",
+    "supported_producers"
+  ],
+  "$defs": {
+    "AcceptedPlatformV1": {
+      "type": "object",
+      "properties": {
+        "host_arch": {
+          "type": "string"
+        },
+        "host_os": {
+          "type": "string"
+        },
+        "runtime_kind": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host_os",
+        "host_arch",
+        "runtime_kind"
+      ]
+    },
+    "ProducerContractV1_1": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "SourceSnapshotStrategy": {
+      "type": "string",
+      "enum": [
+        "git-object",
+        "git-archive",
+        "detached-worktree"
+      ]
+    }
+  }
+}
