@@ -128,7 +128,7 @@ pub struct ExecutionPlanEnvelopeV1 {
     pub fixed_environment: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ExecutionPlanV1 {
     pub schema_version: String,
     pub project: String,
@@ -139,7 +139,7 @@ pub struct ExecutionPlanV1 {
     pub checks: Vec<NormalizedCheck>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedRuntime {
     pub kind: RuntimeKind,
     pub image: String,
@@ -149,13 +149,13 @@ pub struct NormalizedRuntime {
     pub network: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedReceipt {
     pub output: String,
     pub freshness_seconds: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedEnvironment {
     pub inherit: Vec<String>,
     pub fixed: Vec<NormalizedFixedEnvironment>,
@@ -163,13 +163,13 @@ pub struct NormalizedEnvironment {
     pub remote_secret_only: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedFixedEnvironment {
     pub name: String,
     pub value_digest: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedRuntimeInternalEnvironment {
     pub name: String,
     pub cache_id: String,
@@ -190,13 +190,13 @@ impl NormalizedEnvironment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedCache {
     pub id: String,
     pub mount_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct NormalizedCheck {
     pub id: String,
     pub required: bool,

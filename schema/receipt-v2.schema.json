@@ -73,6 +73,47 @@
       ],
       "type": "string"
     },
+    "ExecutionPlanV1": {
+      "properties": {
+        "caches": {
+          "items": {
+            "$ref": "#/$defs/NormalizedCache"
+          },
+          "type": "array"
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/NormalizedCheck"
+          },
+          "type": "array"
+        },
+        "environment": {
+          "$ref": "#/$defs/NormalizedEnvironment"
+        },
+        "project": {
+          "type": "string"
+        },
+        "receipt": {
+          "$ref": "#/$defs/NormalizedReceipt"
+        },
+        "runtime": {
+          "$ref": "#/$defs/NormalizedRuntime"
+        },
+        "schema_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "project",
+        "runtime",
+        "receipt",
+        "environment",
+        "caches",
+        "checks"
+      ],
+      "type": "object"
+    },
     "MatrixReceiptV2": {
       "additionalProperties": false,
       "properties": {
@@ -135,6 +176,191 @@
       "required": [
         "runtime_id",
         "receipt"
+      ],
+      "type": "object"
+    },
+    "NormalizedCache": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "mount_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "mount_path"
+      ],
+      "type": "object"
+    },
+    "NormalizedCheck": {
+      "properties": {
+        "argv": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "artifacts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "working_directory": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "required",
+        "argv",
+        "working_directory",
+        "timeout_seconds",
+        "depends_on",
+        "artifacts"
+      ],
+      "type": "object"
+    },
+    "NormalizedEnvironment": {
+      "properties": {
+        "fixed": {
+          "items": {
+            "$ref": "#/$defs/NormalizedFixedEnvironment"
+          },
+          "type": "array"
+        },
+        "inherit": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "remote_secret_only": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "runtime_internal": {
+          "items": {
+            "$ref": "#/$defs/NormalizedRuntimeInternalEnvironment"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "inherit",
+        "fixed",
+        "runtime_internal",
+        "remote_secret_only"
+      ],
+      "type": "object"
+    },
+    "NormalizedFixedEnvironment": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "value_digest": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value_digest"
+      ],
+      "type": "object"
+    },
+    "NormalizedReceipt": {
+      "properties": {
+        "freshness_seconds": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output",
+        "freshness_seconds"
+      ],
+      "type": "object"
+    },
+    "NormalizedRuntime": {
+      "properties": {
+        "cpu_count": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "image": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RuntimeKind"
+        },
+        "memory_mib": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network": {
+          "type": "boolean"
+        },
+        "pids_limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "image",
+        "cpu_count",
+        "memory_mib",
+        "pids_limit",
+        "network"
+      ],
+      "type": "object"
+    },
+    "NormalizedRuntimeInternalEnvironment": {
+      "properties": {
+        "cache_id": {
+          "type": "string"
+        },
+        "container_target": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "cache_id",
+        "container_target"
       ],
       "type": "object"
     },
@@ -267,6 +493,9 @@
         "configuration_digest": {
           "type": "string"
         },
+        "execution_plan": {
+          "$ref": "#/$defs/ExecutionPlanV1"
+        },
         "incomplete_reason": {
           "type": [
             "string",
@@ -306,6 +535,7 @@
         "source_snapshot",
         "platform",
         "configuration_digest",
+        "execution_plan",
         "checks",
         "overall_status",
         "redaction_policy_version"
@@ -357,6 +587,13 @@
         "finished_at_utc"
       ],
       "type": "object"
+    },
+    "RuntimeKind": {
+      "enum": [
+        "docker_compatible",
+        "host"
+      ],
+      "type": "string"
     },
     "SourceSnapshotEvidence": {
       "additionalProperties": false,

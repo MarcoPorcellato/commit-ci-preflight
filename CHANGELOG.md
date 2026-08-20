@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Receipt v2 now embeds the complete normalized public execution plan and
+  rejects a configuration digest that does not match it. Fixed literals and
+  secret values remain outside the receipt. Independent trusted-plan comparison
+  remains the next T7 gate.
 - Added ADR 0004 and a T8 TRIZ ledger defining fixed, runtime-internal, and
   remote-secret-only environment classes. The decision preserves v1 parsing,
   prohibits silent host-value synthesis, and gates the cache-backed Rust

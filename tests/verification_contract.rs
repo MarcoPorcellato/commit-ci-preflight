@@ -105,17 +105,20 @@ fn valid_receipt_passes_integrity_and_repository_policy() {
 
 #[test]
 fn valid_v2_receipt_passes_and_snapshot_tampering_fails_integrity() {
+    let envelope: ReceiptEnvelopeV2 = serde_json::from_slice(RECEIPT_V2).expect("v2 receipt");
+    let mut v2_policy = policy();
+    v2_policy.configuration_digest = envelope.receipt.configuration_digest.clone();
     let report =
-        verify_receipt_document(RECEIPT_V2, &policy(), COMMIT, EVALUATED_AT).expect("verify v2");
+        verify_receipt_document(RECEIPT_V2, &v2_policy, COMMIT, EVALUATED_AT).expect("verify v2");
     assert_eq!(report.integrity_status, VerificationStatus::Pass);
     assert_eq!(report.policy_status, VerificationStatus::Pass);
     assert_eq!(report.decision, VerificationDecision::Pass);
 
-    let mut envelope: ReceiptEnvelopeV2 = serde_json::from_slice(RECEIPT_V2).expect("v2 receipt");
+    let mut envelope = envelope;
     envelope.receipt.source_snapshot.manifest_digest = format!("sha256:{}", "f".repeat(64));
     let tampered = serde_json::to_vec(&envelope).expect("tampered v2");
-    let report =
-        verify_receipt_document(&tampered, &policy(), COMMIT, EVALUATED_AT).expect("tamper report");
+    let report = verify_receipt_document(&tampered, &v2_policy, COMMIT, EVALUATED_AT)
+        .expect("tamper report");
     assert_eq!(report.integrity_status, VerificationStatus::Fail);
     assert_eq!(report.policy_status, VerificationStatus::NotRun);
 }

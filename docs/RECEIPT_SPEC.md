@@ -23,9 +23,12 @@ A receipt document is a UTF-8 JSON object containing:
 Unknown fields are rejected at every typed object boundary.
 
 Schema v2 preserves the common v1 evidence and adds required
-`source_snapshot` evidence: strategy, canonical manifest digest and entry
-count. New snapshot-backed runs publish v2; historical v1 documents remain
-strictly readable and are never reinterpreted as carrying snapshot assurance.
+`source_snapshot` evidence plus a complete public `execution_plan`. The plan
+contains normalized checks, runtime limits, caches and class-safe environment
+metadata; it never contains a fixed literal or a secret value. Its canonical
+digest MUST equal `configuration_digest`. New snapshot-backed runs publish v2;
+historical v1 documents remain strictly readable and are never reinterpreted as
+carrying snapshot or plan-binding assurance.
 The pinned v2 schema and vector are `schema/receipt-v2.schema.json` and
 `tests/fixtures/receipt-v2-pass.json`.
 
@@ -62,6 +65,16 @@ The journal stores a separate private `source-snapshot-v1.json` binding with
 the exact commit, manifest digest, entry count and fixed CCP-owned resource ID.
 That record supports bounded recovery; it is not copied into the receipt and
 does not add host-path disclosure.
+
+## Execution-plan evidence in v2
+
+The embedded normalized plan makes the execution claim inspectable and binds
+every plan field into the receipt integrity identifier. A changed plan cannot
+retain the declared configuration digest and remain semantically valid.
+
+This is not yet independent trusted-plan verification: a verifier must
+reconstruct the plan from trusted configuration and compare it against the
+receipt before it can promote the claim beyond receipt self-consistency.
 
 ## Status semantics
 

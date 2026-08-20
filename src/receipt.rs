@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::config::ExecutionPlanV1;
+
 pub const RECEIPT_SCHEMA_VERSION: &str = "1.0";
 pub const RECEIPT_V2_SCHEMA_VERSION: &str = "2.0";
 pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: &str = "1.0";
@@ -64,6 +66,7 @@ pub struct ReceiptV2 {
     pub source_snapshot: SourceSnapshotEvidence,
     pub platform: PlatformEvidence,
     pub configuration_digest: String,
+    pub execution_plan: ExecutionPlanV1,
     pub checks: Vec<CheckEvidence>,
     pub overall_status: EvidenceStatus,
     pub incomplete_reason: Option<String>,
@@ -238,7 +241,33 @@ impl ReceiptV2 {
             redaction_policy_version: &self.redaction_policy_version,
         }
         .validate()?;
-        self.source_snapshot.validate()
+        self.source_snapshot.validate()?;
+        let expected_plan_digest = canonical_digest(&self.execution_plan)?;
+        if self.configuration_digest != expected_plan_digest {
+            return Err(ReceiptError::ExecutionPlanDigestMismatch {
+                expected: expected_plan_digest,
+                actual: self.configuration_digest.clone(),
+            });
+        }
+        if self.execution_plan.checks.len() != self.checks.len() {
+            return Err(ReceiptError::ExecutionPlanCheckMismatch(
+                "check set".to_owned(),
+            ));
+        }
+        for planned in &self.execution_plan.checks {
+            let evidence = self
+                .checks
+                .iter()
+                .find(|evidence| evidence.id == planned.id)
+                .ok_or_else(|| ReceiptError::ExecutionPlanCheckMismatch(planned.id.clone()))?;
+            if evidence.required != planned.required
+                || evidence.argv != planned.argv
+                || evidence.working_directory != planned.working_directory
+            {
+                return Err(ReceiptError::ExecutionPlanCheckMismatch(planned.id.clone()));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -615,6 +644,11 @@ pub enum ReceiptError {
         expected: String,
         actual: String,
     },
+    ExecutionPlanDigestMismatch {
+        expected: String,
+        actual: String,
+    },
+    ExecutionPlanCheckMismatch(String),
 }
 
 impl fmt::Display for ReceiptError {
@@ -674,6 +708,16 @@ impl fmt::Display for ReceiptError {
                     "receipt digest mismatch: expected {expected}, found {actual}"
                 )
             }
+            Self::ExecutionPlanDigestMismatch { expected, actual } => write!(
+                formatter,
+                "receipt execution plan digest mismatch: expected {expected}, found {actual}"
+            ),
+            Self::ExecutionPlanCheckMismatch(id) => {
+                write!(
+                    formatter,
+                    "receipt evidence does not match execution plan check: {id}"
+                )
+            }
         }
     }
 }
@@ -690,6 +734,7 @@ impl std::error::Error for ReceiptError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ConfigV1;
 
     fn digest(fill: char) -> String {
         format!("sha256:{}", fill.to_string().repeat(64))
@@ -750,7 +795,35 @@ mod tests {
         }
     }
 
+    fn execution_plan_v2() -> ExecutionPlanV1 {
+        ConfigV1::parse(
+            r#"
+schema_version = "1.0"
+project = "example/project"
+
+[runtime]
+kind = "docker_compatible"
+image = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+
+[[checks]]
+id = "rust-test"
+required = true
+argv = ["cargo", "test"]
+working_directory = "."
+timeout_seconds = 60
+"#,
+        )
+        .expect("config")
+        .into_plan()
+        .expect("plan")
+        .plan
+    }
+
     fn passing_receipt_v2() -> ReceiptV2 {
+        let execution_plan = execution_plan_v2();
         ReceiptV2 {
             schema_version: RECEIPT_V2_SCHEMA_VERSION.to_owned(),
             producer: ProducerEvidence {
@@ -777,7 +850,8 @@ mod tests {
                 image_reference: format!("example.invalid/ci@{}", digest('a')),
                 image_digest: digest('a'),
             },
-            configuration_digest: digest('b'),
+            configuration_digest: canonical_digest(&execution_plan).expect("plan digest"),
+            execution_plan,
             checks: vec![CheckEvidence {
                 id: "rust-test".to_owned(),
                 required: true,
@@ -1002,6 +1076,17 @@ mod tests {
             first.canonical_bytes().expect("first bytes"),
             second.canonical_bytes().expect("second bytes")
         );
+    }
+
+    #[test]
+    fn v2_rejects_check_evidence_that_disagrees_with_its_execution_plan() {
+        let mut receipt = passing_receipt_v2();
+        receipt.checks[0].argv.push("--release".to_owned());
+
+        assert!(matches!(
+            ReceiptEnvelopeV2::seal(receipt),
+            Err(ReceiptError::ExecutionPlanCheckMismatch(id)) if id == "rust-test"
+        ));
     }
 
     #[test]

@@ -200,6 +200,7 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
                 },
                 platform: receipt.receipt.platform.clone(),
                 configuration_digest: receipt.receipt.configuration_digest.clone(),
+                execution_plan: request.envelope.plan.clone(),
                 checks: receipt.receipt.checks.clone(),
                 overall_status: receipt.receipt.overall_status,
                 incomplete_reason: receipt.receipt.incomplete_reason.clone(),
