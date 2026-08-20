@@ -4,11 +4,11 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **IN PROGRESS — T1 merged; macOS-v4 compound pre-start/watchdog candidate locally verified; OrbStack qualification pending; T2-T11 remain** |
+| Status | **IN PROGRESS — T0/T1 and macOS-v4, multi-runtime, and admission-ownership slices are on main; T2 source work is unmerged and requires reconciliation; T3-T11 remain** |
 | Baseline date | 2026-08-14 |
 | Baseline branch | `main` |
 | Baseline commit | `641a0eed29075696eec1e4e07f8de554f6ce9459` |
-| Current delivery anchor | `origin/main` at `9c506890880b89747462c0d21087e49abe78b8ee` before the macOS-v4 branch |
+| Current delivery anchor | `origin/main` at `73ec2a32f730b075cd95f59e084e0ce80de609e9` (verified 2026-08-19) |
 | Current release line | `v0.1.0-rc.1` prerelease |
 | Owner and release authority | Marco Porcellato |
 | Scope | Correctness, crash consistency, runtime ownership, evidence fidelity, recovery, and qualification |
@@ -120,14 +120,38 @@ in section 11 are proven on exact commits.
 
 ### 3.5 Documentation alignment debt
 
-At this baseline, `IMPLEMENTATION_PLAN.md` still labels the post-beta resource
+At the live anchor, `IMPLEMENTATION_PLAN.md` still labels the post-beta resource
 observation tranche as “In progress”, although PRs #29 and #30 are present on
 `main`. The plan remains useful as historical delivery evidence, but that row
-must be reconciled when this hardening plan is adopted. `PRODUCT_ROADMAP.md`
+must be reconciled in a separate documentation change. `PRODUCT_ROADMAP.md`
 continues to govern productization; this document changes only the reliability
 critical path and stable-release gates.
 
-### 3.6 Urgent macOS-v4 watchdog correction
+### 3.6 Live reconciliation — 2026-08-19
+
+The authoritative remote state was refreshed before this plan update:
+
+- `origin/main` is `73ec2a32f730b075cd95f59e084e0ce80de609e9`, including the
+  merged admission-ownership correction from PR #38;
+- PR #34 remains open and draft at head
+  `2b63e4a4a77e7e792c7af1c2ad422138d81835f9`; GitHub reports its base anchor as
+  `f9db80df2efc05fbc66276e6b61e04db2db24959`, while the current remote `main`
+  is newer, so the PR is `CONFLICTING` and not mergeable;
+- PR #34's only recorded workflow result is `SKIPPED`, therefore it is not
+  qualification evidence;
+- a read-only merge simulation against current `main` found conflicts in
+  `schema/receipt-v2.schema.json` and `src/run.rs`;
+- the local branch `codex/reliability-hardening-t2` is clean at
+  `a94e0291a7ab8f631585eee672d48223d11d247d` and contains five commits beyond
+  the public PR head, but those commits are not evidence of a published PR and
+  must be preserved without being overwritten;
+- no T2 native, crash, power-loss, or exact-head receipt qualification is
+  inferred from the source branch, the inner tests, or the skipped GitHub run.
+
+This reconciliation is a planning fact set, not permission to merge PR #34 or
+to treat its unpublished local continuation as reviewed mainline code.
+
+### 3.7 Urgent macOS-v4 watchdog correction
 
 This correction is reliability work under P1-8, not predictive admission or a
 new product capability. The local v2 history contained 84 records, including 14
@@ -392,6 +416,16 @@ Source-side checkpoint on `codex/reliability-hardening-t1`:
   required before a cross-platform qualification claim.
 
 ### PR T2 — Immutable source snapshot and byte identity
+
+Status (reconciled 2026-08-19): deterministic source implementation exists in
+PR #34 and in a separate clean local continuation, but the public PR is stale
+and conflicting against current `main`. The source branch is not yet an
+accepted mainline milestone. Reconciliation must happen in a fresh worktree
+from the exact current `origin/main`, preserving the local continuation as an
+independent source of candidate fixes. The merge simulation identifies
+conflicts in the receipt-v2 schema and run orchestration. Until those conflicts
+are resolved and a new exact-head receipt is accepted, T2 is **IMPLEMENTED
+CANDIDATE / NOT QUALIFIED**.
 
 Deliverables:
 
@@ -711,10 +745,18 @@ Stop a tranche and report evidence when:
 
 ## 13. Immediate next actions
 
-1. Review the T0 diff and preserve its explicit non-claims.
-2. Commit and publish T0 only after exact allowlist review and authorization.
-3. Open one tracking issue containing the P0/P1 register and PR sequence.
-4. Freeze unrelated telemetry, predictive admission, signing, and new runner
-   features until T0 establishes the regression harness.
-5. Re-evaluate T1–T11 sequencing after T0 produces measured failure evidence;
-   preserve the exit criteria even if implementation details change.
+1. Publish the reconciled canonical plan only after exact diff review; retain
+   the live anchors and the PR #34 conflict/non-qualification facts above.
+2. Reconcile T2 in a fresh worktree from `origin/main=73ec2a3`, preserving the
+   clean local `codex/reliability-hardening-t2` continuation and the public PR
+   head as separate evidence sources.
+3. Resolve the schema/run conflicts, run deterministic T2 tests and policy
+   checks, then produce a new exact-head receipt; do not reuse the skipped PR
+   #34 run or any pre-rebase evidence branch.
+4. Qualify T2 natively only on supported hosts with terminal receipts; keep
+   crash, power-loss, Windows, and release claims explicitly pending when not
+   executed.
+5. Open the next dependency-ordered milestone only after T2 is merged or
+   formally held with its residual gaps recorded. Keep telemetry intelligence,
+   predictive admission, signing, and unrelated runner features frozen until
+   the current milestone's exit gate is proven.
