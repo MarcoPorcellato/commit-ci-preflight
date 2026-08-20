@@ -9,10 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
-- Reconciled the reliability-hardening plan with live `origin/main` and the
-  still-conflicting T2 PR, preserving exact anchors and qualification
-  boundaries for the next milestone.
-
+- T3 candidate daemon-owned Docker lifecycle contract with deterministic
+  container naming, exact CCP ownership labels, explicit create/start/attach/
+  wait/inspect/stop/kill/remove sequencing, and fail-closed final absence
+  verification. Native Docker/OrbStack qualification remains pending.
 - T2 immutable Git-object source materialization with a canonical path/mode/OID
   manifest, fail-closed LFS/submodule/symlink policy, pre-admission snapshot
   preparation, read-only runtime binding, post-run byte revalidation, and
@@ -23,7 +23,9 @@ Semantic Versioning after its first public release.
   strict v1/v2 verifier dispatch, snapshot-digest tamper detection, and a
   privacy-minimized journal binding for commit, manifest digest, entry count,
   and the fixed CCP-owned resource identifier.
-
+- Reconciled the reliability-hardening plan with live `origin/main` and the
+  still-conflicting T2 PR, preserving exact anchors and qualification
+  boundaries for the next milestone.
 - Durable filesystem primitives with deterministic operation-failure tests,
   append-only run-journal v1 state transitions, and bounded `recover status`
   / `recover apply <run-id>` commands. Recovery status is read-only; apply

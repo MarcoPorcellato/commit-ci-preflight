@@ -4,7 +4,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **IN PROGRESS — T0/T1 and macOS-v4, multi-runtime, and admission-ownership slices are on main; T2 is published as draft PR #40 and awaits exact-head qualification; T3-T11 remain** |
+| Status | **IN PROGRESS — T0/T1 and macOS-v4, multi-runtime, and admission-ownership slices are on main; T2 has exact-head qualification on `8eaeb94`; T3 has exact-head macOS/OrbStack qualification on `1cead1e`; acceptance and T4-T11 remain** |
 | Baseline date | 2026-08-14 |
 | Baseline branch | `main` |
 | Baseline commit | `641a0eed29075696eec1e4e07f8de554f6ce9459` |
@@ -145,8 +145,13 @@ The authoritative remote state was refreshed before this plan update:
   `a94e0291a7ab8f631585eee672d48223d11d247d` and contains five commits beyond
   the public PR head, but those commits are not evidence of a published PR and
   must be preserved without being overwritten;
-- no T2 native, crash, power-loss, or exact-head receipt qualification is
-  inferred from the source branch, the inner tests, or the skipped GitHub run.
+- exact-head T2 receipt qualification is recorded at `8eaeb94` with all five
+  required checks PASS, independent verification PASS, source snapshot entry
+  count 146, and receipt ID
+  `sha256:236307559ef7695f0d5da2f363fa713edd65184dd9b38b21447734de508f0505`;
+- T2 native crash/power-loss and non-macOS qualification remain pending; the
+  exact-head receipt is evidence for this candidate only and does not imply
+  PR acceptance or stable-release qualification.
 
 This reconciliation is a planning fact set, not permission to merge PR #34 or
 to treat its unpublished local continuation as reviewed mainline code.
@@ -438,10 +443,17 @@ Source-side checkpoint on `codex/reliability-hardening-t1`:
 
 ### PR T2 — Immutable source snapshot and byte identity
 
-Status (reconciled 2026-08-20): implemented in this PR with deterministic
-contract tests. Native platform and crash/power-loss qualification remain
-pending and are not represented as PASS. Until the rebased exact head has an
-accepted receipt, T2 remains **IMPLEMENTED CANDIDATE / NOT QUALIFIED**.
+Status (reconciled and exact-head qualified 2026-08-19): deterministic source implementation exists in
+the current T2 candidate and in the earlier PR #34 continuation, but the public
+PR #34 is stale and conflicting against current `main`. The reconciled T2
+candidate is published as draft PR #40, stacked on the documentation
+reconciliation PR #39, and is not yet an accepted mainline milestone. The
+candidate preserves the independent local continuation while resolving the
+receipt-v2 schema and run-orchestration conflicts against the current delivery
+anchor. The exact head `8eaeb94` is **QUALIFIED FOR THIS CANDIDATE** by the
+receipt and independent verifier recorded above. PR acceptance, native
+crash/power-loss, and non-macOS qualification remain pending and are not
+represented as PASS.
 
 Deliverables:
 
@@ -463,6 +475,27 @@ Exit gate:
 - source identity is revalidated after execution and before receipt sealing.
 
 ### PR T3 — Daemon-owned Docker lifecycle
+
+Status (exact-head qualified candidate 2026-08-19): the isolated T3 branch
+implements the shell-free Docker lifecycle adapter and deterministic
+command/ownership fixtures. The adapter refuses broad cleanup, uses a fresh
+cleanup token after cancellation, and returns a typed non-PASS result unless
+final not-found inspection succeeds. Exact-head macOS/OrbStack qualification
+for `1cead1e` passed all five required checks, independently verified the v2
+receipt, and released admission with no remaining container. Receipt-v2 runtime
+evidence, total lifecycle deadlines, native failure-path expansion, and
+admission/journal release coupling remain explicit follow-up gates before T3
+acceptance.
+
+Local verification checkpoint (2026-08-19): `cargo fmt --all -- --check`,
+`cargo check --locked --all-targets --all-features`, the focused runtime suite
+(11 tests), and the full serial locked suite (157 library tests plus all
+repository test targets) passed. One pre-existing native benchmark test and one
+guard-exec test remain ignored by their repository admission contract. Local
+Clippy was unavailable because the installed Rust toolchain lacks the
+`cargo-clippy` component; the pinned OrbStack exact-head run nevertheless
+executed Clippy successfully. The exact T3 receipt ID is
+`sha256:5603808e88b740ba57aa1878679ce2a3a0824b0ceea67a8495a8b592bd421249`.
 
 Deliverables:
 
