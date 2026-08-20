@@ -571,6 +571,13 @@ crash recovery, reflink/clonefile optimization, journaled multi-cache
 promotion/rollback, durable manifests, and exact-head qualification remain
 pending.
 
+The next recovery slice adds owned advisory OS locks for each prepared cache
+entry and for the promotion boundary. A second process cannot prepare the same
+entry or enter promotion concurrently, and a process exit releases the lock
+without requiring unsafe stale-lock deletion. The locks do not by themselves
+recover an interrupted multi-cache promotion; that journal and recovery path
+remains pending.
+
 Deliverables:
 
 - immutable last-known-good generations;
