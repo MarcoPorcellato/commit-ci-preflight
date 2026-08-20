@@ -30,10 +30,16 @@ recorded. Use `dry-run` to inspect the exact container argv and reproduce a
 failing command deliberately when deeper local diagnostics are required.
 
 Heavy commands use a default-on host-wide single-slot admission queue shared by
-independent repositories and cache roots. Override the bounded wait with
-`--admission-timeout-seconds <seconds>` on `run` or `benchmark`. Inspect the
-bounded operational state with `admission status --json`; it reports only the
-schema, busy state, queue count, and opaque ticket identifiers. Status accepts
+independent repositories, worktrees, agent activities, and cache roots. Override
+the bounded wait with `--admission-timeout-seconds <seconds>` on `run` or
+`benchmark`. Inspect the bounded operational state with
+`admission status --json`; schema `2.0` distinguishes `slot_lock` from
+`queue_lock` and reports the slot's opaque owner/run identifier, acquisition time,
+heartbeat, and lease state. Missing, malformed, legacy, or contradictory lease
+metadata is `unknown` and remains blocking. The status explicitly warns that
+absence of a process in the local shell does not prove global inactivity. Use
+the [cross-activity coordination runbook](COORDINATION_RUNBOOK.md) before
+starting or handing off a heavy command. Status accepts
 `--timeout-seconds <seconds>` and fails closed if it cannot obtain a coherent
 snapshot within that bound.
 
@@ -134,12 +140,11 @@ file. There is intentionally no automatic stale-lock deletion.
 
 Admission tickets are different: each ticket is protected by its own advisory
 lock, so a crashed or rebooted waiter becomes reclaimable when that lock is
-released. A certainly abandoned unlocked ticket or staging record is moved to
-the coordinator's reversible quarantine; malformed, foreign, locked, or
-otherwise uncertain coordinator state fails closed and remains in place.
-Admission and resource evidence are not included in receipts yet. The next
-tranche must integrate truthful evidence and host telemetry without changing
-this tranche's receipt contract.
+released and its valid lease is definitely expired. Malformed, foreign, missing,
+legacy, or uncertain coordinator state fails closed and is never deleted
+automatically. Admission and resource evidence are not included in receipts
+yet. The complete owner/lease handoff and recovery procedure is in the
+[cross-activity coordination runbook](COORDINATION_RUNBOOK.md).
 
 See [troubleshooting and safe recovery](TROUBLESHOOTING.md) before interpreting
 an `active: true` status, diagnosing an absent receipt, or touching any exact

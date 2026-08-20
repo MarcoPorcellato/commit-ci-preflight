@@ -67,6 +67,7 @@ install -m 0755 target/release/commit-ci-preflight "$stage_dir/commit-ci-preflig
 install -m 0644 LICENSE NOTICE README.md SBOM.spdx.json THIRD_PARTY_NOTICES.md "$stage_dir/"
 install -m 0644 \
   docs/ADOPTION_GUIDE.md \
+  docs/COORDINATION_RUNBOOK.md \
   docs/INSTALLATION.md \
   docs/TROUBLESHOOTING.md \
   docs/UPGRADE_AND_ROLLBACK.md \
