@@ -18,7 +18,8 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -65,6 +66,58 @@ pub trait RuntimePort: Send + Sync {
             "runtime lifecycle execution is not qualified",
         ))
     }
+}
+
+pub trait RuntimeCapabilityProbe: Send + Sync {
+    fn probe(
+        &self,
+        envelope: &ExecutionPlanEnvelopeV1,
+        runtime_probe: &RuntimeProbe,
+        supervisor: &dyn SupervisorPort,
+        current_dir: &Path,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+    ) -> Result<Option<RuntimeCapabilityEvidenceV1>, RuntimeError>;
+}
+
+#[derive(Debug, Default)]
+pub struct DockerRuntimeCapabilityProbe;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePreflight {
+    pub runtime_probe: Option<RuntimeProbe>,
+    pub capability_evidence: Option<RuntimeCapabilityEvidenceV1>,
+}
+
+pub fn preflight_runtime_capabilities(
+    envelope: &ExecutionPlanEnvelopeV1,
+    runtime: &dyn RuntimePort,
+    capability_probe: &dyn RuntimeCapabilityProbe,
+    supervisor: &dyn SupervisorPort,
+    current_dir: &Path,
+    cancellation: &CancellationToken,
+    generation: &GenerationGuard,
+) -> Result<RuntimePreflight, RuntimeError> {
+    if envelope.plan.schema_version != "1.3" {
+        return Ok(RuntimePreflight {
+            runtime_probe: None,
+            capability_evidence: None,
+        });
+    }
+    let runtime_probe =
+        runtime.probe(envelope, supervisor, current_dir, cancellation, generation)?;
+    let capability_evidence = capability_probe.probe(
+        envelope,
+        &runtime_probe,
+        supervisor,
+        current_dir,
+        cancellation,
+        generation,
+    )?;
+    Ok(RuntimePreflight {
+        runtime_probe: Some(runtime_probe),
+        capability_evidence,
+    })
 }
 
 pub struct RuntimeExecutionContext<'a> {
@@ -299,6 +352,52 @@ impl DockerCompatibleRuntime {
     }
 }
 
+impl RuntimeCapabilityProbe for DockerRuntimeCapabilityProbe {
+    fn probe(
+        &self,
+        envelope: &ExecutionPlanEnvelopeV1,
+        runtime_probe: &RuntimeProbe,
+        supervisor: &dyn SupervisorPort,
+        current_dir: &Path,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+    ) -> Result<Option<RuntimeCapabilityEvidenceV1>, RuntimeError> {
+        if envelope.plan.schema_version != "1.3" {
+            return Ok(None);
+        }
+        if runtime_probe.runtime != RuntimeKind::DockerCompatible {
+            return Err(RuntimeError::Unsupported(
+                "schema 1.3 requires a Docker-compatible runtime",
+            ));
+        }
+        let context = execute_capability_command(
+            envelope,
+            supervisor,
+            current_dir,
+            cancellation,
+            generation,
+            vec![OsString::from("context"), OsString::from("show")],
+        )?;
+        let image = execute_capability_command(
+            envelope,
+            supervisor,
+            current_dir,
+            cancellation,
+            generation,
+            vec![
+                OsString::from("image"),
+                OsString::from("inspect"),
+                OsString::from("--format"),
+                OsString::from("{{json .}}"),
+                OsString::from(&envelope.plan.runtime.image),
+            ],
+        )?;
+        let context = bounded_context(&context)?;
+        interpret_runtime_capabilities(runtime_probe, context, &image, &envelope.plan.runtime.image)
+            .map(Some)
+    }
+}
+
 fn doctor_identity(envelope: &ExecutionPlanEnvelopeV1) -> RunIdentity {
     RunIdentity {
         project: envelope.plan.project.clone(),
@@ -370,9 +469,129 @@ fn interpret_docker_probe(result: ProcessResult) -> Result<RuntimeProbe, Runtime
         server_version: Some(server_version),
         operating_system,
         os_type: Some(os_type),
+        memory_limit_supported: value.get("MemoryLimit").and_then(Value::as_bool),
+        swap_limit_supported: value.get("SwapLimit").and_then(Value::as_bool),
         containment: containment_mechanism(),
         graceful_stop: graceful_stop_capability(),
     })
+}
+
+fn execute_capability_command(
+    envelope: &ExecutionPlanEnvelopeV1,
+    supervisor: &dyn SupervisorPort,
+    current_dir: &Path,
+    cancellation: &CancellationToken,
+    generation: &GenerationGuard,
+    argv: Vec<OsString>,
+) -> Result<Vec<u8>, RuntimeError> {
+    let identity = doctor_identity(envelope);
+    generation
+        .ensure_current(&identity)
+        .map_err(RuntimeError::Process)?;
+    let request = ProcessRequest {
+        identity,
+        program: OsString::from("docker"),
+        argv,
+        current_dir: current_dir.to_path_buf(),
+        environment: runtime_environment(),
+        timeout: DOCTOR_TIMEOUT,
+        max_capture_bytes: DOCTOR_CAPTURE_BYTES,
+    };
+    let result = supervisor
+        .execute(&request, cancellation, generation)
+        .map_err(|error| match error {
+            ProcessError::Spawn(_) => RuntimeError::Unavailable,
+            error => RuntimeError::Process(error),
+        })?;
+    bounded_successful_output(result)
+}
+
+fn bounded_successful_output(result: ProcessResult) -> Result<Vec<u8>, RuntimeError> {
+    match result.termination {
+        ProcessTermination::TimedOut => return Err(RuntimeError::TimedOut),
+        ProcessTermination::Cancelled => return Err(RuntimeError::Cancelled),
+        ProcessTermination::Completed => {}
+    }
+    if result.cleanup != CleanupStatus::Verified {
+        return Err(RuntimeError::CleanupUncertain);
+    }
+    if result.exit.map(|exit| exit.success) != Some(true) {
+        return Err(RuntimeError::Unavailable);
+    }
+    if result.stdout.truncated || result.stderr.truncated {
+        return Err(RuntimeError::InvalidProbe(
+            "runtime capability output exceeded the capture limit",
+        ));
+    }
+    Ok(result.stdout.bytes)
+}
+
+fn bounded_context(bytes: &[u8]) -> Result<&str, RuntimeError> {
+    let context = std::str::from_utf8(bytes)
+        .map_err(|_| RuntimeError::InvalidProbe("Docker context output is not UTF-8"))?
+        .trim();
+    if context.is_empty() || context.len() > 128 || context.chars().any(char::is_control) {
+        return Err(RuntimeError::InvalidProbe(
+            "Docker context output is unsafe or out of bounds",
+        ));
+    }
+    Ok(context)
+}
+
+fn interpret_runtime_capabilities(
+    runtime_probe: &RuntimeProbe,
+    context: &str,
+    image: &[u8],
+    expected_image_reference: &str,
+) -> Result<RuntimeCapabilityEvidenceV1, RuntimeError> {
+    if runtime_probe.memory_limit_supported != Some(true) {
+        return Err(RuntimeError::UnsupportedCapability("memory_limit"));
+    }
+    if runtime_probe.swap_limit_supported != Some(true) {
+        return Err(RuntimeError::UnsupportedCapability("swap_limit"));
+    }
+    let value: Value = serde_json::from_slice(image)
+        .map_err(|_| RuntimeError::InvalidProbe("image inspect output is not valid JSON"))?;
+    let image_id = value
+        .get("Id")
+        .and_then(Value::as_str)
+        .filter(|value| valid_sha256_digest(value))
+        .ok_or(RuntimeError::InvalidProbe(
+            "image inspect output omitted a canonical image ID",
+        ))?;
+    let has_configured_reference = value
+        .get("RepoDigests")
+        .and_then(Value::as_array)
+        .is_some_and(|digests| {
+            digests
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|digest| digest == expected_image_reference)
+        });
+    if !has_configured_reference {
+        return Err(RuntimeError::InvalidProbe(
+            "image inspect output did not bind the configured image reference",
+        ));
+    }
+    Ok(RuntimeCapabilityEvidenceV1 {
+        schema_version: "1.0".to_owned(),
+        memory_limit_supported: true,
+        swap_limit_supported: true,
+        context_digest: canonical_digest(&context)
+            .map_err(|_| RuntimeError::InvalidProbe("cannot digest Docker context"))?,
+        resolved_image_id: image_id.to_owned(),
+        resolved_image_reference: expected_image_reference.to_owned(),
+    })
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value
+            .as_bytes()
+            .iter()
+            .skip(7)
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
 fn bounded_field(value: &Value, key: &str) -> Option<String> {
@@ -607,8 +826,23 @@ pub struct RuntimeProbe {
     pub server_version: Option<String>,
     pub operating_system: Option<String>,
     pub os_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_limit_supported: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub swap_limit_supported: Option<bool>,
     pub containment: ContainmentMechanism,
     pub graceful_stop: GracefulStopCapability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeCapabilityEvidenceV1 {
+    pub schema_version: String,
+    pub memory_limit_supported: bool,
+    pub swap_limit_supported: bool,
+    pub context_digest: String,
+    pub resolved_image_id: String,
+    pub resolved_image_reference: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -820,6 +1054,7 @@ pub enum WorkspaceMountPolicy {
 #[derive(Debug)]
 pub enum RuntimeError {
     Unsupported(&'static str),
+    UnsupportedCapability(&'static str),
     Unavailable,
     TimedOut,
     Cancelled,
@@ -834,7 +1069,10 @@ pub enum RuntimeError {
 impl RuntimeError {
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Unsupported(_) | Self::Unavailable | Self::InvalidProbe(_) => 4,
+            Self::Unsupported(_)
+            | Self::UnsupportedCapability(_)
+            | Self::Unavailable
+            | Self::InvalidProbe(_) => 4,
             Self::TimedOut | Self::Cancelled => 5,
             Self::Workspace(_) => 2,
             Self::CleanupUncertain
@@ -851,6 +1089,12 @@ impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unsupported(message) => write!(formatter, "unsupported runtime: {message}"),
+            Self::UnsupportedCapability(capability) => {
+                write!(
+                    formatter,
+                    "runtime does not support required capability: {capability}"
+                )
+            }
             Self::Unavailable => formatter.write_str("Docker-compatible runtime is unavailable"),
             Self::TimedOut => formatter.write_str("runtime probe exceeded its deadline"),
             Self::Cancelled => formatter.write_str("runtime probe was cancelled"),
@@ -874,6 +1118,7 @@ impl std::error::Error for RuntimeError {
             Self::Workspace(error) => Some(error),
             Self::Process(error) => Some(error),
             Self::Unsupported(_)
+            | Self::UnsupportedCapability(_)
             | Self::Unavailable
             | Self::TimedOut
             | Self::Cancelled
@@ -1046,6 +1291,46 @@ timeout_seconds = 60
         calls: AtomicUsize,
     }
 
+    #[derive(Default)]
+    struct CapabilitySupervisor {
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl SupervisorPort for CapabilitySupervisor {
+        fn execute(
+            &self,
+            request: &ProcessRequest,
+            _cancellation: &CancellationToken,
+            generation: &GenerationGuard,
+        ) -> Result<ProcessResult, ProcessError> {
+            generation.ensure_current(&request.identity)?;
+            let argv = request
+                .argv
+                .iter()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            self.calls.lock().expect("calls").push(argv.clone());
+            let stdout = match argv.first().map(String::as_str) {
+                Some("info") => br#"{"OperatingSystem":"Docker Engine","ServerVersion":"28.3.2","OSType":"linux","MemoryLimit":true,"SwapLimit":true}"#.to_vec(),
+                Some("context") => b"default\n".to_vec(),
+                Some("image") => br#"{"Id":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","RepoDigests":["ghcr.io/example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#.to_vec(),
+                other => panic!("unexpected capability argv: {other:?}"),
+            };
+            Ok(ProcessResult {
+                identity: request.identity.clone(),
+                termination: ProcessTermination::Completed,
+                cleanup: CleanupStatus::Verified,
+                exit: Some(ExitOutcome {
+                    success: true,
+                    code: Some(0),
+                }),
+                stdout: CapturedStream::from_captured(stdout, false),
+                stderr: CapturedStream::from_captured(Vec::new(), false),
+                elapsed_millis: 1,
+            })
+        }
+    }
+
     impl FakeSupervisor {
         fn new(mode: ProbeMode) -> Self {
             Self {
@@ -1179,6 +1464,146 @@ timeout_seconds = 60
                 .expect_err("probe fails closed");
             assert_eq!(error.exit_code(), expected_code);
         }
+    }
+
+    #[test]
+    fn schema_1_3_rejects_daemon_without_swap_limit_capability() {
+        let probe = RuntimeProbe {
+            runtime: RuntimeKind::DockerCompatible,
+            flavor: RuntimeFlavor::DockerCompatible,
+            server_version: Some("28.3.2".to_owned()),
+            operating_system: Some("Docker Engine".to_owned()),
+            os_type: Some("linux".to_owned()),
+            memory_limit_supported: Some(true),
+            swap_limit_supported: Some(false),
+            containment: containment_mechanism(),
+            graceful_stop: graceful_stop_capability(),
+        };
+        let error = interpret_runtime_capabilities(
+            &probe,
+            "default",
+            br#"{"Id":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","RepoDigests":["ghcr.io/example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}"#,
+            "ghcr.io/example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .expect_err("swap capability is required by schema 1.3");
+
+        assert!(matches!(
+            error,
+            RuntimeError::UnsupportedCapability("swap_limit")
+        ));
+    }
+
+    #[test]
+    fn capability_evidence_digests_context_and_binds_the_exact_image_reference() {
+        let probe = RuntimeProbe {
+            runtime: RuntimeKind::DockerCompatible,
+            flavor: RuntimeFlavor::DockerCompatible,
+            server_version: Some("28.3.2".to_owned()),
+            operating_system: Some("Docker Engine".to_owned()),
+            os_type: Some("linux".to_owned()),
+            memory_limit_supported: Some(true),
+            swap_limit_supported: Some(true),
+            containment: containment_mechanism(),
+            graceful_stop: graceful_stop_capability(),
+        };
+        let context = "private-context";
+        let image = "ghcr.io/example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let evidence = interpret_runtime_capabilities(
+            &probe,
+            context,
+            format!(
+                r#"{{"Id":"sha256:{id}","RepoDigests":["{image}"]}}"#,
+                id = "b".repeat(64),
+            )
+            .as_bytes(),
+            image,
+        )
+        .expect("capability evidence");
+
+        assert_eq!(evidence.resolved_image_reference, image);
+        assert_eq!(
+            evidence.resolved_image_id,
+            format!("sha256:{}", "b".repeat(64))
+        );
+        assert_eq!(
+            evidence.context_digest,
+            canonical_digest(&context).expect("digest")
+        );
+        assert!(
+            !serde_json::to_string(&evidence)
+                .expect("evidence JSON")
+                .contains(context)
+        );
+    }
+
+    #[test]
+    fn schema_1_3_capability_preflight_uses_bounded_read_only_docker_argv() {
+        let envelope = ConfigV1::parse(
+            &CONFIG.replace("schema_version = \"1.0\"", "schema_version = \"1.3\"")
+                .replace(
+                    "network = false\n\n[[checks]]",
+                    "network = false\npull_policy = \"never\"\nswap_mode = \"disabled\"\n\n[storage]\nmin_free_bytes = 1073741824\nreceipt_journal_reserve_bytes = 1048576\nmax_cache_growth_bytes = 2147483648\n\n[[checks]]",
+                ),
+        )
+        .expect("config")
+        .into_plan()
+        .expect("schema 1.3 plan");
+        let supervisor = CapabilitySupervisor::default();
+        let generation = doctor_guard(&envelope);
+        let preflight = preflight_runtime_capabilities(
+            &envelope,
+            &DockerCompatibleRuntime,
+            &DockerRuntimeCapabilityProbe,
+            &supervisor,
+            &std::env::current_dir().expect("current dir"),
+            &CancellationToken::default(),
+            &generation,
+        )
+        .expect("capability preflight");
+
+        assert_eq!(
+            preflight
+                .capability_evidence
+                .as_ref()
+                .expect("schema 1.3 evidence")
+                .resolved_image_reference,
+            envelope.plan.runtime.image
+        );
+        assert_eq!(
+            *supervisor.calls.lock().expect("calls"),
+            vec![
+                vec!["info", "--format", "{{json .}}"],
+                vec!["context", "show"],
+                vec![
+                    "image",
+                    "inspect",
+                    "--format",
+                    "{{json .}}",
+                    "ghcr.io/example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn historical_schema_skips_runtime_capability_preflight() {
+        let envelope = envelope();
+        let supervisor = FakeSupervisor::new(ProbeMode::OrbStack);
+        let generation = doctor_guard(&envelope);
+        let preflight = preflight_runtime_capabilities(
+            &envelope,
+            &DockerCompatibleRuntime,
+            &DockerRuntimeCapabilityProbe,
+            &supervisor,
+            &std::env::current_dir().expect("current dir"),
+            &CancellationToken::default(),
+            &generation,
+        )
+        .expect("historical no-op preflight");
+
+        assert!(preflight.runtime_probe.is_none());
+        assert!(preflight.capability_evidence.is_none());
+        assert_eq!(supervisor.calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

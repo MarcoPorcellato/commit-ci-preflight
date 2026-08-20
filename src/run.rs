@@ -35,7 +35,9 @@ use crate::receipt::{
     SourceSnapshotEvidence, SourceSnapshotStrategy, canonical_digest,
 };
 use crate::runtime::{
-    RuntimeError, RuntimeExecutionContext, RuntimePort, docker_execution_environment, doctor_guard,
+    DockerRuntimeCapabilityProbe, RuntimeCapabilityProbe, RuntimeError, RuntimeExecutionContext,
+    RuntimePort, RuntimePreflight, docker_execution_environment, doctor_guard,
+    preflight_runtime_capabilities,
 };
 use crate::source_snapshot::{SourceSnapshot, SourceSnapshotError};
 use crate::storage::{
@@ -173,6 +175,31 @@ pub fn execute_local_run_with_storage_probe(
     )
 }
 
+pub fn execute_local_run_with_runtime_capability_probe(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    capability_probe: &dyn RuntimeCapabilityProbe,
+) -> Result<RunOutcome, RunError> {
+    let storage_probe = SystemStorageProbe;
+    let mut barrier = NoopCompletionBarrier;
+    let mut lifecycle = NoopRunLifecycleObserver;
+    execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
+        request,
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        &mut barrier,
+        &mut lifecycle,
+        &storage_probe,
+        capability_probe,
+        None,
+    )
+}
+
 pub fn execute_local_run_with_barrier(
     request: &RunRequest<'_>,
     runtime: &dyn RuntimePort,
@@ -227,6 +254,59 @@ pub fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
     lifecycle: &mut dyn RunLifecycleObserver,
     storage_probe: &dyn StorageProbe,
 ) -> Result<RunOutcome, RunError> {
+    let capability_probe = DockerRuntimeCapabilityProbe;
+    execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
+        request,
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        barrier,
+        lifecycle,
+        storage_probe,
+        &capability_probe,
+        None,
+    )
+}
+
+pub fn execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    barrier: &mut dyn CompletionBarrier,
+    lifecycle: &mut dyn RunLifecycleObserver,
+    runtime_preflight: RuntimePreflight,
+) -> Result<RunOutcome, RunError> {
+    let storage_probe = SystemStorageProbe;
+    let capability_probe = DockerRuntimeCapabilityProbe;
+    execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
+        request,
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        barrier,
+        lifecycle,
+        &storage_probe,
+        &capability_probe,
+        Some(runtime_preflight),
+    )
+}
+
+fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    barrier: &mut dyn CompletionBarrier,
+    lifecycle: &mut dyn RunLifecycleObserver,
+    storage_probe: &dyn StorageProbe,
+    capability_probe: &dyn RuntimeCapabilityProbe,
+    runtime_preflight: Option<RuntimePreflight>,
+) -> Result<RunOutcome, RunError> {
     let (receipt, artifact_manifest) =
         execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
             request,
@@ -237,6 +317,8 @@ pub fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
             barrier,
             lifecycle,
             storage_probe,
+            capability_probe,
+            runtime_preflight,
         )?;
     let receipt_v2 = request
         .source_snapshot
@@ -295,6 +377,7 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
     lifecycle: &mut dyn RunLifecycleObserver,
 ) -> Result<ReceiptEnvelopeV1, RunError> {
     let storage_probe = SystemStorageProbe;
+    let capability_probe = DockerRuntimeCapabilityProbe;
     execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
         request,
         runtime,
@@ -304,6 +387,8 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         barrier,
         lifecycle,
         &storage_probe,
+        &capability_probe,
+        None,
     )
     .map(|(receipt, _)| receipt)
 }
@@ -317,6 +402,8 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
     barrier: &mut dyn CompletionBarrier,
     lifecycle: &mut dyn RunLifecycleObserver,
     storage_probe: &dyn StorageProbe,
+    capability_probe: &dyn RuntimeCapabilityProbe,
+    runtime_preflight: Option<RuntimePreflight>,
 ) -> Result<(ReceiptEnvelopeV1, Vec<crate::receipt::ArtifactEvidence>), RunError> {
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
@@ -330,6 +417,27 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
         preflight_storage(storage, &request.cache.root().path, storage_probe)
             .map_err(RunError::Storage)?;
     }
+    let runtime_preflight = match runtime_preflight {
+        Some(preflight) => preflight,
+        None => preflight_runtime_capabilities(
+            request.envelope,
+            runtime,
+            capability_probe,
+            supervisor,
+            &repository,
+            cancellation,
+            &doctor_guard(request.envelope),
+        )
+        .map_err(|error| {
+            if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+                RunError::ResourcePressure
+            } else {
+                RunError::Runtime(error)
+            }
+        })?,
+    };
+    let runtime_probe = runtime_preflight.runtime_probe;
+    let _runtime_capability_evidence = runtime_preflight.capability_evidence;
     let identity = RunIdentity {
         project: request.envelope.plan.project.clone(),
         commit: None,
@@ -368,21 +476,25 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
         .source_snapshot
         .map(SourceSnapshot::root)
         .unwrap_or(repository.as_path());
-    let probe = runtime
-        .probe(
-            request.envelope,
-            supervisor,
-            execution_root,
-            cancellation,
-            &doctor_guard(request.envelope),
-        )
-        .map_err(|error| {
-            if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
-                RunError::ResourcePressure
-            } else {
-                RunError::Runtime(error)
-            }
-        })?;
+    let probe = if let Some(probe) = runtime_probe {
+        probe
+    } else {
+        runtime
+            .probe(
+                request.envelope,
+                supervisor,
+                execution_root,
+                cancellation,
+                &doctor_guard(request.envelope),
+            )
+            .map_err(|error| {
+                if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+                    RunError::ResourcePressure
+                } else {
+                    RunError::Runtime(error)
+                }
+            })?
+    };
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
     }
@@ -1036,7 +1148,9 @@ mod tests {
     use crate::cache::{CacheRootOptions, PlatformFamily, ResolvedCacheRoot};
     use crate::config::{ArtifactKind, ConfigV1, NormalizedArtifactContract};
     use crate::process::{CapturedStream, ExitOutcome};
-    use crate::runtime::DockerCompatibleRuntime;
+    use crate::runtime::{
+        DockerCompatibleRuntime, RuntimeCapabilityEvidenceV1, RuntimeFlavor, RuntimeProbe,
+    };
 
     #[test]
     fn utc_formatter_covers_epoch_leap_day_and_current_range() {
@@ -1339,6 +1453,59 @@ mod tests {
     impl StorageProbe for FixedStorageProbe {
         fn available_bytes(&self, _path: &Path) -> Result<u64, StorageError> {
             Ok(self.0)
+        }
+    }
+
+    struct ProbeOnlyRuntime;
+
+    impl RuntimePort for ProbeOnlyRuntime {
+        fn kind(&self) -> RuntimeKind {
+            RuntimeKind::DockerCompatible
+        }
+
+        fn probe(
+            &self,
+            _envelope: &ExecutionPlanEnvelopeV1,
+            _supervisor: &dyn SupervisorPort,
+            _current_dir: &Path,
+            _cancellation: &CancellationToken,
+            _generation: &GenerationGuard,
+        ) -> Result<RuntimeProbe, RuntimeError> {
+            Ok(RuntimeProbe {
+                runtime: RuntimeKind::DockerCompatible,
+                flavor: RuntimeFlavor::DockerCompatible,
+                server_version: Some("fixture".to_owned()),
+                operating_system: Some("fixture".to_owned()),
+                os_type: Some("linux".to_owned()),
+                memory_limit_supported: Some(true),
+                swap_limit_supported: Some(true),
+                containment: crate::runtime::ContainmentMechanism::ProcessGroup,
+                graceful_stop: crate::runtime::GracefulStopCapability::ProcessGroupSignal,
+            })
+        }
+
+        fn dry_run(
+            &self,
+            _envelope: &ExecutionPlanEnvelopeV1,
+            _workspace: &crate::workspace::WorkspacePlanV1,
+        ) -> Result<crate::runtime::DryRunPlan, RuntimeError> {
+            panic!("rejected runtime capability must stop before dry-run")
+        }
+    }
+
+    struct RejectingRuntimeCapabilityProbe;
+
+    impl RuntimeCapabilityProbe for RejectingRuntimeCapabilityProbe {
+        fn probe(
+            &self,
+            _envelope: &ExecutionPlanEnvelopeV1,
+            _runtime_probe: &RuntimeProbe,
+            _supervisor: &dyn SupervisorPort,
+            _current_dir: &Path,
+            _cancellation: &CancellationToken,
+            _generation: &GenerationGuard,
+        ) -> Result<Option<RuntimeCapabilityEvidenceV1>, RuntimeError> {
+            Err(RuntimeError::UnsupportedCapability("swap_limit"))
         }
     }
 
@@ -1868,6 +2035,53 @@ depends_on = ["first"]
                 available_bytes: 149,
                 required_bytes: 150,
             })
+        ));
+        assert_eq!(supervisor.git_revisions.load(Ordering::SeqCst), 0);
+        assert_eq!(supervisor.docker_runs.load(Ordering::SeqCst), 0);
+        assert!(!fixture.repository.join(".ccp/receipt.json").exists());
+        assert!(
+            !fixture
+                .cache
+                .workspace_path(&fixture.envelope.plan_digest)
+                .expect("workspace path")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn rejected_capability_preflight_never_starts_git_or_workspace() {
+        let mut fixture = RunFixture::new("runtime-capability-preflight");
+        fixture.envelope.plan.schema_version = "1.3".to_owned();
+        fixture.envelope.plan.runtime.pull_policy = Some(crate::config::RuntimePullPolicy::Never);
+        fixture.envelope.plan.runtime.swap_mode = Some(crate::config::RuntimeSwapMode::Disabled);
+        fixture.envelope.plan.storage = Some(crate::config::NormalizedStorage {
+            min_free_bytes: 1,
+            receipt_journal_reserve_bytes: 4096,
+            max_cache_growth_bytes: 0,
+            max_artifact_bytes: 0,
+        });
+        fixture.envelope.plan_digest =
+            canonical_digest(&fixture.envelope.plan).expect("schema 1.3 plan digest");
+        let supervisor = FakeSupervisor::new(ExecutionMode::Pass);
+        let error = execute_local_run_with_runtime_capability_probe(
+            &RunRequest {
+                envelope: &fixture.envelope,
+                repository: &fixture.repository,
+                cache: &fixture.cache,
+                generation: 7,
+                source_snapshot: None,
+            },
+            &ProbeOnlyRuntime,
+            &supervisor,
+            &CancellationToken::default(),
+            &FixedClock::new(),
+            &RejectingRuntimeCapabilityProbe,
+        )
+        .expect_err("rejected capability preflight must stop before repository inspection");
+
+        assert!(matches!(
+            error,
+            RunError::Runtime(RuntimeError::UnsupportedCapability("swap_limit"))
         ));
         assert_eq!(supervisor.git_revisions.load(Ordering::SeqCst), 0);
         assert_eq!(supervisor.docker_runs.load(Ordering::SeqCst), 0);
