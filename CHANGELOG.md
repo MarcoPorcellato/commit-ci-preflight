@@ -9,6 +9,12 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T5 candidate generational cache slice: runs stage cache data in owned
+  `.staging-*` generations, persist a strict versioned manifest, and promote a
+  validated generation only after all checks pass; failed in-process stages are
+  cleaned by their owning handle without mutating the last-known-good data.
+  Cross-process crash recovery and multi-cache journal promotion remain
+  pending.
 - T4 candidate supervisor hardening: complete stdout/stderr SHA-256 digests and
   byte counts are computed while retaining only bounded previews; process
   execution and cleanup share one wall deadline; reader joins are bounded; and

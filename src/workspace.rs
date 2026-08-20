@@ -149,7 +149,7 @@ impl WorkspacePlanV1 {
 
 pub struct PreparedWorkspace {
     pub plan: WorkspacePlanV1,
-    cache_keys: Vec<CacheKey>,
+    cache_entries: Vec<crate::cache::PreparedCacheEntry>,
     lock: WorkspaceLock,
 }
 
@@ -159,6 +159,15 @@ impl PreparedWorkspace {
         repository: &Path,
         cache: &ManagedCache,
     ) -> Result<Self, WorkspaceError> {
+        Self::prepare_with_generation(envelope, repository, cache, 0)
+    }
+
+    pub fn prepare_with_generation(
+        envelope: &ExecutionPlanEnvelopeV1,
+        repository: &Path,
+        cache: &ManagedCache,
+        generation: u64,
+    ) -> Result<Self, WorkspaceError> {
         validate_repository_mount_targets(envelope, repository)?;
         let run_root = cache
             .workspace_path(&envelope.plan_digest)
@@ -167,14 +176,16 @@ impl PreparedWorkspace {
         let lock = WorkspaceLock::acquire(&run_root)?;
 
         let mut cache_sources = BTreeMap::new();
-        let mut cache_keys = Vec::new();
+        let mut cache_entries = Vec::new();
         for declared in &envelope.plan.caches {
             let key =
                 CacheKey::for_plan_cache(envelope, declared).map_err(WorkspaceError::Cache)?;
-            let prepared = cache.prepare_entry(&key).map_err(WorkspaceError::Cache)?;
+            let prepared = cache
+                .prepare_entry(&key, &envelope.plan_digest, generation)
+                .map_err(WorkspaceError::Cache)?;
             validate_under_root(&prepared.data_path, &cache.root().path)?;
-            cache_sources.insert(declared.id.clone(), prepared.data_path);
-            cache_keys.push(key);
+            cache_sources.insert(declared.id.clone(), prepared.data_path.clone());
+            cache_entries.push(prepared);
         }
 
         for check in &envelope.plan.checks {
@@ -192,7 +203,7 @@ impl PreparedWorkspace {
         )?;
         Ok(Self {
             plan,
-            cache_keys,
+            cache_entries,
             lock,
         })
     }
@@ -203,16 +214,31 @@ impl PreparedWorkspace {
         source_snapshot_digest: &str,
         cache: &ManagedCache,
     ) -> Result<Self, WorkspaceError> {
-        let mut prepared = Self::prepare(envelope, snapshot_root, cache)?;
+        Self::prepare_snapshot_with_generation(
+            envelope,
+            snapshot_root,
+            source_snapshot_digest,
+            cache,
+            0,
+        )
+    }
+
+    pub fn prepare_snapshot_with_generation(
+        envelope: &ExecutionPlanEnvelopeV1,
+        snapshot_root: &Path,
+        source_snapshot_digest: &str,
+        cache: &ManagedCache,
+        generation: u64,
+    ) -> Result<Self, WorkspaceError> {
+        let mut prepared =
+            Self::prepare_with_generation(envelope, snapshot_root, cache, generation)?;
         prepared.plan.source_snapshot_digest = Some(source_snapshot_digest.to_owned());
         Ok(prepared)
     }
 
     pub fn mark_caches_complete(&self, cache: &ManagedCache) -> Result<(), WorkspaceError> {
-        for key in &self.cache_keys {
-            cache
-                .mark_entry_complete(key)
-                .map_err(WorkspaceError::Cache)?;
+        for entry in &self.cache_entries {
+            cache.promote_entry(entry).map_err(WorkspaceError::Cache)?;
         }
         Ok(())
     }

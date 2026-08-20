@@ -561,6 +561,16 @@ Exit gate:
 
 ### PR T5 — Generational transactional cache
 
+Status (candidate slice): the runtime cache path now prepares an isolated,
+manifest-bound `.staging-*` generation per declared cache, copies the previous
+complete data with symlink rejection, and promotes only a validated generation
+after the run's checks pass. The owning prepared handle removes an unfinished
+staging generation on ordinary failure, while a failed generation cannot alter
+the previous complete data. This is not yet the T5 exit gate: cross-process
+crash recovery, reflink/clonefile optimization, journaled multi-cache
+promotion/rollback, durable manifests, and exact-head qualification remain
+pending.
+
 Deliverables:
 
 - immutable last-known-good generations;

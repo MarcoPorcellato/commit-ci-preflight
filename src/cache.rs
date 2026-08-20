@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::{ExecutionPlanEnvelopeV1, NormalizedCache};
@@ -36,6 +36,8 @@ const ENTRIES_DIR: &str = "entries";
 const WORKSPACES_DIR: &str = "workspaces";
 const COMPLETE_FILE: &str = ".complete-v1";
 const COMPLETE_BYTES: &[u8] = b"complete-v1\n";
+const GENERATION_MANIFEST_FILE: &str = ".generation-v1.json";
+const GENERATION_SCHEMA_VERSION: &str = "1.0";
 const MAX_INVENTORY_NODES: usize = 100_000;
 const INIT_RETRIES: usize = 40;
 const INIT_RETRY_DELAY: Duration = Duration::from_millis(5);
@@ -331,7 +333,12 @@ impl ManagedCache {
         self.root.workspace_path(plan_digest)
     }
 
-    pub fn prepare_entry(&self, key: &CacheKey) -> Result<PreparedCacheEntry, CacheError> {
+    pub fn prepare_entry(
+        &self,
+        key: &CacheKey,
+        plan_digest: &str,
+        generation: u64,
+    ) -> Result<PreparedCacheEntry, CacheError> {
         validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
         let entries_root = self.root.path.join(ENTRIES_DIR);
         validate_plain_directory(&entries_root)?;
@@ -349,14 +356,114 @@ impl ManagedCache {
             }
             Err(error) => return Err(CacheError::Io(error)),
         }
+        validated_digest_hex(plan_digest)?;
         let complete = entry_status(&path, &key.directory_name())? == CacheEntryStatus::Complete;
-        let data_path = path.join("data");
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let staging_path = path.join(format!(".staging-{}-{sequence}", std::process::id()));
+        ensure_managed_directory(&staging_path)?;
+        let data_path = staging_path.join("data");
         ensure_managed_directory(&data_path)?;
+        if complete {
+            copy_tree(&path.join("data"), &data_path)?;
+        }
+        let manifest = CacheGenerationManifestV1 {
+            schema_version: GENERATION_SCHEMA_VERSION.to_owned(),
+            key_digest: key.digest.clone(),
+            plan_digest: plan_digest.to_owned(),
+            generation,
+            state: "staging".to_owned(),
+        };
+        write_generation_manifest(&staging_path, &manifest)?;
         Ok(PreparedCacheEntry {
             path,
             data_path,
+            staging_path,
+            key_digest: key.digest.clone(),
+            plan_digest: plan_digest.to_owned(),
+            generation,
             was_complete: complete,
         })
+    }
+
+    pub fn promote_entry(&self, prepared: &PreparedCacheEntry) -> Result<(), CacheError> {
+        validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
+        validate_plain_directory(&prepared.path)?;
+        validate_plain_directory(&prepared.staging_path)?;
+        validate_plain_directory(&prepared.data_path)?;
+        let manifest_path = prepared.staging_path.join(GENERATION_MANIFEST_FILE);
+        let manifest = read_generation_manifest(&manifest_path)?;
+        if manifest.key_digest != prepared.key_digest
+            || manifest.plan_digest != prepared.plan_digest
+            || manifest.generation != prepared.generation
+            || manifest.state != "staging"
+        {
+            return Err(CacheError::GenerationMismatch);
+        }
+        let mut complete_manifest = manifest;
+        complete_manifest.state = "complete".to_owned();
+        write_generation_manifest_replacing(&manifest_path, &complete_manifest)?;
+
+        let current = prepared.path.join("data");
+        let backup = prepared.path.join(format!(
+            ".backup-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let marker = prepared.path.join(COMPLETE_FILE);
+        let previous_marker = read_optional_file(&marker)?;
+        let previous_manifest_path = prepared.path.join(GENERATION_MANIFEST_FILE);
+        let previous_manifest = read_optional_file(&previous_manifest_path)?;
+
+        let had_current = match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(CacheError::SymlinkInManagedRoot(current));
+            }
+            Ok(metadata) if metadata.is_dir() => true,
+            Ok(_) => return Err(CacheError::UnexpectedEntry(current)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => return Err(CacheError::Io(error)),
+        };
+        remove_if_present(&marker)?;
+        remove_if_present(&previous_manifest_path)?;
+        if had_current {
+            fs::rename(&current, &backup).map_err(CacheError::Io)?;
+        }
+
+        let result = (|| {
+            fs::rename(&prepared.data_path, &current).map_err(CacheError::Io)?;
+            fs::rename(&manifest_path, &previous_manifest_path).map_err(CacheError::Io)?;
+            write_complete_marker(&marker)?;
+            Ok::<(), CacheError>(())
+        })();
+
+        match result {
+            Ok(()) => {
+                if had_current {
+                    fs::remove_dir_all(&backup).map_err(CacheError::Io)?;
+                }
+                remove_if_present(&prepared.staging_path)?;
+                Ok(())
+            }
+            Err(error) => {
+                let rollback = (|| {
+                    remove_if_present(&current)?;
+                    if had_current {
+                        fs::rename(&backup, &current).map_err(CacheError::Io)?;
+                    }
+                    if let Some(bytes) = previous_manifest {
+                        fs::write(&previous_manifest_path, bytes).map_err(CacheError::Io)?;
+                    }
+                    if let Some(bytes) = previous_marker {
+                        fs::write(&marker, bytes).map_err(CacheError::Io)?;
+                    }
+                    Ok::<(), CacheError>(())
+                })();
+                if rollback.is_err() {
+                    return Err(CacheError::PromotionUncertain);
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn mark_entry_complete(&self, key: &CacheKey) -> Result<(), CacheError> {
@@ -478,7 +585,141 @@ impl ManagedCache {
 pub struct PreparedCacheEntry {
     pub path: PathBuf,
     pub data_path: PathBuf,
+    staging_path: PathBuf,
+    key_digest: String,
+    plan_digest: String,
+    generation: u64,
     pub was_complete: bool,
+}
+
+impl Drop for PreparedCacheEntry {
+    fn drop(&mut self) {
+        let Ok(manifest) =
+            read_generation_manifest(&self.staging_path.join(GENERATION_MANIFEST_FILE))
+        else {
+            return;
+        };
+        if manifest.schema_version == GENERATION_SCHEMA_VERSION
+            && manifest.key_digest == self.key_digest
+            && manifest.plan_digest == self.plan_digest
+            && manifest.generation == self.generation
+            && manifest.state == "staging"
+        {
+            let _ = fs::remove_dir_all(&self.staging_path);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheGenerationManifestV1 {
+    pub schema_version: String,
+    pub key_digest: String,
+    pub plan_digest: String,
+    pub generation: u64,
+    pub state: String,
+}
+
+fn write_generation_manifest(
+    staging_path: &Path,
+    manifest: &CacheGenerationManifestV1,
+) -> Result<(), CacheError> {
+    let bytes = canonical_json(manifest).map_err(CacheError::Canonical)?;
+    let path = staging_path.join(GENERATION_MANIFEST_FILE);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(CacheError::Io)?;
+    file.write_all(&bytes).map_err(CacheError::Io)?;
+    file.write_all(b"\n").map_err(CacheError::Io)?;
+    file.sync_all().map_err(CacheError::Io)
+}
+
+fn write_generation_manifest_replacing(
+    path: &Path,
+    manifest: &CacheGenerationManifestV1,
+) -> Result<(), CacheError> {
+    remove_if_present(path)?;
+    write_generation_manifest(
+        path.parent().ok_or(CacheError::PromotionUncertain)?,
+        manifest,
+    )
+    .and_then(|_| {
+        let generated = path
+            .parent()
+            .ok_or(CacheError::PromotionUncertain)?
+            .join(GENERATION_MANIFEST_FILE);
+        if generated != path {
+            return Err(CacheError::PromotionUncertain);
+        }
+        Ok(())
+    })
+}
+
+fn read_generation_manifest(path: &Path) -> Result<CacheGenerationManifestV1, CacheError> {
+    let bytes = fs::read(path).map_err(CacheError::Io)?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        CacheError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            error.to_string(),
+        ))
+    })
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>, CacheError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()))
+        }
+        Ok(metadata) if metadata.is_file() => fs::read(path).map(Some).map_err(CacheError::Io),
+        Ok(_) => Err(CacheError::UnexpectedEntry(path.to_path_buf())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+fn remove_if_present(path: &Path) -> Result<(), CacheError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()))
+        }
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path).map_err(CacheError::Io),
+        Ok(metadata) if metadata.is_file() => fs::remove_file(path).map_err(CacheError::Io),
+        Ok(_) => Err(CacheError::UnexpectedEntry(path.to_path_buf())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+fn write_complete_marker(path: &Path) -> Result<(), CacheError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(CacheError::Io)?;
+    file.write_all(COMPLETE_BYTES).map_err(CacheError::Io)?;
+    file.sync_all().map_err(CacheError::Io)
+}
+
+fn copy_tree(source: &Path, destination: &Path) -> Result<(), CacheError> {
+    let metadata = fs::symlink_metadata(source).map_err(CacheError::Io)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CacheError::SymlinkInManagedRoot(source.to_path_buf()));
+    }
+    if metadata.is_file() {
+        fs::copy(source, destination).map_err(CacheError::Io)?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(CacheError::UnexpectedEntry(source.to_path_buf()));
+    }
+    ensure_managed_directory(destination)?;
+    for entry in sorted_directory_entries(source)? {
+        let name = entry.file_name();
+        copy_tree(&entry.path(), &destination.join(name))?;
+    }
+    Ok(())
 }
 
 fn wait_for_concurrent_initializer(root: &Path, marker: &Path) -> Result<(), CacheError> {
@@ -698,6 +939,19 @@ fn entry_status(path: &Path, name: &str) -> Result<CacheEntryStatus, CacheError>
         Ok(metadata) if metadata.is_file() => {
             let bytes = fs::read(&marker).map_err(CacheError::Io)?;
             if bytes == COMPLETE_BYTES {
+                let manifest = path.join(GENERATION_MANIFEST_FILE);
+                if let Some(manifest_bytes) = read_optional_file(&manifest)? {
+                    let parsed: CacheGenerationManifestV1 = serde_json::from_slice(&manifest_bytes)
+                        .map_err(|error| {
+                            CacheError::Io(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                error.to_string(),
+                            ))
+                        })?;
+                    if parsed.state != "complete" {
+                        return Err(CacheError::GenerationMismatch);
+                    }
+                }
                 Ok(CacheEntryStatus::Complete)
             } else {
                 Err(CacheError::UnexpectedEntry(marker))
@@ -807,6 +1061,8 @@ pub enum CacheError {
     InventoryLimitExceeded,
     InvalidBudget,
     InvalidDigest,
+    GenerationMismatch,
+    PromotionUncertain,
     SizeOverflow,
     Canonical(ReceiptError),
     Io(io::Error),
@@ -824,6 +1080,8 @@ impl CacheError {
             | Self::SymlinkInManagedRoot(_)
             | Self::UnexpectedEntry(_)
             | Self::InventoryLimitExceeded
+            | Self::GenerationMismatch
+            | Self::PromotionUncertain
             | Self::SizeOverflow
             | Self::Canonical(_)
             | Self::Io(_) => 70,
@@ -857,6 +1115,12 @@ impl fmt::Display for CacheError {
                 formatter.write_str("cache disk budget must be greater than zero")
             }
             Self::InvalidDigest => formatter.write_str("cache key digest is invalid"),
+            Self::GenerationMismatch => {
+                formatter.write_str("cache generation manifest does not match the prepared entry")
+            }
+            Self::PromotionUncertain => {
+                formatter.write_str("cache generation promotion could not be rolled back safely")
+            }
             Self::SizeOverflow => formatter.write_str("cache size accounting overflowed"),
             Self::Canonical(_) => formatter.write_str("cache key could not be canonicalized"),
             Self::Io(_) => formatter.write_str("cache filesystem operation failed"),
@@ -1253,37 +1517,58 @@ timeout_seconds = 60
         let envelope = envelope();
         let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
 
-        let prepared = cache.prepare_entry(&key).expect("prepare");
+        let prepared = cache
+            .prepare_entry(&key, &envelope.plan_digest, 1)
+            .expect("prepare");
         assert!(!prepared.was_complete);
         assert!(prepared.data_path.is_dir());
-        cache.mark_entry_complete(&key).expect("mark complete");
-        assert!(cache.prepare_entry(&key).expect("reopen").was_complete);
+        cache.promote_entry(&prepared).expect("promote");
+        assert_eq!(
+            read_generation_manifest(&cache.entry_path(&key).join(GENERATION_MANIFEST_FILE))
+                .expect("generation manifest")
+                .state,
+            "complete"
+        );
+        assert!(
+            cache
+                .prepare_entry(&key, &envelope.plan_digest, 2)
+                .expect("reopen")
+                .was_complete
+        );
 
         clean(&resolved.path);
         clean(&repo);
     }
 
     #[test]
-    fn characterizes_complete_entry_remaining_complete_after_data_mutation_before_t5() {
+    fn failed_generation_does_not_mutate_last_known_good() {
         let (repo, resolved) = resolved_fixture("complete-entry-mutation");
         let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
         let envelope = envelope();
         let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
-        let prepared = cache.prepare_entry(&key).expect("prepare");
+        let prepared = cache
+            .prepare_entry(&key, &envelope.plan_digest, 1)
+            .expect("prepare");
         let payload = prepared.data_path.join("payload.bin");
         fs::write(&payload, b"known-good").expect("write known-good payload");
-        cache.mark_entry_complete(&key).expect("mark complete");
+        cache.promote_entry(&prepared).expect("promote known-good");
 
-        fs::write(&payload, b"failed-run-mutation").expect("simulate failed run mutation");
+        let failed = cache
+            .prepare_entry(&key, &envelope.plan_digest, 2)
+            .expect("prepare failed generation");
+        fs::write(failed.data_path.join("payload.bin"), b"failed-run-mutation")
+            .expect("simulate failed run mutation");
+        let failed_staging = failed.staging_path.clone();
+        drop(failed);
 
-        assert!(cache.prepare_entry(&key).expect("reopen").was_complete);
+        assert_eq!(
+            fs::read(cache.entry_data_path(&key).join("payload.bin")).expect("read current"),
+            b"known-good"
+        );
+        assert!(!failed_staging.exists());
         let inventory = cache.inventory().expect("inventory");
         assert_eq!(inventory.entries.len(), 1);
         assert_eq!(inventory.entries[0].status, CacheEntryStatus::Complete);
-        assert_eq!(
-            fs::read(payload).expect("read mutation"),
-            b"failed-run-mutation"
-        );
 
         clean(&resolved.path);
         clean(&repo);

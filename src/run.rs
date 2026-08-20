@@ -302,14 +302,20 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         return Err(RunError::ResourcePressure);
     }
     let prepared = if let Some(snapshot) = request.source_snapshot {
-        PreparedWorkspace::prepare_snapshot(
+        PreparedWorkspace::prepare_snapshot_with_generation(
             request.envelope,
             execution_root,
             &snapshot.evidence().manifest_digest,
             request.cache,
+            request.generation,
         )
     } else {
-        PreparedWorkspace::prepare(request.envelope, execution_root, request.cache)
+        PreparedWorkspace::prepare_with_generation(
+            request.envelope,
+            execution_root,
+            request.cache,
+            request.generation,
+        )
     }
     .map_err(RunError::Workspace)?;
     let dry_run = runtime
