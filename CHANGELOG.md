@@ -108,6 +108,9 @@ Semantic Versioning after its first public release.
   executor/cache/execution-mode/target classifications, optional requested
   limits, 500-record rotation, direct OrbStack detection, and an explicit
   cross-repository coverage/adoption inventory. Legacy v1 data is untouched.
+- Bounded v2 terminal-detail classification for non-completed `guard exec`
+  records, including child exit codes without retaining command output,
+  arguments, paths, environment, or raw errors.
 
 ### Changed
 

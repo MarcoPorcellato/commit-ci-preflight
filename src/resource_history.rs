@@ -49,6 +49,21 @@ pub enum ResourceRunOutcome {
     ResourcePressure,
 }
 
+/// Bounded non-sensitive reason for a non-completed guarded workload.
+///
+/// This is local operational telemetry, not a command log or execution receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResourceTerminalDetailV2 {
+    ChildExit { exit_code: u8 },
+    UserCancelled,
+    TimedOut,
+    ResourcePressure,
+    ResourceMonitorFailure,
+    ProcessSupervisionFailure,
+    InternalFailure,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceTripReasonV1 {
@@ -167,6 +182,8 @@ pub struct ResourceHistoryRecordV2 {
     pub total_memory_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trip_snapshot: Option<ResourceTripSnapshotV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_detail: Option<ResourceTerminalDetailV2>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -248,6 +265,7 @@ impl ResourceHistoryRecordV2 {
         started_at_unix_seconds: u64,
         duration_milliseconds: u64,
         outcome: ResourceRunOutcome,
+        terminal_detail: Option<ResourceTerminalDetailV2>,
         watchdog_trip_reason: Option<WatchdogTripReason>,
         summary: &ResourceObservationSummary,
     ) -> Result<Self, ResourceHistoryError> {
@@ -280,6 +298,7 @@ impl ResourceHistoryRecordV2 {
             maximum_swap_used_bytes: summary.maximum_swap_used_bytes,
             total_memory_bytes: summary.baseline.total_memory_bytes,
             trip_snapshot,
+            terminal_detail,
         })
     }
 
@@ -296,6 +315,32 @@ impl ResourceHistoryRecordV2 {
             ) {
                 return Err(ResourceHistoryError::InvalidContext);
             }
+        }
+        match (&self.outcome, self.terminal_detail.as_ref()) {
+            (_, None) => {}
+            (ResourceRunOutcome::Completed, Some(_)) => {
+                return Err(ResourceHistoryError::InvalidContext);
+            }
+            (
+                ResourceRunOutcome::Failed,
+                Some(ResourceTerminalDetailV2::ChildExit { exit_code }),
+            ) if *exit_code > 0 => {}
+            (
+                ResourceRunOutcome::Failed,
+                Some(ResourceTerminalDetailV2::ProcessSupervisionFailure),
+            )
+            | (ResourceRunOutcome::Failed, Some(ResourceTerminalDetailV2::InternalFailure))
+            | (ResourceRunOutcome::Cancelled, Some(ResourceTerminalDetailV2::UserCancelled))
+            | (ResourceRunOutcome::TimedOut, Some(ResourceTerminalDetailV2::TimedOut))
+            | (
+                ResourceRunOutcome::ResourcePressure,
+                Some(ResourceTerminalDetailV2::ResourcePressure),
+            )
+            | (
+                ResourceRunOutcome::Failed,
+                Some(ResourceTerminalDetailV2::ResourceMonitorFailure),
+            ) => {}
+            _ => return Err(ResourceHistoryError::InvalidContext),
         }
         Ok(())
     }
@@ -639,6 +684,7 @@ mod tests {
             500,
             ResourceRunOutcome::Completed,
             None,
+            None,
             &observation.summary().expect("summary"),
         )
         .expect("record")
@@ -652,6 +698,7 @@ mod tests {
             started,
             500,
             ResourceRunOutcome::ResourcePressure,
+            Some(ResourceTerminalDetailV2::ResourcePressure),
             Some(WatchdogTripReason::SoftPressure),
             &observation.summary().expect("summary"),
         )
@@ -698,6 +745,37 @@ mod tests {
                 Err(ResourceHistoryError::InvalidContext)
             ));
         }
+    }
+
+    #[test]
+    fn v2_terminal_detail_is_bounded_and_historical_records_remain_readable() {
+        let observation = ResourceObservation::new(snapshot(10_000));
+        observation.record(&snapshot(11_000));
+        let record = ResourceHistoryRecordV2::from_summary(
+            context("ready"),
+            1,
+            500,
+            ResourceRunOutcome::Failed,
+            Some(ResourceTerminalDetailV2::ChildExit { exit_code: 7 }),
+            None,
+            &observation.summary().expect("summary"),
+        )
+        .expect("child-exit record");
+
+        assert_eq!(
+            record.terminal_detail,
+            Some(ResourceTerminalDetailV2::ChildExit { exit_code: 7 })
+        );
+        record.validate().expect("valid detail");
+
+        let historical = serde_json::from_str::<ResourceHistoryRecordV2>(
+            &serde_json::to_string(&record_v2("ready", 2)).expect("serialize historical record"),
+        )
+        .expect("deserialize historical record");
+        assert_eq!(historical.terminal_detail, None);
+        historical
+            .validate()
+            .expect("historical record remains valid");
     }
 
     #[test]

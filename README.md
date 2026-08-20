@@ -142,8 +142,9 @@ commit-ci-preflight guard exec \
   -- make all
 ```
 
-The wrapper never invokes a shell, never creates a receipt, and keeps the
-admission slot until the supervised process tree has stopped. Both waits
+The wrapper never invokes a shell, runs the child from the caller's current
+working directory, never creates a receipt, and keeps the admission slot until
+the supervised process tree has stopped. Both waits
 default to six hours for `guard exec` and are capped at 24 hours. On macOS it
 retains at most 500 local, privacy-bounded v2 summaries with workload,
 executor, cache, execution-mode, target and optional requested-limit context.
