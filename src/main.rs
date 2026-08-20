@@ -55,8 +55,7 @@ use commit_ci_preflight::resource_history::{
 };
 use commit_ci_preflight::run::{
     Clock, CompletionBarrier, RunError, RunLifecycleObserver, RunLifecyclePhase, RunRequest,
-    SystemClock, execute_local_run_with_barrier_and_lifecycle,
-    execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight,
+    SystemClock, execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight,
 };
 use commit_ci_preflight::run_journal::{
     RUN_JOURNAL_SCHEMA_VERSION, RecoveryStatusV1, RunFailureKindV1, RunJournalError,
