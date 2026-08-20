@@ -108,6 +108,8 @@ impl MatrixRuntimeConfigV2 {
             memory_mib: self.memory_mib,
             pids_limit: self.pids_limit,
             network: self.network,
+            pull_policy: None,
+            swap_mode: None,
         }
     }
 }

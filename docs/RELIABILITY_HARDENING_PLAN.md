@@ -689,18 +689,32 @@ Exit gate:
 
 ### PR T8 — Environment, artifact, disk, and runtime-resource contracts
 
-Status (local artifact and capacity sub-slices): typed contracts now bind artifact path,
+Status (local artifact, capacity, and runtime-capability sub-slices): typed contracts now bind artifact path,
 kind, byte and entry limits, and producer check into the normalized plan.
 Snapshot-backed v2 runs observe only the CCP-owned writable artifact mount
 after source revalidation and before barrier, cache promotion, and receipt
 sealing. They record a canonical final-state digest and fail closed on missing,
 symlinked, escaped, replaced, oversized, or over-count output. Initial-state
-evidence, inode reservation, owned cache-total enforcement, RAM and swap
-capability verification, and native qualification remain pending. Schema 1.2
+evidence, inode reservation, owned cache-total enforcement, and native
+qualification remain pending. Schema 1.2
 now declares a bounded disk-capacity allowance and preflights free bytes on the
 CCP-owned cache-root filesystem before Git, runtime, or workspace work; it
-never deletes data and records no host capacity sample in receipts. This status
-does not close T8 or its exit gate.
+never deletes data and records no host capacity sample in receipts. Opt-in
+schema 1.3 binds no-pull and disabled-swap runtime policy, requires bounded
+read-only daemon/context/local-image preflight before journal, snapshot,
+workspace, or container mutation, and seals privacy-bounded matching evidence
+in receipt v2. Delimiter/control/path regression tests reject ambiguous mount
+grammar without shell escaping. These are deterministic source-level facts,
+not native runtime qualification. This status does not close T8 or its exit
+gate.
+
+**T8-C closeout boundary:** schema policy, bounded preflight, receipt binding,
+and mount grammar are source-verified with deterministic fake ports. They do
+not replace exact-commit native receipts and independent verification for
+macOS/OrbStack, Linux/Docker, or Windows. Initial artifact-state evidence,
+inode reserve, and owned cache-total enforcement remain open T8 work. A
+Docker, OrbStack, CCP, container, network, or release claim must not be inferred
+from the source suite.
 
 Deliverables:
 

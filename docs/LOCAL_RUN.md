@@ -50,8 +50,9 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 
 ## Execution sequence
 
-1. Parse and normalize schema `1.0`, the explicit-environment schema `1.1`, or
-   schema `1.2` with its explicit storage-capacity policy.
+1. Parse and normalize schema `1.0`, the explicit-environment schema `1.1`,
+   schema `1.2` with its explicit storage-capacity policy, or opt-in schema
+   `1.3` with its explicit no-pull and disabled-swap policy.
 2. Perform bounded non-heavy setup required by the command: `run` resolves and
    initializes its selected cache, while `benchmark` may perform its optional
    runtime probe.
@@ -73,20 +74,32 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
    together with another pressure signal.
 6. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
    receipt output itself is excluded from this dirty check.
-7. For `run`, probe the Docker-compatible runtime with bounded output and deadline.
-8. For `run`, acquire the plan-generation workspace lock.
-9. For `run`, prepare only declared cache directories and artifact files.
-10. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
-11. For `run`, start the macOS watchdog before local check execution. It samples
+7. For schema `1.3` `run`, before any journal, source snapshot, workspace, or
+   container mutation, invoke exactly `docker info --format {{json .}}`,
+   `docker context show`, and `docker image inspect --format {{json .}}
+   <configured-pinned-image>`. Each has the bounded discovery environment,
+   five-second deadline, and 64 KiB capture limit. Require memory/swap
+   capability and exact local image resolution; digest the context then discard
+   its literal. A failure stops with no receipt.
+8. For historical `run`, probe the Docker-compatible runtime with bounded output
+   and deadline at the established historical point.
+9. For `run`, acquire the plan-generation workspace lock.
+10. For `run`, prepare only declared cache directories and artifact files.
+11. For `run`, render shell-free `docker run` argv with a pinned image and explicit limits.
+12. For `run`, start the macOS watchdog before local check execution. It samples
     every two seconds, cancels through the existing process supervisor on a
     hard trip or 15 consecutive compound soft samples (about 30 seconds), and
     joins before slot release. Compressor occupancy alone never cancels an
     otherwise healthy in-progress run.
     `benchmark` has no mid-workload watchdog in this tranche.
-12. Execute the `run` checks or benchmark workload with timeout, cancellation, and
+13. Execute the `run` checks or benchmark workload with timeout, cancellation, and
     stale-generation guards.
-13. Mark cache entries complete only when every check passes.
-14. Seal and atomically write the canonical receipt.
+14. Mark cache entries complete only when every check passes.
+15. Seal and atomically write the canonical receipt. For a schema `1.3`
+    snapshot-backed receipt v2, sealing requires the single captured runtime
+    capability evidence. It contains only two booleans, a context digest, image
+    ID, and exact configured image reference; no raw daemon/context output or
+    host identity is retained. Historical plans forbid this evidence.
 
 For `guard exec` on macOS, pass `--resource-profile <class>` and a stable
 `--resource-workload-family <cohort>` to classify an admitted workload without

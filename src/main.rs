@@ -55,14 +55,15 @@ use commit_ci_preflight::resource_history::{
 };
 use commit_ci_preflight::run::{
     Clock, CompletionBarrier, RunError, RunLifecycleObserver, RunLifecyclePhase, RunRequest,
-    SystemClock, execute_local_run_with_barrier_and_lifecycle,
+    SystemClock, execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight,
 };
 use commit_ci_preflight::run_journal::{
     RUN_JOURNAL_SCHEMA_VERSION, RecoveryStatusV1, RunFailureKindV1, RunJournalError,
     RunJournalStateV1, RunJournalStore,
 };
 use commit_ci_preflight::runtime::{
-    DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard, runtime_for,
+    DockerRuntimeCapabilityProbe, DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard,
+    preflight_runtime_capabilities, runtime_for,
 };
 use commit_ci_preflight::source_snapshot::{SourceSnapshot, resolve_clean_head};
 use commit_ci_preflight::storage::{SystemStorageProbe, preflight as preflight_storage};
@@ -863,6 +864,19 @@ fn print_run(
             .map_err(CliError::Run)?;
     }
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
+    let supervisor = Arc::new(ProcessSupervisor::standard());
+    let cancellation = CancellationToken::default();
+    install_cancellation_handler(&cancellation)?;
+    let runtime_preflight = preflight_runtime_capabilities(
+        &envelope,
+        runtime.as_ref(),
+        &DockerRuntimeCapabilityProbe,
+        supervisor.as_ref(),
+        &location.repository,
+        &cancellation,
+        &doctor_guard(&envelope),
+    )
+    .map_err(CliError::Runtime)?;
     let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
     let journal_id = new_journal_id(&envelope.plan_digest, generation)?;
     let journal_clock = SystemClock;
@@ -877,9 +891,6 @@ fn print_run(
         run_id: &journal_id,
         clock: &journal_clock,
     };
-    let supervisor = Arc::new(ProcessSupervisor::standard());
-    let cancellation = CancellationToken::default();
-    install_cancellation_handler(&cancellation)?;
     let source_identity = RunIdentity {
         project: envelope.plan.project.clone(),
         commit: None,
@@ -990,7 +1001,7 @@ fn print_run(
         None
     };
     let mut completion_barrier = WatchdogCompletionBarrier::new(watchdog);
-    let run_result = execute_local_run_with_barrier_and_lifecycle(
+    let run_result = execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight(
         &RunRequest {
             envelope: &envelope,
             repository: &location.repository,
@@ -1004,6 +1015,7 @@ fn print_run(
         &SystemClock,
         &mut completion_barrier,
         &mut lifecycle,
+        runtime_preflight,
     );
     let outcome = run_result.map_err(CliError::Run);
     completion_barrier.ensure_joined();

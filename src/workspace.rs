@@ -721,10 +721,21 @@ impl std::error::Error for ArtifactObservationError {
 }
 
 fn container_target(relative: &str) -> Result<String, WorkspaceError> {
-    if relative.is_empty() || relative.starts_with('/') || relative.contains('\\') {
+    if relative.is_empty()
+        || relative.starts_with('/')
+        || relative.contains('\\')
+        || relative.contains(',')
+        || relative.contains('=')
+        || relative.chars().any(char::is_control)
+        || !relative
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    {
         return Err(WorkspaceError::InvalidLogicalPath);
     }
-    Ok(format!("{CONTAINER_WORKSPACE}/{relative}"))
+    let target = format!("{CONTAINER_WORKSPACE}/{relative}");
+    validate_container_mount_target(&target)?;
+    Ok(target)
 }
 
 fn validate_under_root(path: &Path, root: &Path) -> Result<(), WorkspaceError> {
@@ -737,8 +748,33 @@ fn validate_under_root(path: &Path, root: &Path) -> Result<(), WorkspaceError> {
 
 pub fn validate_host_path(path: &Path) -> Result<(), WorkspaceError> {
     let text = path.to_str().ok_or(WorkspaceError::UnsupportedHostPath)?;
-    if text.contains(',') || text.chars().any(char::is_control) {
+    if text.contains(',') || text.contains('=') || text.chars().any(char::is_control) {
         return Err(WorkspaceError::UnsupportedHostPath);
+    }
+    Ok(())
+}
+
+pub fn validate_container_mount_target(target: &str) -> Result<(), WorkspaceError> {
+    if target.contains(',')
+        || target.contains('=')
+        || target.contains('\\')
+        || target.chars().any(char::is_control)
+    {
+        return Err(WorkspaceError::InvalidLogicalPath);
+    }
+    if target == CONTAINER_WORKSPACE {
+        return Ok(());
+    }
+    let relative = target
+        .strip_prefix(CONTAINER_WORKSPACE)
+        .and_then(|suffix| suffix.strip_prefix('/'))
+        .ok_or(WorkspaceError::InvalidLogicalPath)?;
+    if relative.is_empty()
+        || !relative
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+    {
+        return Err(WorkspaceError::InvalidLogicalPath);
     }
     Ok(())
 }
@@ -917,6 +953,38 @@ artifacts = ["target/results.json"]
             validate_host_path(Path::new("/safe/path,with-comma")),
             Err(WorkspaceError::UnsupportedHostPath)
         ));
+    }
+
+    #[test]
+    fn mount_grammar_rejects_host_delimiters_and_controls() {
+        for hostile in [
+            "/safe/path,with-comma",
+            "/safe/path=with-equals",
+            "/safe/path\nwith-newline",
+            "/safe/path\0with-nul",
+        ] {
+            assert!(matches!(
+                validate_host_path(Path::new(hostile)),
+                Err(WorkspaceError::UnsupportedHostPath)
+            ));
+        }
+    }
+
+    #[test]
+    fn container_target_rejects_ambiguous_or_escaping_logical_paths() {
+        for hostile in [
+            "safe,comma",
+            "safe=equals",
+            "safe\nnewline",
+            "safe/../escape",
+            "safe//empty",
+            "/absolute",
+        ] {
+            assert!(matches!(
+                container_target(hostile),
+                Err(WorkspaceError::InvalidLogicalPath)
+            ));
+        }
     }
 
     #[test]

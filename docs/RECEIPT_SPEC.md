@@ -79,6 +79,28 @@ field with this public plan. It rejects a mismatch before a PASS decision, while
 continuing to exclude fixed literal and secret values. This comparison does not
 establish cryptographic producer identity or host attestation.
 
+## Runtime-capability evidence in v2
+
+`runtime_capability_evidence` is an optional JSON member with a
+schema-dependent semantic requirement. It is **required** when the embedded
+execution plan has `schema_version = "1.3"`; it is **forbidden** for every
+historical plan schema. This keeps historical receipt bytes and meanings
+unchanged while making the v1.3 runtime claim inspectable.
+
+For a v1.3 plan, the evidence MUST contain `schema_version = "1.0"`,
+`memory_limit_supported = true`, `swap_limit_supported = true`, a canonical
+SHA-256 `context_digest`, a canonical SHA-256 `resolved_image_id`, and a
+`resolved_image_reference` exactly equal to the runtime image reference in the
+embedded plan. The receipt validator rejects a missing, malformed, mismatched,
+or historically unexpected evidence member.
+
+The evidence carries no Docker context literal, command output, daemon
+identity, host path, credential, or assurance that the host itself is trusted.
+It binds the declaration that the bounded preflight observed the required
+capabilities and pinned image metadata before the local run began. It is
+integrity evidence, not host attestation or a proof that a future runtime will
+retain those capabilities.
+
 ## Artifact-manifest evidence in v2
 
 `artifact_manifest` is backward-compatible as an empty or omitted field for a
