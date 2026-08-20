@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T5 outcome contract: cache promotion now returns an explicit
+  `CachePromotionOutcome` independent from check evidence; an empty cache set
+  is `not_attempted`, successful promotion is `promoted`, and filesystem
+  uncertainty remains an error rather than a false success.
 - T5 journal candidate: multi-cache promotion now records an owned,
   versioned journal before replacing any current generation, keeps backups
   until every entry is promoted, and recovers an interrupted prepared journal
