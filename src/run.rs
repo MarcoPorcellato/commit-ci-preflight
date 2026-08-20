@@ -34,13 +34,14 @@ use crate::receipt::{
     ReceiptEnvelopeV2, ReceiptError, ReceiptV1, ReceiptV2, RepositoryEvidence, RunEvidence,
     SourceSnapshotEvidence, SourceSnapshotStrategy, canonical_digest,
 };
-use crate::runtime::{RuntimeError, RuntimePort, docker_execution_environment, doctor_guard};
+use crate::runtime::{
+    RuntimeError, RuntimeExecutionContext, RuntimePort, docker_execution_environment, doctor_guard,
+};
 use crate::source_snapshot::{SourceSnapshot, SourceSnapshotError};
 use crate::workspace::{PreparedWorkspace, WorkspaceError};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_CAPTURE_BYTES: usize = 65_536;
-const CHECK_CAPTURE_BYTES: usize = 1_048_576;
 const REDACTION_POLICY_VERSION: &str = "ccp-redaction-v1";
 static RECEIPT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -346,16 +347,17 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         {
             not_run(declared, "dependency did not pass in this run")
         } else {
-            let process_request = ProcessRequest {
-                identity: identity.clone(),
-                program: OsString::from(rendered.program),
-                argv: rendered.argv.iter().map(OsString::from).collect(),
-                current_dir: execution_root.to_path_buf(),
-                environment: environment.clone(),
-                timeout: Duration::from_secs(declared.timeout_seconds),
-                max_capture_bytes: CHECK_CAPTURE_BYTES,
+            let execution_context = RuntimeExecutionContext {
+                execution_root,
+                environment: &environment,
+                identity: &identity,
+                run_id: &run_id,
+                supervisor,
+                cancellation,
+                generation: &generation,
+                timeout_seconds: declared.timeout_seconds,
             };
-            match supervisor.execute(&process_request, cancellation, &generation) {
+            match runtime.execute_check(declared, rendered, &execution_context) {
                 Ok(result)
                     if result.termination == ProcessTermination::Cancelled
                         && cancellation.reason() == Some(CancellationReason::ResourcePressure) =>
@@ -364,6 +366,11 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
                     not_run(declared, "host resource pressure watchdog tripped")
                 }
                 Ok(result) => evidence_from_result(declared, result)?,
+                Err(error @ RuntimeError::LifecycleFailure(_))
+                | Err(error @ RuntimeError::CleanupUncertain)
+                | Err(error @ RuntimeError::Process(ProcessError::CleanupUncertain { .. })) => {
+                    return Err(RunError::Runtime(error));
+                }
                 Err(_) => {
                     let reason =
                         if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
@@ -904,7 +911,7 @@ impl std::error::Error for RunError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
+    use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
 
     use crate::cache::{CacheRootOptions, PlatformFamily, ResolvedCacheRoot};
@@ -942,6 +949,7 @@ mod tests {
     struct FakeSupervisor {
         mode: ExecutionMode,
         docker_runs: AtomicU64,
+        containers: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
         git_revisions: AtomicU64,
     }
 
@@ -950,6 +958,7 @@ mod tests {
             Self {
                 mode,
                 docker_runs: AtomicU64::new(0),
+                containers: Mutex::new(BTreeMap::new()),
                 git_revisions: AtomicU64::new(0),
             }
         }
@@ -1026,27 +1035,138 @@ mod tests {
                     ProcessTermination::Completed,
                 ));
             }
-            let index = self.docker_runs.fetch_add(1, Ordering::SeqCst);
-            if matches!(self.mode, ExecutionMode::CancelDuringFirstCheck) && index == 0 {
-                cancellation.cancel_resource_pressure();
-                return Ok(process_result(
+            let command = request.argv.first().and_then(|argument| argument.to_str());
+            match command {
+                Some("create") => {
+                    let mut name = None;
+                    let mut labels = BTreeMap::new();
+                    let mut arguments = request.argv.iter();
+                    while let Some(argument) = arguments.next() {
+                        match argument.to_str() {
+                            Some("--name") => {
+                                name = arguments.next().and_then(|value| value.to_str())
+                            }
+                            Some("--label") => {
+                                if let Some((key, value)) = arguments
+                                    .next()
+                                    .and_then(|value| value.to_str())
+                                    .and_then(|value| value.split_once('='))
+                                {
+                                    labels.insert(key.to_owned(), value.to_owned());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.containers
+                        .lock()
+                        .expect("containers")
+                        .insert(name.expect("container name").to_owned(), labels);
+                    Ok(process_result(
+                        request,
+                        format!("{}\n", "a".repeat(64)).into_bytes(),
+                        true,
+                        ProcessTermination::Completed,
+                    ))
+                }
+                Some("start" | "stop" | "kill") => Ok(process_result(
                     request,
-                    b"resource-pressure".to_vec(),
-                    false,
-                    ProcessTermination::Cancelled,
-                ));
+                    Vec::new(),
+                    true,
+                    ProcessTermination::Completed,
+                )),
+                Some("rm") => {
+                    let name = request
+                        .argv
+                        .last()
+                        .and_then(|argument| argument.to_str())
+                        .expect("container name");
+                    self.containers.lock().expect("containers").remove(name);
+                    Ok(process_result(
+                        request,
+                        Vec::new(),
+                        true,
+                        ProcessTermination::Completed,
+                    ))
+                }
+                Some("inspect") => {
+                    let name = request
+                        .argv
+                        .last()
+                        .and_then(|argument| argument.to_str())
+                        .expect("container name");
+                    let labels = self
+                        .containers
+                        .lock()
+                        .expect("containers")
+                        .get(name)
+                        .cloned();
+                    if let Some(labels) = labels {
+                        let inspect = serde_json::json!({
+                            "Name": format!("/{name}"),
+                            "Config": {"Labels": labels},
+                            "State": {"Status": "running"},
+                        });
+                        Ok(process_result(
+                            request,
+                            serde_json::to_vec(&inspect).expect("inspect JSON"),
+                            true,
+                            ProcessTermination::Completed,
+                        ))
+                    } else {
+                        Ok(process_result(
+                            request,
+                            b"Error: No such container\n".to_vec(),
+                            false,
+                            ProcessTermination::Completed,
+                        ))
+                    }
+                }
+                Some("attach") => {
+                    let index = self.docker_runs.fetch_add(1, Ordering::SeqCst);
+                    if matches!(self.mode, ExecutionMode::CancelDuringFirstCheck) && index == 0 {
+                        cancellation.cancel_resource_pressure();
+                        return Ok(process_result(
+                            request,
+                            b"resource-pressure".to_vec(),
+                            false,
+                            ProcessTermination::Cancelled,
+                        ));
+                    }
+                    let termination =
+                        if matches!(self.mode, ExecutionMode::TimeoutFirst) && index == 0 {
+                            ProcessTermination::TimedOut
+                        } else {
+                            ProcessTermination::Completed
+                        };
+                    Ok(process_result(
+                        request,
+                        format!("fixture-output-{index}").into_bytes(),
+                        true,
+                        termination,
+                    ))
+                }
+                Some("wait") => {
+                    let index = self.docker_runs.load(Ordering::SeqCst).saturating_sub(1);
+                    let exit_code = if matches!(self.mode, ExecutionMode::FailFirst) && index == 0 {
+                        9
+                    } else {
+                        0
+                    };
+                    Ok(process_result(
+                        request,
+                        format!("{exit_code}\n").into_bytes(),
+                        true,
+                        ProcessTermination::Completed,
+                    ))
+                }
+                _ => Ok(process_result(
+                    request,
+                    b"fixture-runtime-command\n".to_vec(),
+                    true,
+                    ProcessTermination::Completed,
+                )),
             }
-            let (success, termination) = match (self.mode, index) {
-                (ExecutionMode::FailFirst, 0) => (false, ProcessTermination::Completed),
-                (ExecutionMode::TimeoutFirst, 0) => (false, ProcessTermination::TimedOut),
-                _ => (true, ProcessTermination::Completed),
-            };
-            Ok(process_result(
-                request,
-                format!("fixture-output-{index}").into_bytes(),
-                success,
-                termination,
-            ))
         }
     }
 
