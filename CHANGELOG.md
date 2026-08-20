@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added vendor-neutral coding-harness reference documentation: a common CCP
+  contract, evidence matrix, fourteen truthful L0/L1 harness pages, activity
+  handoff template, and a deterministic public-boundary contract test. No page
+  claims native harness verification or changes global harness configuration.
 - Added a canonical programme execution ledger that distinguishes implemented,
   qualified, and released states; protects divergent local Receipt v2 work;
   and orders reliability, environment, harness, cost, platform, and stable

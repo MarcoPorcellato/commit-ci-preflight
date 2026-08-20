@@ -163,9 +163,11 @@ recorded as MANUAL_REFERENCE_ONLY, not as an automatic integration.
 
 ## 7. Initial harness inventory
 
-The inventory below is an upstream coverage snapshot, not a claim that CCP has
-tested these environments. It tracks the current Superpowers README list as of
-2026-08-20.
+The inventory below is a historical planning snapshot, not a claim that CCP has
+tested these environments. The implementation matrix in
+[`docs/agent-integrations/COMPATIBILITY_MATRIX.md`](../../agent-integrations/COMPATIBILITY_MATRIX.md)
+is authoritative for current public L0/L1 wording, because upstream delivery
+surfaces can change after this design is merged.
 
 | Harness | Initial upstream knowledge | Initial CCP level |
 |---|---|---|
