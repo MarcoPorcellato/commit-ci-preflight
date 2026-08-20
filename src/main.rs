@@ -847,6 +847,9 @@ fn print_run(
         return print_matrix_run(path, location, generation, admission_timeout_seconds, json);
     }
     let envelope = load_plan(path)?;
+    if !envelope.plan.environment.remote_secret_only.is_empty() {
+        return Err(CliError::Run(RunError::RemoteSecretOnly));
+    }
     let root = resolve_cache_root(location)?;
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;

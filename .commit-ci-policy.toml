@@ -1,6 +1,6 @@
 schema_version = "1.0"
 project = "MarcoPorcellato/commit-ci-preflight"
-configuration_digest = "sha256:95faba9bc158f3d3b246bbf8db9a96a11a2ee6c7a32284aea5700554884fe55f"
+configuration_digest = "sha256:bc348df299ee58ecc8f7cfc7f2dc743b5c03f1a90f7e5dbff45754017955e901"
 required_checks = ["clippy", "docs", "format", "release-metadata", "test"]
 image_reference = "docker.io/library/rust@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc"
 max_age_seconds = 86400

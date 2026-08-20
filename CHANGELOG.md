@@ -130,6 +130,12 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Added schema `1.1` explicit environment classes for single-runtime plans:
+  fixed non-secret values are digest-bound and fail closed on a missing or
+  altered private binding, runtime-internal values derive only from declared
+  cache IDs, and remote-secret-only plans reject local attestation before
+  admission. The repository Rust preflight now uses cache-backed bindings
+  without host-path exports; trusted receipt-plan reconstruction remains T7.
 - Refreshed the reliability-hardening checkpoint after T2 conflict resolution:
   draft PR #40 is stacked on PR #39, its exact-head qualification remains
   pending when the local CCP control plane reports `unknown`, and the previous

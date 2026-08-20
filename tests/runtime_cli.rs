@@ -84,6 +84,55 @@ fn host_doctor_fails_with_runtime_exit_code_before_spawning() {
 }
 
 #[test]
+fn remote_secret_only_run_fails_before_cache_or_admission_setup() {
+    let root = std::env::temp_dir().join(format!("ccp-remote-secret-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("owned fixture root");
+    let config_path = root.join("remote-secret.toml");
+    fs::write(
+        &config_path,
+        r#"
+schema_version = "1.1"
+project = "example/project"
+
+[runtime]
+kind = "docker_compatible"
+image = "registry.example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 64
+pids_limit = 1
+
+[environment]
+remote_secret_only = ["DEPLOY_TOKEN"]
+
+[[checks]]
+id = "never-run"
+required = true
+argv = ["false"]
+working_directory = "."
+timeout_seconds = 1
+"#,
+    )
+    .expect("config fixture");
+    let cache_dir = root.join("cache");
+
+    let output = Command::new(binary())
+        .args(["run", "--config"])
+        .arg(&config_path)
+        .args(["--repository"])
+        .arg(&root)
+        .args(["--cache-dir"])
+        .arg(&cache_dir)
+        .output()
+        .expect("run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("remote-secret-only"));
+    assert!(!cache_dir.exists());
+    fs::remove_dir_all(root).expect("remove owned fixture root");
+}
+
+#[test]
 fn dry_run_human_output_states_that_argv_is_not_a_shell_and_was_not_run() {
     let output = Command::new(binary())
         .args(["dry-run", "--config"])

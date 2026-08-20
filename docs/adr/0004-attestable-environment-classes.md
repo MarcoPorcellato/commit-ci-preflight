@@ -1,14 +1,14 @@
 # ADR 0004: Attestable environment classes
 
-- Status: Accepted for T7/T8 implementation; no configuration migration is
-  implied by this ADR alone
+- Status: Implemented for schema `1.1` normalization and local runtime
+  enforcement; trusted verifier binding remains T7
 - Tranche: T7 trusted-plan binding and T8 environment/resource contracts
 - Date: 2026-08-20
 - Decision owner: Marco Porcellato
 
 ## Context
 
-The current configuration accepts `environment.allow`: names are normalized and
+Legacy configuration accepts `environment.allow`: names are normalized and
 the Docker runtime copies the corresponding values from the host process. This
 is explicit name allowlisting, but not a complete attestable environment
 contract. In particular, the repository's own containerized Rust preflight uses
@@ -25,8 +25,8 @@ trusted-plan reconstruction.
 
 ## Decision
 
-Attestable configuration v2 will replace host-value inheritance with three
-explicit classes. The normalized environment contract is a normative field of
+Schema `1.1` adds three explicit environment classes without reusing the
+separate matrix schema version `2.0`. The normalized environment contract is a normative field of
 the trusted execution plan; its canonical digest is bound to receipt v2 and
 reconstructed by the trusted verifier.
 
@@ -51,16 +51,16 @@ cache IDs rather than requiring process exports.
 host variable as a passing empty value. It preserves the remote protected-job
 boundary and makes an attempted local receipt `PENDING`/non-PASS.
 
-Configuration v1 remains parseable for compatibility. Its `environment.allow`
-semantics are legacy host inheritance and cannot be promoted to a v2
+Configuration `1.0` remains parseable for compatibility. Its `environment.allow`
+semantics are legacy host inheritance and cannot be promoted to a `1.1`
 attestable-environment claim. Migration must be explicit, deterministic,
 diff-first, and reversible; no automatic rewrite of a user configuration is
 allowed.
 
 ## Verification and privacy
 
-The verifier loads the trusted config and policy from the trusted base,
-normalizes the v2 environment contract independently, and compares its digest
+The future verifier loads the trusted config and policy from the trusted base,
+normalizes the `1.1` environment contract independently, and compares its digest
 and complete normative plan binding against the receipt. It does not read host
 environment variables and does not need their values from untrusted evidence.
 
@@ -82,7 +82,7 @@ Benefits:
 
 Costs:
 
-- configuration schema and plan compatibility require a deliberate v2 path;
+- configuration schema and plan compatibility require a deliberate `1.1` path;
 - T7 must reconstruct the plan before T8 can claim a complete binding;
 - legacy configurations remain supported but carry a weaker, explicit status;
 - arbitrary dynamic environment injection remains unsupported.
@@ -103,7 +103,7 @@ Costs:
 ## Implementation gates
 
 1. Characterization tests show that changed host values cannot silently affect
-   a v2 attestable plan.
+   a `1.1` attestable plan.
 2. Golden tests prove deterministic cache-ID-to-container-target resolution and
    rejection of missing, duplicate, or incompatible cache references.
 3. Receipt v2 and verifier tests reject every changed environment class,

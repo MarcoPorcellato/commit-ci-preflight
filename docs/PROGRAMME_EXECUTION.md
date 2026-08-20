@@ -37,29 +37,26 @@ adopts nor validates it.
 | Order | Workstream | Current evidence | Next source slice | Qualification or authority gate |
 | --- | --- | --- | --- | --- |
 | P0 | Baseline reconciliation | PR 57 design is merged at the local anchor; historical plans contain older anchors and candidate-only language. | Reconcile dated anchors and closed/superseded milestones when a clean current branch is available. | Live remote, open-PR, and exact-head recheck before publication. |
-| P1 | Environment and plan truthfulness | `environment.allow` carries names only; the runtime inherits an allowlisted host value. The repository Rust preflight needs `CARGO_HOME`, `CARGO_TARGET_DIR`, and `RUSTUP_HOME` to agree with mounted managed caches. | T8 environment classes and trusted-plan binding: fixed, runtime-internal, and remote-secret-only values. | T7/T8 golden vectors must prove a changed normative field fails verification. No secret value enters a receipt. |
+| P1 | Environment and plan truthfulness | Schema `1.1` now distinguishes fixed, runtime-internal, and remote-secret-only values. The repository Rust preflight derives Cargo/Rustup paths from declared cache IDs and rejects missing or altered fixed bindings. | Complete T7 trusted-plan reconstruction and independent receipt comparison for every normalized environment field. | T7 golden vectors must prove a changed normative field fails verification. No secret value enters a receipt. |
 | P2 | Receipt v2 and immutable source | T2/T3/T4/T5/T6 candidate work is described, but qualification is candidate-specific and must not be inherited. | Integrate the independently preserved Receipt v2 work only after conflict review; complete T7 plan reconstruction. | Fresh exact-head receipt, independent verifier, cleanup evidence, and required native evidence. |
 | P3 | Reliability P0/P1 closure | T0-T6 have candidate source progress; T7-T11 retain required work. | Ordered T7, T8, T9, T10, then T11; do not add unrelated runtime features. | Every tranche meets its own deterministic and native exit criteria in the reliability plan. |
 | P4 | One-command adoption | Existing docs describe safe manual commands and receipt publication mechanics. | Product PR 5 and PR 6: deterministic `check`, `init`, adoption proposal, GitHub setup, and transactional publication. | Clean-room Rust, Python, and Node proof; source/ref mutation tests in isolated local bare repositories. |
 | P5 | Receipt-first remote cost reduction | The A0 remote gate and exact-receipt model exist; cost reduction must remain measured, not promised. | Product PR 2-3 verifier split and slim trusted gate, then PR 7 local-only cost reports. | Immutable verifier identity, bounded remote gate, golden cost fixtures, and current official pricing data. |
-| P6 | Multi-harness reference | The vendor-neutral design is merged. All listed harnesses are L1 only. | Add common contract, compatibility matrix, fourteen L1 pages, reusable handoff, and static documentation checks. | L2-L4 only after a dated, sanitized fresh-session record; no global harness configuration is modified by CCP. |
+| P6 | Multi-harness reference | The vendor-neutral common contract, compatibility matrix, fourteen L1 pages, reusable handoff, and static documentation check are present. No page claims native verification. | Collect only consented, sanitized L2 evidence where it materially improves adoption; otherwise retain the L1 boundary. | L2-L4 only after a dated, sanitized fresh-session record; no global harness configuration is modified by CCP. |
 | P7 | Distribution and platforms | No stable package, signing identity, or cross-platform claim is inferred from source. | Product PR 4 then PR 8: distribution design and genuine Linux x86_64 qualification. | Explicit owner authorization for signing/registries; real native receipts for each promoted platform. |
 | P8 | Assurance and stable release | A0 is the only present assurance claim. | Product PR 9 A1 design/implementation and PR 10 external evidence. | Separate signing authority, three consented case studies or a reviewed roadmap change, and all stable-release criteria. |
 
 ## Near-term execution order
 
-1. **T7/T8 boundary ADR and contract tests.** Specify how a value becomes a
-   fixed trusted value, a deterministic runtime-internal value, or a remote-only
-   secret. The current Rust-cache export failure is a regression fixture, not a
-   reason to silently invent operator inputs.
+1. **T7 trusted-plan reconstruction.** Bind the normalized schema `1.1`
+   environment contract to receipt v2 and make an independent verifier reject
+   every changed normative field. The local runtime contract is implemented,
+   but is not yet independently reconstructible.
 2. **Receipt v2 integration review.** Rebase or reconcile the protected local
    work in a dedicated branch. Preserve v1 parsing and historic fixtures.
-3. **T7 trusted-plan reconstruction.** Make verifier comparison field-complete
-   before adding convenience automation that depends on plan semantics.
-4. **T8 implementation.** Add declared environment classes, artifact manifests,
-   disk/runtime capability contracts, and deterministic tests. The Rust-cache
-   default becomes runtime-internal only if its container target is declared in
-   the normalized plan and independently verified.
+3. **Complete T8 resource contracts.** Add the remaining artifact manifests,
+   disk/runtime capability contracts, and deterministic tests. Keep the
+   cache-backed Rust default limited to the declared normalized target.
 5. **Multi-harness L1 documentation tranche.** This is documentation-only and
    can proceed in parallel once the common contract is linked to the current
    admission ownership rules.

@@ -27,6 +27,7 @@ use crate::process::{
     CancellationToken, CleanupStatus, GenerationGuard, ProcessError, ProcessRequest, ProcessResult,
     ProcessTermination, RunIdentity, SupervisorPort,
 };
+use crate::receipt::canonical_digest;
 use crate::workspace::{MountAccess, WorkspaceError, WorkspacePlanV1, validate_host_path};
 
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
@@ -130,6 +131,7 @@ impl RuntimePort for DockerCompatibleRuntime {
         envelope: &ExecutionPlanEnvelopeV1,
         workspace: &WorkspacePlanV1,
     ) -> Result<DryRunPlan, RuntimeError> {
+        validate_fixed_environment(envelope)?;
         let checks = envelope
             .plan
             .checks
@@ -138,7 +140,7 @@ impl RuntimePort for DockerCompatibleRuntime {
                 docker_dry_run_check(
                     &envelope.plan.runtime,
                     check,
-                    &envelope.plan.environment_allow,
+                    &envelope.plan.environment.names(),
                     workspace,
                 )
             })
@@ -396,14 +398,68 @@ fn runtime_environment() -> BTreeMap<OsString, OsString> {
         .collect()
 }
 
-pub fn docker_execution_environment(allowed_names: &[String]) -> BTreeMap<OsString, OsString> {
+pub fn docker_execution_environment(
+    envelope: &ExecutionPlanEnvelopeV1,
+) -> Result<BTreeMap<OsString, OsString>, RuntimeError> {
     let mut environment = runtime_environment();
-    for name in allowed_names {
+    for name in &envelope.plan.environment.inherit {
         if let Some(value) = std::env::var_os(name) {
             environment.insert(OsString::from(name), value);
         }
     }
-    environment
+    for (name, value) in validate_fixed_environment(envelope)? {
+        environment.insert(OsString::from(name), OsString::from(value));
+    }
+    for binding in &envelope.plan.environment.runtime_internal {
+        environment.insert(
+            OsString::from(&binding.name),
+            OsString::from(&binding.container_target),
+        );
+    }
+    Ok(environment)
+}
+
+fn validate_fixed_environment(
+    envelope: &ExecutionPlanEnvelopeV1,
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    let declared = envelope
+        .plan
+        .environment
+        .fixed
+        .iter()
+        .map(|binding| (binding.name.as_str(), binding.value_digest.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    for name in envelope.fixed_environment.keys() {
+        if !declared.contains_key(name.as_str()) {
+            return Err(RuntimeError::FixedEnvironmentBinding {
+                name: name.clone(),
+                reason: "is not declared in the normalized plan",
+            });
+        }
+    }
+    let mut values = BTreeMap::new();
+    for binding in &envelope.plan.environment.fixed {
+        let value = envelope
+            .fixed_environment
+            .get(&binding.name)
+            .ok_or_else(|| RuntimeError::FixedEnvironmentBinding {
+                name: binding.name.clone(),
+                reason: "is missing from the private envelope",
+            })?;
+        let actual =
+            canonical_digest(value).map_err(|_| RuntimeError::FixedEnvironmentBinding {
+                name: binding.name.clone(),
+                reason: "cannot be canonically digested",
+            })?;
+        if actual != binding.value_digest {
+            return Err(RuntimeError::FixedEnvironmentBinding {
+                name: binding.name.clone(),
+                reason: "does not match the normalized plan digest",
+            });
+        }
+        values.insert(binding.name.clone(), value.clone());
+    }
+    Ok(values)
 }
 
 fn docker_dry_run_check(
@@ -753,6 +809,7 @@ pub enum RuntimeError {
     CleanupUncertain,
     InvalidProbe(&'static str),
     LifecycleFailure(&'static str),
+    FixedEnvironmentBinding { name: String, reason: &'static str },
     Workspace(WorkspaceError),
     Process(ProcessError),
 }
@@ -765,6 +822,7 @@ impl RuntimeError {
             Self::Workspace(_) => 2,
             Self::CleanupUncertain
             | Self::LifecycleFailure(_)
+            | Self::FixedEnvironmentBinding { .. }
             | Self::Process(ProcessError::CleanupUncertain { .. }) => 70,
             Self::Process(ProcessError::StaleGeneration) => 5,
             Self::Process(_) => 70,
@@ -784,6 +842,9 @@ impl fmt::Display for RuntimeError {
             Self::LifecycleFailure(message) => {
                 write!(formatter, "runtime lifecycle failed: {message}")
             }
+            Self::FixedEnvironmentBinding { name, reason } => {
+                write!(formatter, "fixed environment binding {name:?} {reason}")
+            }
             Self::Workspace(error) => write!(formatter, "invalid workspace plan: {error}"),
             Self::Process(error) => write!(formatter, "{error}"),
         }
@@ -801,7 +862,8 @@ impl std::error::Error for RuntimeError {
             | Self::Cancelled
             | Self::CleanupUncertain
             | Self::InvalidProbe(_)
-            | Self::LifecycleFailure(_) => None,
+            | Self::LifecycleFailure(_)
+            | Self::FixedEnvironmentBinding { .. } => None,
         }
     }
 }
@@ -841,6 +903,98 @@ timeout_seconds = 60
             .expect("config")
             .into_plan()
             .expect("plan")
+    }
+
+    #[test]
+    fn v1_1_runtime_internal_environment_uses_declared_cache_target() {
+        let envelope = ConfigV1::parse(
+            r#"
+schema_version = "1.1"
+project = "owner/project"
+
+[runtime]
+kind = "docker_compatible"
+image = "registry.example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 2
+memory_mib = 256
+pids_limit = 64
+
+[environment.fixed]
+SOURCE_DATE_EPOCH = "0"
+
+[[environment.runtime_internal]]
+name = "CARGO_HOME"
+cache_id = "cargo-home"
+
+[[caches]]
+id = "cargo-home"
+mount_path = ".ccp-mounts/cargo-home"
+
+[[checks]]
+id = "format"
+required = true
+argv = ["cargo", "fmt", "--check"]
+working_directory = "."
+timeout_seconds = 60
+"#,
+        )
+        .expect("config")
+        .into_plan()
+        .expect("plan");
+
+        let environment = docker_execution_environment(&envelope).expect("environment");
+        assert_eq!(
+            environment.get(&OsString::from("CARGO_HOME")),
+            Some(&OsString::from("/workspace/.ccp-mounts/cargo-home"))
+        );
+        assert_eq!(
+            environment.get(&OsString::from("SOURCE_DATE_EPOCH")),
+            Some(&OsString::from("0"))
+        );
+    }
+
+    #[test]
+    fn fixed_environment_binding_must_be_present_and_match_its_plan_digest() {
+        let mut envelope = ConfigV1::parse(
+            r#"
+schema_version = "1.1"
+project = "owner/project"
+
+[runtime]
+kind = "docker_compatible"
+image = "registry.example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 2
+memory_mib = 256
+pids_limit = 64
+
+[environment.fixed]
+SOURCE_DATE_EPOCH = "0"
+
+[[checks]]
+id = "format"
+required = true
+argv = ["cargo", "fmt", "--check"]
+working_directory = "."
+timeout_seconds = 60
+"#,
+        )
+        .expect("config")
+        .into_plan()
+        .expect("plan");
+
+        envelope.fixed_environment.remove("SOURCE_DATE_EPOCH");
+        assert!(matches!(
+            docker_execution_environment(&envelope),
+            Err(RuntimeError::FixedEnvironmentBinding { name, .. }) if name == "SOURCE_DATE_EPOCH"
+        ));
+
+        envelope
+            .fixed_environment
+            .insert("SOURCE_DATE_EPOCH".to_owned(), "1".to_owned());
+        assert!(matches!(
+            docker_execution_environment(&envelope),
+            Err(RuntimeError::FixedEnvironmentBinding { name, .. }) if name == "SOURCE_DATE_EPOCH"
+        ));
     }
 
     fn workspace(envelope: &ExecutionPlanEnvelopeV1) -> WorkspacePlanV1 {

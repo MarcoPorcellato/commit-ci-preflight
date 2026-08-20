@@ -146,6 +146,32 @@ fn repository_policy_matches_the_normalized_local_plan() {
     );
 }
 
+#[test]
+fn repository_preflight_declares_cache_backed_runtime_environment() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let plan = ConfigV1::load(&root.join(".commit-ci-preflight.toml"))
+        .and_then(ConfigV1::into_plan)
+        .expect("repository plan");
+
+    assert_eq!(plan.plan.schema_version, "1.1");
+    assert!(plan.plan.environment.inherit.is_empty());
+    assert!(plan.plan.environment.fixed.is_empty());
+    assert!(plan.plan.environment.remote_secret_only.is_empty());
+    assert_eq!(
+        plan.plan
+            .environment
+            .runtime_internal
+            .iter()
+            .map(|binding| (binding.name.as_str(), binding.cache_id.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("CARGO_HOME", "cargo-home"),
+            ("CARGO_TARGET_DIR", "cargo-target"),
+            ("RUSTUP_HOME", "rustup-home"),
+        ]
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn gate_script_renders_a_deterministic_passing_summary() {

@@ -87,6 +87,16 @@ impl Default for ReceiptConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct EnvironmentConfig {
     pub allow: Vec<String>,
+    pub fixed: BTreeMap<String, String>,
+    pub runtime_internal: Vec<RuntimeInternalEnvironmentConfig>,
+    pub remote_secret_only: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeInternalEnvironmentConfig {
+    pub name: String,
+    pub cache_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -114,6 +124,8 @@ pub struct CheckConfig {
 pub struct ExecutionPlanEnvelopeV1 {
     pub plan_digest: String,
     pub plan: ExecutionPlanV1,
+    #[serde(skip)]
+    pub fixed_environment: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -122,7 +134,7 @@ pub struct ExecutionPlanV1 {
     pub project: String,
     pub runtime: NormalizedRuntime,
     pub receipt: NormalizedReceipt,
-    pub environment_allow: Vec<String>,
+    pub environment: NormalizedEnvironment,
     pub caches: Vec<NormalizedCache>,
     pub checks: Vec<NormalizedCheck>,
 }
@@ -141,6 +153,41 @@ pub struct NormalizedRuntime {
 pub struct NormalizedReceipt {
     pub output: String,
     pub freshness_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NormalizedEnvironment {
+    pub inherit: Vec<String>,
+    pub fixed: Vec<NormalizedFixedEnvironment>,
+    pub runtime_internal: Vec<NormalizedRuntimeInternalEnvironment>,
+    pub remote_secret_only: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NormalizedFixedEnvironment {
+    pub name: String,
+    pub value_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NormalizedRuntimeInternalEnvironment {
+    pub name: String,
+    pub cache_id: String,
+    pub container_target: String,
+}
+
+impl NormalizedEnvironment {
+    pub fn names(&self) -> Vec<String> {
+        let mut names = self.inherit.clone();
+        names.extend(self.fixed.iter().map(|binding| binding.name.clone()));
+        names.extend(
+            self.runtime_internal
+                .iter()
+                .map(|binding| binding.name.clone()),
+        );
+        names.sort();
+        names
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -192,12 +239,10 @@ impl ConfigV1 {
 
     pub fn into_plan(self) -> Result<ExecutionPlanEnvelopeV1, ConfigError> {
         self.validate_top_level()?;
-        let environment_allow = unique_sorted(
-            "environment.allow",
-            self.environment.allow,
-            validate_environment_name,
-        )?;
+        let schema_version = self.schema_version.clone();
+        let fixed_environment = self.environment.fixed.clone();
         let caches = normalize_caches(self.caches)?;
+        let environment = normalize_environment(&schema_version, self.environment, &caches)?;
         let checks = normalize_checks(self.checks)?;
         let receipt = NormalizedReceipt {
             output: self.receipt.output,
@@ -205,7 +250,7 @@ impl ConfigV1 {
         };
         validate_path_isolation(&receipt, &caches, &checks)?;
         let plan = ExecutionPlanV1 {
-            schema_version: self.schema_version,
+            schema_version,
             project: self.project,
             runtime: NormalizedRuntime {
                 kind: self.runtime.kind,
@@ -216,16 +261,20 @@ impl ConfigV1 {
                 network: self.runtime.network,
             },
             receipt,
-            environment_allow,
+            environment,
             caches,
             checks,
         };
         let plan_digest = canonical_digest(&plan).map_err(ConfigError::Receipt)?;
-        Ok(ExecutionPlanEnvelopeV1 { plan_digest, plan })
+        Ok(ExecutionPlanEnvelopeV1 {
+            plan_digest,
+            plan,
+            fixed_environment,
+        })
     }
 
     fn validate_top_level(&self) -> Result<(), ConfigError> {
-        if self.schema_version != CONFIG_SCHEMA_VERSION {
+        if self.schema_version != CONFIG_SCHEMA_VERSION && self.schema_version != "1.1" {
             return Err(ConfigError::UnsupportedSchemaVersion(
                 self.schema_version.clone(),
             ));
@@ -549,6 +598,86 @@ fn validate_environment_name(value: &str) -> Result<(), ConfigError> {
     }
 }
 
+fn normalize_environment(
+    schema_version: &str,
+    environment: EnvironmentConfig,
+    caches: &[NormalizedCache],
+) -> Result<NormalizedEnvironment, ConfigError> {
+    let inherit = unique_sorted(
+        "environment.allow",
+        environment.allow,
+        validate_environment_name,
+    )?;
+    let remote_secret_only = unique_sorted(
+        "environment.remote_secret_only",
+        environment.remote_secret_only,
+        validate_environment_name,
+    )?;
+    if schema_version == CONFIG_SCHEMA_VERSION
+        && (!environment.fixed.is_empty()
+            || !environment.runtime_internal.is_empty()
+            || !remote_secret_only.is_empty())
+    {
+        return Err(ConfigError::InvalidField("environment"));
+    }
+    if schema_version == "1.1" && !inherit.is_empty() {
+        return Err(ConfigError::InvalidField("environment.allow"));
+    }
+
+    let mut names = BTreeSet::new();
+    for name in &inherit {
+        names.insert(name.clone());
+    }
+    let mut fixed = Vec::with_capacity(environment.fixed.len());
+    for (name, value) in environment.fixed {
+        validate_environment_name(&name)?;
+        validate_text("environment.fixed", &value)?;
+        if !names.insert(name.clone()) {
+            return Err(ConfigError::DuplicateValue("environment"));
+        }
+        fixed.push(NormalizedFixedEnvironment {
+            value_digest: canonical_digest(&value).map_err(ConfigError::Receipt)?,
+            name,
+        });
+    }
+    let cache_targets = caches
+        .iter()
+        .map(|cache| (cache.id.as_str(), cache.mount_path.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut runtime_internal = Vec::with_capacity(environment.runtime_internal.len());
+    for binding in environment.runtime_internal {
+        validate_environment_name(&binding.name)?;
+        validate_identifier("environment.runtime_internal.cache_id", &binding.cache_id)?;
+        if !names.insert(binding.name.clone()) {
+            return Err(ConfigError::DuplicateValue("environment"));
+        }
+        let mount_path = cache_targets
+            .get(binding.cache_id.as_str())
+            .ok_or_else(|| ConfigError::UnknownEnvironmentCache {
+                name: binding.name.clone(),
+                cache_id: binding.cache_id.clone(),
+            })?;
+        runtime_internal.push(NormalizedRuntimeInternalEnvironment {
+            name: binding.name,
+            cache_id: binding.cache_id,
+            container_target: format!("/workspace/{mount_path}"),
+        });
+    }
+    for name in &remote_secret_only {
+        if !names.insert(name.clone()) {
+            return Err(ConfigError::DuplicateValue("environment"));
+        }
+    }
+    fixed.sort_by(|left, right| left.name.cmp(&right.name));
+    runtime_internal.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(NormalizedEnvironment {
+        inherit,
+        fixed,
+        runtime_internal,
+        remote_secret_only,
+    })
+}
+
 fn validate_repository_identity(value: &str) -> Result<(), ConfigError> {
     let mut segments = value.split('/');
     let owner = segments.next().unwrap_or_default();
@@ -663,6 +792,10 @@ pub enum ConfigError {
         check: String,
         dependency: String,
     },
+    UnknownEnvironmentCache {
+        name: String,
+        cache_id: String,
+    },
     DependencyCycle(Vec<String>),
     PlanDigestMismatch,
 }
@@ -694,6 +827,10 @@ impl fmt::Display for ConfigError {
             Self::InvalidField(field) => {
                 write!(formatter, "invalid configuration field: {field}")
             }
+            Self::UnknownEnvironmentCache { name, cache_id } => write!(
+                formatter,
+                "runtime-internal environment {name} references unknown cache {cache_id}"
+            ),
             Self::OutOfRange {
                 field,
                 minimum,
@@ -916,6 +1053,76 @@ depends_on = [{dependencies}]
         assert!(matches!(
             ConfigV1::parse(&duplicate).and_then(ConfigV1::into_plan),
             Err(ConfigError::DuplicateValue("environment.allow"))
+        ));
+    }
+
+    #[test]
+    fn v1_1_environment_classes_normalize_without_host_inheritance() {
+        let input = r#"
+schema_version = "1.1"
+project = "owner/project"
+
+[runtime]
+kind = "docker_compatible"
+image = "registry.example/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 2
+memory_mib = 256
+pids_limit = 64
+
+[environment]
+remote_secret_only = ["DEPLOY_TOKEN"]
+
+[environment.fixed]
+SOURCE_DATE_EPOCH = "0"
+
+[[environment.runtime_internal]]
+name = "CARGO_HOME"
+cache_id = "cargo-home"
+
+[[caches]]
+id = "cargo-home"
+mount_path = ".ccp-mounts/cargo-home"
+
+[[checks]]
+id = "format"
+required = true
+argv = ["cargo", "fmt", "--check"]
+working_directory = "."
+timeout_seconds = 60
+"#;
+
+        let plan = ConfigV1::parse(input)
+            .and_then(ConfigV1::into_plan)
+            .expect("v1.1 environment plan");
+
+        assert!(plan.plan.environment.inherit.is_empty());
+        assert_eq!(plan.plan.environment.fixed.len(), 1);
+        assert_eq!(plan.plan.environment.runtime_internal.len(), 1);
+        assert_eq!(
+            plan.plan.environment.runtime_internal[0].container_target,
+            "/workspace/.ccp-mounts/cargo-home"
+        );
+        assert_eq!(
+            plan.plan.environment.remote_secret_only,
+            vec!["DEPLOY_TOKEN".to_owned()]
+        );
+        assert!(
+            !plan
+                .canonical_bytes()
+                .expect("public plan bytes")
+                .windows(b"SOURCE_DATE_EPOCH=0".len())
+                .any(|window| window == b"SOURCE_DATE_EPOCH=0")
+        );
+    }
+
+    #[test]
+    fn v1_1_runtime_internal_unknown_cache_fails_closed() {
+        let input = valid_config(&check("format", &[]))
+            .replace("schema_version = \"1.0\"", "schema_version = \"1.1\"")
+            + "\n[[environment.runtime_internal]]\nname = \"CARGO_HOME\"\ncache_id = \"missing\"\n";
+        assert!(matches!(
+            ConfigV1::parse(&input).and_then(ConfigV1::into_plan),
+            Err(ConfigError::UnknownEnvironmentCache { .. })
         ));
     }
 

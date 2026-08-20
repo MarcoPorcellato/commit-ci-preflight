@@ -111,6 +111,26 @@
           "items": {
             "type": "string"
           }
+        },
+        "fixed": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "remote_secret_only": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "runtime_internal": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeInternalEnvironmentConfig"
+          }
         }
       },
       "additionalProperties": false
@@ -168,6 +188,22 @@
         "cpu_count",
         "memory_mib",
         "pids_limit"
+      ]
+    },
+    "RuntimeInternalEnvironmentConfig": {
+      "type": "object",
+      "properties": {
+        "cache_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "cache_id"
       ]
     },
     "RuntimeKind": {

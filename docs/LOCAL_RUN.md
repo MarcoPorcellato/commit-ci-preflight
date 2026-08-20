@@ -7,21 +7,17 @@ compatible runtime, managed workspace, cache, and receipt contracts. It runs
 only explicit argv from a clean Git checkout and never inserts a shell.
 
 ```console
-export CARGO_HOME=.ccp-mounts/cargo-home
-export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
-export RUSTUP_HOME=.ccp-mounts/rustup-home
 commit-ci-preflight run \
   --config .commit-ci-preflight.toml \
   --repository . \
   --generation 1
 ```
 
-The repository configuration allowlists these three variables and mounts the
-matching paths as writable managed caches. Set them before the run; otherwise
-Cargo or Rustup can fall back to a read-only image path and the first check can
-fail even though the same command passes on the host. CCP does not invent
-allowlisted environment values because they are part of the trusted operator
-input. `dry-run --json` reports names and mounts, never secret values.
+The repository configuration uses schema `1.1` runtime-internal bindings for
+the three Cargo/Rustup cache variables. CCP derives their container values from
+the reviewed managed-cache mounts, so the operator must not export host paths
+before the run. `dry-run --json` reports names and mounts, never fixed or secret
+values.
 
 Use `--json` to print the canonical receipt. Raw stdout and stderr remain local
 bounded process state and are not emitted by default or stored in the receipt;
@@ -54,7 +50,7 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 
 ## Execution sequence
 
-1. Parse and normalize schema `1.0`.
+1. Parse and normalize schema `1.0` or the explicit-environment schema `1.1`.
 2. Perform bounded non-heavy setup required by the command: `run` resolves and
    initializes its selected cache, while `benchmark` may perform its optional
    runtime probe.
@@ -121,7 +117,7 @@ converted into PASS.
 - container root: read-only;
 - network: `none` unless explicitly enabled;
 - environment: fixed `TMPDIR=/tmp`, runtime-discovery fields for the Docker
-  client, and only user names declared in `environment.allow`;
+  client, and only values admitted by the normalized environment contract;
 - no Docker socket mount, privileged mode, host networking, or implicit shell.
 
 This is strong containment for trusted project checks, not a security sandbox

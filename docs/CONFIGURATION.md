@@ -2,8 +2,10 @@
 
 ## Status
 
-`.commit-ci-preflight.toml` schema `1.0` is implemented for planning, runtime
-diagnosis, deterministic container argv rendering, and local execution.
+`.commit-ci-preflight.toml` schema `1.0` remains supported for legacy planning,
+runtime diagnosis, deterministic container argv rendering, and local execution.
+Schema `1.1` adds explicit environment classes for the same single-runtime
+contract; it does not change the separate v2 matrix schema.
 `doctor` performs only the bounded runtime probe described in `docs/RUNTIME.md`;
 `run` performs the separately documented execution flow in `docs/LOCAL_RUN.md`.
 
@@ -38,11 +40,11 @@ starting the runtime.
 
 | Field | Requirement |
 |---|---|
-| `schema_version` | Exactly `1.0` |
+| `schema_version` | `1.0`, or `1.1` for explicit environment classes |
 | `project` | Logical `owner/name`; never a URL or credential-bearing remote |
 | `runtime` | Required runtime type, pinned image, and resource limits |
 | `receipt` | Optional output/freshness table with fail-safe defaults |
-| `environment` | Optional allowlist of variable names only |
+| `environment` | Optional environment contract; `1.0` permits legacy `allow`, while `1.1` uses `fixed`, `runtime_internal`, and `remote_secret_only` |
 | `caches` | Up to 32 unique logical caches |
 | `checks` | 1–128 explicit checks |
 
@@ -112,12 +114,25 @@ them.
 See [`CACHE_AND_WORKSPACE.md`](CACHE_AND_WORKSPACE.md) for cache-root
 precedence, ownership, persistence, inventory, and cleanup rules.
 
-## Environment privacy
+## Environment classes and privacy
 
-Only valid environment-variable names are stored in a plan. Values are never
-read by `ccp plan` and never serialized. `ccp run` copies only explicitly
-allowed names into a bounded runtime environment; receipts continue to exclude
-values and raw process output.
+Schema `1.0` retains `environment.allow` as a legacy host-inheritance
+allowlist. It is explicit but cannot make a complete attestable-environment
+claim.
+
+Schema `1.1` requires an explicit class for every non-runtime-discovery value:
+
+| Class | Declaration | Local runtime behaviour | Evidence boundary |
+| --- | --- | --- | --- |
+| `fixed` | Non-secret literal | Injects the exact reviewed value only after its canonical digest matches the normalized plan | Value is never serialized or printed by `plan`/`dry-run` |
+| `runtime_internal` | Variable name plus declared cache ID | Derives `/workspace/<cache mount>` without reading the host environment | Cache ID and derived container target are normative plan fields |
+| `remote_secret_only` | Secret name | Rejects local receipt creation before admission | No secret value is read or stored locally |
+
+`runtime_internal` is intentionally limited to declared managed caches in this
+release. Arbitrary host paths, undeclared fixed values, and changed fixed values
+fail closed. A plan stores a canonical digest of each fixed value, never the
+literal. The private parser envelope carries the literal only until the runtime
+checks that digest immediately before rendering the process environment.
 
 ## Plan digest
 

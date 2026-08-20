@@ -87,9 +87,6 @@ and Rustup paths are persistent managed caches. The bounded format timeout also
 covers that first toolchain provisioning; warm format runs remain sub-second.
 
 ~~~console
-export CARGO_HOME=.ccp-mounts/cargo-home
-export CARGO_TARGET_DIR=.ccp-mounts/cargo-target
-export RUSTUP_HOME=.ccp-mounts/rustup-home
 cargo run --locked -- run \
   --config .commit-ci-preflight.toml \
   --repository . \
@@ -113,6 +110,11 @@ These overrides exist only in test helpers and never weaken production
 cache-path validation. The four persistent managed cache locations live below
 the operator-selected cache root and may be inventoried with
 `commit-ci-preflight cache inventory --json`.
+
+The repository configuration is schema `1.1`: the Cargo and Rustup variables
+are runtime-internal bindings derived from those reviewed cache mounts. Do not
+reintroduce host-path exports; they would be legacy input that the current plan
+does not allowlist.
 
 ## Publish evidence before opening or updating the PR
 

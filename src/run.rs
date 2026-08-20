@@ -241,6 +241,7 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
     }
+    ensure_local_environment_allowed(request.envelope)?;
     let repository = fs::canonicalize(request.repository).map_err(RunError::Io)?;
     if !repository.is_dir() {
         return Err(RunError::RepositoryNotDirectory);
@@ -333,7 +334,7 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
         request.generation,
         &started_at_utc,
     )?;
-    let environment = docker_execution_environment(&request.envelope.plan.environment_allow);
+    let environment = docker_execution_environment(request.envelope).map_err(RunError::Runtime)?;
     let mut statuses = BTreeMap::new();
     let mut checks = Vec::with_capacity(request.envelope.plan.checks.len());
     let mut terminal_reason: Option<&'static str> = None;
@@ -484,6 +485,14 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
     })
     .map_err(RunError::Receipt)?;
     Ok(receipt)
+}
+
+fn ensure_local_environment_allowed(envelope: &ExecutionPlanEnvelopeV1) -> Result<(), RunError> {
+    if envelope.plan.environment.remote_secret_only.is_empty() {
+        Ok(())
+    } else {
+        Err(RunError::RemoteSecretOnly)
+    }
 }
 
 fn inspect_repository(
@@ -840,6 +849,7 @@ pub enum RunError {
     InvalidCommit,
     StaleCommit,
     ResourcePressure,
+    RemoteSecretOnly,
     GitInspection,
     UnsafeReceiptPath,
     Clock,
@@ -859,7 +869,8 @@ impl RunError {
             Self::RepositoryNotDirectory
             | Self::DirtyRepository
             | Self::InvalidCommit
-            | Self::UnsafeReceiptPath => 2,
+            | Self::UnsafeReceiptPath
+            | Self::RemoteSecretOnly => 2,
             Self::StaleCommit => 5,
             Self::ResourcePressure => 6,
             Self::Runtime(error) => error.exit_code(),
@@ -888,6 +899,9 @@ impl fmt::Display for RunError {
             Self::ResourcePressure => {
                 formatter.write_str("host resource pressure watchdog tripped")
             }
+            Self::RemoteSecretOnly => formatter.write_str(
+                "configuration declares remote-secret-only environment; local attestation is unavailable",
+            ),
             Self::GitInspection => formatter.write_str("Git repository inspection failed"),
             Self::UnsafeReceiptPath => formatter.write_str("receipt output path is unsafe"),
             Self::Clock => formatter.write_str("UTC clock could not be represented"),
@@ -1380,6 +1394,22 @@ depends_on = ["first"]
                 barrier,
             )
         }
+    }
+
+    #[test]
+    fn remote_secret_only_environment_rejects_local_attestation_before_runtime() {
+        let mut fixture = RunFixture::new("remote-secret-only");
+        fixture
+            .envelope
+            .plan
+            .environment
+            .remote_secret_only
+            .push("DEPLOY_TOKEN".to_owned());
+
+        assert!(matches!(
+            ensure_local_environment_allowed(&fixture.envelope),
+            Err(RunError::RemoteSecretOnly)
+        ));
     }
 
     impl Drop for RunFixture {
