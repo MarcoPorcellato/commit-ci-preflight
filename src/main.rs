@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
     ADMISSION_STATUS_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
-    DEFAULT_QUEUE_TIMEOUT,
+    DEFAULT_QUEUE_TIMEOUT, DEFAULT_STATUS_TIMEOUT,
 };
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
@@ -424,6 +424,9 @@ enum AdmissionCommand {
         /// Emit the versioned machine-readable status.
         #[arg(long)]
         json: bool,
+        /// Maximum time to wait for a consistent status snapshot.
+        #[arg(long, default_value_t = DEFAULT_STATUS_TIMEOUT.as_secs())]
+        timeout_seconds: u64,
     },
 }
 
@@ -1484,10 +1487,14 @@ fn run_recover_command(action: RecoverCommand) -> Result<(), CliError> {
 
 fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
     match action {
-        AdmissionCommand::Status { json } => {
+        AdmissionCommand::Status {
+            json,
+            timeout_seconds,
+        } => {
+            let cancellation = CancellationToken::default();
             let status = AdmissionCoordinator::platform()
                 .map_err(CliError::Admission)?
-                .status()
+                .status_with_timeout(Duration::from_secs(timeout_seconds), &cancellation)
                 .map_err(CliError::Admission)?;
             if json {
                 println!(

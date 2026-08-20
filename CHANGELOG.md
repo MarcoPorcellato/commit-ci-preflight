@@ -9,6 +9,13 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- T6 admission candidate: queue, status, ticket publication, slot contention,
+  and release use a cooperative bounded lock primitive; ticket markers are
+  published only after durable staging; the high-water ticket counter uses
+  durable replacement; and certainly abandoned unlocked/staged records are
+  reversibly quarantined. Status exposes an explicit timeout and heartbeat
+  shutdown is interruptible. Crash-point subprocess and native Windows
+  qualification remain pending.
 - T5 cache-copy hardening: durable generation manifests now use the existing
   Unix/macOS durable replacement primitive, and complete macOS generations
   attempt bounded APFS `clonefile` staging before falling back to the

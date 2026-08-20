@@ -33,7 +33,9 @@ Heavy commands use a default-on host-wide single-slot admission queue shared by
 independent repositories and cache roots. Override the bounded wait with
 `--admission-timeout-seconds <seconds>` on `run` or `benchmark`. Inspect the
 bounded operational state with `admission status --json`; it reports only the
-schema, busy state, queue count, and opaque ticket identifiers.
+schema, busy state, queue count, and opaque ticket identifiers. Status accepts
+`--timeout-seconds <seconds>` and fails closed if it cannot obtain a coherent
+snapshot within that bound.
 
 For long-running local workflows that should not go through receipt creation,
 use `commit-ci-preflight guard exec -- <program> [args...]`. It is shell-free,
@@ -131,10 +133,12 @@ file. There is intentionally no automatic stale-lock deletion.
 
 Admission tickets are different: each ticket is protected by its own advisory
 lock, so a crashed or rebooted waiter becomes reclaimable when that lock is
-released. Malformed, foreign, or uncertain coordinator state fails closed and
-is never deleted automatically. Admission and resource evidence are not
-included in receipts yet. The next tranche must integrate truthful evidence and
-host telemetry without changing this tranche's receipt contract.
+released. A certainly abandoned unlocked ticket or staging record is moved to
+the coordinator's reversible quarantine; malformed, foreign, locked, or
+otherwise uncertain coordinator state fails closed and remains in place.
+Admission and resource evidence are not included in receipts yet. The next
+tranche must integrate truthful evidence and host telemetry without changing
+this tranche's receipt contract.
 
 See [troubleshooting and safe recovery](TROUBLESHOOTING.md) before interpreting
 an `active: true` status, diagnosing an absent receipt, or touching any exact
