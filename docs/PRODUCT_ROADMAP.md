@@ -119,6 +119,15 @@ without guessing. [RESOURCE_OBSERVATION_HISTORY.md](RESOURCE_OBSERVATION_HISTORY
 is the controlling scope, privacy and qualification contract. Any forecast or
 threshold change remains blocked by its separate owner gate.
 
+Owner-authorized safety exception (2026-08-21): the planned opt-in agent
+admission lifecycle may proceed as a narrow orphan prevention safeguard. It
+must preserve the single Rust coordinator.
+It must fail closed on unknown ownership.
+It must require an explicit claim by a live activity.
+It must never execute a stored or hidden command.
+It neither revives a terminated chat nor relaxes any release, receipt, or
+GitHub verification gate.
+
 Resource history v2 additionally provides bounded workload/executor context so
 samples from different launchers are not mixed. Adoption remains cooperative:
 each official launcher must use `guard exec`, and direct container-runtime

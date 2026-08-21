@@ -106,6 +106,13 @@ exact container argv and mounts but does not execute project code.
 
 `run` and `benchmark` are serialized through a default-on host-wide single-slot
 queue so independent local agents cannot start both heavy workloads at once.
+The planned agent admission mode is an owner-approved safety exception for
+orphan prevention, not a second scheduler.
+This agent mode opt-in must never bypass unknown ownership.
+This agent mode opt-in must never revive a terminated chat.
+This agent mode opt-in must never auto-execute a command.
+A live activity must make an explicit claim before it invokes its own guarded
+command.
 Use `--admission-timeout-seconds` to select the bounded wait. The
 `admission status --json` result distinguishes the transient `queue_lock` from
 the heavy-work `slot_lock`, and reports the slot's opaque owner/run identifier,

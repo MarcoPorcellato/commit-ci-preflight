@@ -104,6 +104,22 @@ files, lease files, counters, ownership markers, or the admission root. CCP may
 reclaim a ticket only when its ticket OS lock is demonstrably unlocked and its
 valid lease is definitely expired. Manual quarantine is unsupported.
 
+### Planned agent continuation safety boundary
+
+The owner-approved agent continuation mode is opt-in. The opt-in agent
+continuation exists solely for orphan prevention. It is not a second scheduler
+and does not relax the rules above:
+unknown ownership remains blocking, and a missing process in this shell is not
+proof that another activity is gone. CCP may release only a ticket whose parent
+or session loss is independently verified; ambiguous liveness remains
+fail-closed.
+
+A ready activity receives no hidden execution. It must make an explicit claim
+and then choose whether to invoke its own command. CCP never revives a
+terminated chat, persists a guarded command for later execution, or executes a
+command after the activity disappears. The legacy `guard exec` path remains
+synchronous and unchanged for terminals and existing official launchers.
+
 ## Activity reservation and handoff
 
 Use one owner activity for the complete heavy lifecycle. Record this card before
