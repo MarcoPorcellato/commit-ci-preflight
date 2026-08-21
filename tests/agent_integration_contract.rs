@@ -49,6 +49,8 @@ fn multi_harness_reference_has_a_complete_truthful_l1_surface() {
     let common = read(root, "docs/agent-integrations/HARNESS_INTEGRATION.md");
     let matrix = read(root, "docs/agent-integrations/COMPATIBILITY_MATRIX.md");
     let handoff = read(root, "examples/agent/CCP_ACTIVITY_HANDOFF.md");
+    let runbook = read(root, "docs/COORDINATION_RUNBOOK.md");
+    let roadmap = read(root, "docs/PRODUCT_ROADMAP.md");
 
     for required in ["exact-head", "admission", "outer guard", "GitHub-hosted CI"] {
         assert!(
@@ -83,6 +85,42 @@ fn multi_harness_reference_has_a_complete_truthful_l1_surface() {
     assert_public_boundary(&common, "common contract");
     assert_public_boundary(&matrix, "compatibility matrix");
     assert_public_boundary(&handoff, "activity handoff");
+    for required in [
+        "Manual quarantine is unsupported.",
+        "The owner-approved agent continuation mode is opt-in.",
+        "continuation exists solely for orphan prevention.",
+        "unknown ownership remains blocking",
+        "fail-closed.",
+        "explicit claim",
+        "no hidden execution",
+        "legacy `guard exec`",
+        "synchronous and unchanged",
+    ] {
+        assert!(runbook.contains(required), "runbook is missing {required}");
+    }
+    for required in [
+        "The planned agent admission mode is an owner-approved safety exception",
+        "orphan prevention, not a second scheduler.",
+        "agent mode opt-in",
+        "never bypass unknown ownership",
+        "never revive a terminated chat",
+        "never auto-execute a command",
+        "shell-free wrapper around one explicit program argv",
+        "Official launchers must pass through `guard exec` to be covered.",
+    ] {
+        assert!(readme.contains(required), "README is missing {required}");
+    }
+    for required in [
+        "Owner-authorized safety exception (2026-08-21)",
+        "narrow orphan prevention safeguard",
+        "single Rust coordinator",
+        "fail closed on unknown ownership",
+        "explicit claim by a live activity",
+        "never execute a stored or hidden command",
+        "neither revives a terminated chat nor relaxes any release",
+    ] {
+        assert!(roadmap.contains(required), "roadmap is missing {required}");
+    }
     assert!(readme.contains("docs/agent-integrations/HARNESS_INTEGRATION.md"));
 }
 

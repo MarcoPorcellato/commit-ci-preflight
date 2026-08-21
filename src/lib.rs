@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod admission;
+pub mod agent_session;
 pub mod benchmark;
 pub mod cache;
 pub mod config;
