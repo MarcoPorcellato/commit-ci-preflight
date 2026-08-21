@@ -156,6 +156,9 @@ fn observe_with_probe(
     identity: &AgentSessionIdentity,
     probe: &impl PlatformProbe,
 ) -> SessionObservation {
+    if identity.parent_pid == 0 || identity.parent_start.is_empty() || identity.boot_id.is_empty() {
+        return SessionObservation::Ambiguous;
+    }
     let boot_before = match probe.boot_id() {
         Ok(boot_id) => boot_id,
         Err(_) => return SessionObservation::Unsupported,
@@ -491,6 +494,33 @@ mod tests {
                 identity.parent_pid,
                 Some(&snapshot(2, ""))
             ),
+            SessionObservation::Ambiguous
+        );
+    }
+
+    #[test]
+    fn observe_rejects_structurally_malformed_identity_before_probing() {
+        let mut empty_boot = identity();
+        empty_boot.boot_id.clear();
+        let probe = FakePlatformProbe::new(vec![Ok("boot-1".to_owned())], vec![], vec![]);
+        assert_eq!(
+            observe_with_probe(&empty_boot, &probe),
+            SessionObservation::Ambiguous
+        );
+
+        let mut zero_pid = identity();
+        zero_pid.parent_pid = 0;
+        let probe = FakePlatformProbe::new(vec![], vec![], vec![]);
+        assert_eq!(
+            observe_with_probe(&zero_pid, &probe),
+            SessionObservation::Ambiguous
+        );
+
+        let mut empty_start = identity();
+        empty_start.parent_start.clear();
+        let probe = FakePlatformProbe::new(vec![], vec![], vec![]);
+        assert_eq!(
+            observe_with_probe(&empty_start, &probe),
             SessionObservation::Ambiguous
         );
     }
