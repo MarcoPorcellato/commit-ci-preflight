@@ -58,8 +58,8 @@ use commit_ci_preflight::run::{
     SystemClock, execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight,
 };
 use commit_ci_preflight::run_journal::{
-    RUN_JOURNAL_SCHEMA_VERSION, RecoveryStatusV1, RunFailureKindV1, RunJournalError,
-    RunJournalStateV1, RunJournalStore,
+    RUN_JOURNAL_SCHEMA_VERSION, RecoveryStatusV1, RunFailureDiagnosticCodeV1, RunFailureKindV1,
+    RunJournalError, RunJournalStateV1, RunJournalStore,
 };
 use commit_ci_preflight::runtime::{
     DockerRuntimeCapabilityProbe, DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard,
@@ -908,7 +908,7 @@ fn print_run(
     ) {
         Ok(commit) => commit,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
             return Err(CliError::Run(RunError::SourceSnapshot(error)));
         }
     };
@@ -922,7 +922,7 @@ fn print_run(
     let source_resource = match journal.reserve_resource(&journal_id, "source-snapshot-v1") {
         Ok(path) => path,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
             return Err(CliError::RunJournal(error));
         }
     };
@@ -937,12 +937,12 @@ fn print_run(
     ) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
             return Err(CliError::Run(RunError::SourceSnapshot(error)));
         }
     };
     if let Err(error) = source_snapshot.prepare_mount_overlay(&envelope) {
-        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
         return Err(CliError::Run(RunError::SourceSnapshot(error)));
     }
     if let Err(error) = journal.bind_source(
@@ -951,7 +951,7 @@ fn print_run(
         &source_snapshot.evidence().manifest_digest,
         source_snapshot.evidence().entry_count,
     ) {
-        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
         return Err(CliError::RunJournal(error));
     }
     let admission =
@@ -962,7 +962,7 @@ fn print_run(
     ) {
         Ok(guard) => guard,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
+            lifecycle.fail(RunFailureKindV1::AdmissionRejected, None)?;
             return Err(CliError::Admission(error));
         }
     };
@@ -970,7 +970,7 @@ fn print_run(
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
         return match guard.release() {
             Ok(()) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
+                lifecycle.fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))?;
                 Err(error)
             }
             Err(release_error) => {
@@ -1024,7 +1024,7 @@ fn print_run(
         Ok(()) => match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
+                lifecycle.fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))?;
                 return Err(error);
             }
         },
@@ -1113,7 +1113,7 @@ fn print_matrix_run(
     ) {
         Ok(guard) => guard,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
+            lifecycle.fail(RunFailureKindV1::AdmissionRejected, None)?;
             return Err(CliError::Admission(error));
         }
     };
@@ -1121,7 +1121,7 @@ fn print_matrix_run(
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
         return match guard.release() {
             Ok(()) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
+                lifecycle.fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))?;
                 Err(error)
             }
             Err(release_error) => {
@@ -1173,7 +1173,7 @@ fn print_matrix_run(
         Ok(()) => match result {
             Ok(outcome) => outcome,
             Err(error) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
+                lifecycle.fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))?;
                 return Err(error);
             }
         },
@@ -1263,8 +1263,16 @@ impl JournalLifecycleObserver<'_> {
         Ok(())
     }
 
-    fn fail(&mut self, kind: RunFailureKindV1) -> Result<(), CliError> {
-        self.transition_state(RunJournalStateV1::Failed, Some(kind))
+    fn fail(
+        &mut self,
+        kind: RunFailureKindV1,
+        diagnostic_code: Option<RunFailureDiagnosticCodeV1>,
+    ) -> Result<(), CliError> {
+        let at_utc = self.clock.now_utc().map_err(CliError::Run)?;
+        self.store
+            .fail(self.run_id, &at_utc, kind, diagnostic_code)
+            .map_err(CliError::RunJournal)?;
+        Ok(())
     }
 }
 
@@ -1306,6 +1314,16 @@ fn cli_failure_kind(error: &CliError) -> RunFailureKindV1 {
         CliError::Resource(_) => RunFailureKindV1::ResourcePressure,
         CliError::Admission(_) => RunFailureKindV1::CleanupFailed,
         _ => RunFailureKindV1::Unknown,
+    }
+}
+
+fn cli_failure_diagnostic(error: &CliError) -> Option<RunFailureDiagnosticCodeV1> {
+    match error {
+        CliError::Internal(_) => Some(RunFailureDiagnosticCodeV1::InternalCommandFailure),
+        _ if cli_failure_kind(error) == RunFailureKindV1::Unknown => {
+            Some(RunFailureDiagnosticCodeV1::UnclassifiedTopLevel)
+        }
+        _ => None,
     }
 }
 
@@ -2299,8 +2317,9 @@ mod tests {
     use super::{
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
         ResourceExecutionModeArg, ResourceExecutorArg, WatchdogCompletionBarrier,
-        detect_resource_executor, finalize_guard_exec_result, new_journal_id,
-        reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
+        cli_failure_diagnostic, cli_failure_kind, detect_resource_executor,
+        finalize_guard_exec_result, new_journal_id, reconcile_watchdog_outcome,
+        resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::process::CancellationToken;
@@ -2311,6 +2330,10 @@ mod tests {
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
     use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
+    use commit_ci_preflight::run::Clock;
+    use commit_ci_preflight::run_journal::{
+        RunFailureDiagnosticCodeV1, RunJournalStateV1, RunJournalStore,
+    };
     use std::ffi::OsString;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2353,6 +2376,57 @@ mod tests {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+    }
+
+    #[test]
+    fn synthetic_internal_failure_after_executing_is_redacted() {
+        let root = std::env::temp_dir().join(format!(
+            "ccp-task2-synthetic-{}-{}",
+            std::process::id(),
+            super::JOURNAL_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("root directory");
+        let store = RunJournalStore::initialize(&root).expect("journal initializes");
+        let run_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let clock = super::SystemClock;
+        store
+            .create_run(run_id, &clock.now_utc().expect("time"))
+            .expect("created");
+        let mut lifecycle = super::JournalLifecycleObserver {
+            store: &store,
+            run_id,
+            clock: &clock,
+        };
+        lifecycle
+            .transition_state(RunJournalStateV1::Admitted, None)
+            .expect("admitted");
+        lifecycle
+            .transition_state(RunJournalStateV1::Prepared, None)
+            .expect("prepared");
+        lifecycle
+            .transition_state(RunJournalStateV1::Executing, None)
+            .expect("executing");
+        let error = CliError::internal(std::io::Error::other("synthetic-top-level-secret"));
+        lifecycle
+            .fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))
+            .expect("failed");
+        let status = store.status().expect("status");
+        let recovered = status
+            .runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .expect("run");
+        assert_eq!(recovered.state, Some(RunJournalStateV1::Failed));
+        assert_eq!(
+            recovered
+                .failure_diagnostic
+                .as_ref()
+                .map(|d| d.diagnostic_code),
+            Some(RunFailureDiagnosticCodeV1::InternalCommandFailure)
+        );
+        let serialized = serde_json::to_string(&status).expect("serialize");
+        assert!(!serialized.contains("synthetic-top-level-secret"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
