@@ -147,6 +147,15 @@ fn malformed_and_terminal_run_ids_fail_closed_with_stable_codes() {
     let store = RunJournalStore::initialize(&fixture.cache).expect("journal");
     store.create_run(RUN_ID, AT).expect("run");
     store
+        .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+        .expect("admitted");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+        .expect("prepared");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+        .expect("executing");
+    store
         .transition(
             RUN_ID,
             RunJournalStateV1::Failed,
@@ -174,6 +183,15 @@ fn status_projects_bounded_terminal_diagnostic() {
     let fixture = Fixture::new("terminal-diagnostic");
     let store = RunJournalStore::initialize(&fixture.cache).expect("journal");
     store.create_run(RUN_ID, AT).expect("run");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+        .expect("admitted");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+        .expect("prepared");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+        .expect("executing");
     store
         .fail(
             RUN_ID,

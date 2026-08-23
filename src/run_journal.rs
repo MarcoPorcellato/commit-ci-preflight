@@ -416,11 +416,13 @@ impl RunJournalStore {
             match self.read_entries(&name) {
                 Ok(journal) if !journal.is_empty() => {
                     let last = journal.last().expect("non-empty journal");
-                    let diagnostic = if last.state == RunJournalStateV1::Failed {
-                        self.read_terminal_diagnostic(&name)
-                    } else {
-                        Ok(None)
-                    };
+                    let diagnostic = self.read_terminal_diagnostic(&name).and_then(|diagnostic| {
+                        if diagnostic.is_some() && last.state != RunJournalStateV1::Failed {
+                            Err(RunJournalError::Corrupt)
+                        } else {
+                            Ok(diagnostic)
+                        }
+                    });
                     match diagnostic {
                         Ok(failure_diagnostic) => runs.push(RecoveryRunStatusV1 {
                             run_id: name,
@@ -456,8 +458,10 @@ impl RunJournalStore {
         }
         let entries = self.read_entries(run_id)?;
         let last = entries.last().ok_or(RunJournalError::Corrupt)?;
-        if last.state == RunJournalStateV1::Failed {
-            self.read_terminal_diagnostic(run_id)?;
+        if self.read_terminal_diagnostic(run_id)?.is_some()
+            && last.state != RunJournalStateV1::Failed
+        {
+            return Err(RunJournalError::Corrupt);
         }
         if classify(last.state) == RecoveryClassificationV1::Terminal {
             return Err(RunJournalError::NonActionable);
@@ -1110,10 +1114,47 @@ mod tests {
     }
 
     #[test]
+    fn nonterminal_malformed_diagnostic_requires_operator_and_apply_is_corrupt() {
+        let root = cache_root("nonterminal-malformed-diagnostic");
+        let store = RunJournalStore::initialize(&root).expect("store");
+        store.create_run(RUN_ID, AT).expect("created");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+            .expect("admitted");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+            .expect("prepared");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+            .expect("executing");
+        fs::write(
+            store.run_path(RUN_ID).join(TERMINAL_DIAGNOSTIC),
+            br#"{"unexpected":true}"#,
+        )
+        .expect("tamper diagnostic");
+
+        assert_eq!(
+            store.status().expect("status").runs[0].classification,
+            RecoveryClassificationV1::OperatorRequired
+        );
+        assert!(matches!(store.apply(RUN_ID), Err(RunJournalError::Corrupt)));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn legacy_unknown_failure_without_diagnostic_remains_terminal() {
         let root = cache_root("legacy-terminal-diagnostic");
         let store = RunJournalStore::initialize(&root).expect("store");
         store.create_run(RUN_ID, AT).expect("created");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+            .expect("admitted");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+            .expect("prepared");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+            .expect("executing");
         store
             .transition(
                 RUN_ID,
@@ -1142,6 +1183,15 @@ mod tests {
         let root = cache_root("malformed-terminal-diagnostic");
         let store = RunJournalStore::initialize(&root).expect("store");
         store.create_run(RUN_ID, AT).expect("created");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+            .expect("admitted");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+            .expect("prepared");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+            .expect("executing");
         store
             .transition(
                 RUN_ID,
