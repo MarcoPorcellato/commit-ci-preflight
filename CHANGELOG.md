@@ -198,6 +198,11 @@ Semantic Versioning after its first public release.
 
 ### Fixed
 
+- Preserve a bounded, redacted terminal diagnostic for otherwise-unclassified
+  top-level `run` failures. Recovery status exposes only a closed diagnostic
+  code; malformed, misplaced, or mismatched sidecars remain fail-closed, and
+  historic terminal journals without the sidecar stay readable. No native run
+  or receipt qualification is implied.
 - Route recovery CLI test fixtures through the declared `CCP_TEST_ROOT` so the
   Linux CI contract can keep the repository mount read-only.
 - Normalize recovery-journal identifiers to the filesystem-safe 64-hex
