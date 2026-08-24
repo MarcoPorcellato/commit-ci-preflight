@@ -24,8 +24,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
     ADMISSION_STATUS_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
-    DEFAULT_QUEUE_TIMEOUT, DEFAULT_STATUS_TIMEOUT,
-    DEFAULT_LAYOUT_RECOVERY_TIMEOUT, MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS,
+    AdmissionLayoutRecoveryOutcomeV1, DEFAULT_LAYOUT_RECOVERY_TIMEOUT, DEFAULT_QUEUE_TIMEOUT,
+    DEFAULT_STATUS_TIMEOUT, MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS,
 };
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
@@ -446,11 +446,35 @@ enum AdmissionLayoutRecoveryCommand {
         #[arg(long, default_value_t = DEFAULT_LAYOUT_RECOVERY_TIMEOUT.as_secs(), value_parser = parse_layout_recovery_timeout)]
         timeout_seconds: u64,
     },
+    Apply {
+        #[arg(long, value_parser = parse_plan_sha256)]
+        expected_plan: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = DEFAULT_LAYOUT_RECOVERY_TIMEOUT.as_secs(), value_parser = parse_layout_recovery_timeout)]
+        timeout_seconds: u64,
+    },
+}
+
+fn parse_plan_sha256(value: &str) -> Result<String, String> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("expected plan must be exactly 64 lowercase hexadecimal characters".to_owned())
+    }
 }
 
 fn parse_layout_recovery_timeout(value: &str) -> Result<u64, String> {
-    let seconds = value.parse::<u64>().map_err(|_| "layout recovery timeout must be an integer from 1 through 60".to_owned())?;
-    if !(1..=MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS).contains(&seconds) { return Err("layout recovery timeout must be an integer from 1 through 60".to_owned()); }
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| "layout recovery timeout must be an integer from 1 through 60".to_owned())?;
+    if !(1..=MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS).contains(&seconds) {
+        return Err("layout recovery timeout must be an integer from 1 through 60".to_owned());
+    }
     Ok(seconds)
 }
 
@@ -537,7 +561,9 @@ fn main() {
         }
     };
     if let Err(error) = result {
-        eprintln!("error: {error}");
+        if !matches!(error, CliError::ReportedExit(_)) {
+            eprintln!("error: {error}");
+        }
         std::process::exit(error.exit_code());
     }
 }
@@ -1553,14 +1579,21 @@ fn run_recover_command(action: RecoverCommand) -> Result<(), CliError> {
 }
 
 fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
+    let coordinator = AdmissionCoordinator::platform().map_err(CliError::Admission)?;
+    run_admission_command_with(action, &coordinator)
+}
+
+fn run_admission_command_with(
+    action: AdmissionCommand,
+    coordinator: &AdmissionCoordinator,
+) -> Result<(), CliError> {
     match action {
         AdmissionCommand::Status {
             json,
             timeout_seconds,
         } => {
             let cancellation = CancellationToken::default();
-            let status = AdmissionCoordinator::platform()
-                .map_err(CliError::Admission)?
+            let status = coordinator
                 .status_with_timeout(Duration::from_secs(timeout_seconds), &cancellation)
                 .map_err(CliError::Admission)?;
             if json {
@@ -1583,12 +1616,68 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
             }
             Ok(())
         }
-        AdmissionCommand::LayoutRecovery { action: AdmissionLayoutRecoveryCommand::Status { json, timeout_seconds } } => {
-            let report = AdmissionCoordinator::platform().map_err(CliError::Admission)?.layout_recovery_status_with_timeout(Duration::from_secs(timeout_seconds), &CancellationToken::default());
-            if json { println!("{}", serde_json::to_string(&report).map_err(CliError::internal)?); }
-            else { println!("Layout recovery schema: {}", report.schema_version); println!("Classification: {:?}", report.classification); println!("Reason: {:?}", report.reason); println!("Plan SHA-256: {:?}", report.plan_sha256); println!("Read-only: no state was changed."); }
+        AdmissionCommand::LayoutRecovery {
+            action:
+                AdmissionLayoutRecoveryCommand::Status {
+                    json,
+                    timeout_seconds,
+                },
+        } => {
+            let report = coordinator.layout_recovery_status_with_timeout(
+                Duration::from_secs(timeout_seconds),
+                &CancellationToken::default(),
+            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(CliError::internal)?
+                );
+            } else {
+                println!("Layout recovery schema: {}", report.schema_version);
+                println!("Classification: {:?}", report.classification);
+                println!("Reason: {:?}", report.reason);
+                println!("Plan SHA-256: {:?}", report.plan_sha256);
+                println!("Read-only: no state was changed.");
+            }
             Ok(())
         }
+        AdmissionCommand::LayoutRecovery {
+            action:
+                AdmissionLayoutRecoveryCommand::Apply {
+                    expected_plan,
+                    json,
+                    timeout_seconds,
+                },
+        } => render_layout_recovery_apply(coordinator, &expected_plan, json, timeout_seconds),
+    }
+}
+
+fn render_layout_recovery_apply(
+    coordinator: &AdmissionCoordinator,
+    expected_plan: &str,
+    json: bool,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let report = coordinator.apply_layout_recovery_with_timeout(
+        expected_plan,
+        Duration::from_secs(timeout_seconds),
+        &CancellationToken::default(),
+    );
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(CliError::internal)?
+        );
+    } else {
+        println!("Layout recovery schema: {}", report.schema_version);
+        println!("Outcome: {:?}", report.outcome);
+        println!("Reason: {:?}", report.reason);
+        println!("Quarantine entry: {:?}", report.quarantine_entry);
+    }
+    match report.outcome {
+        AdmissionLayoutRecoveryOutcomeV1::Recovered => Ok(()),
+        AdmissionLayoutRecoveryOutcomeV1::NotApplied
+        | AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain => Err(CliError::ReportedExit(70)),
     }
 }
 
@@ -1606,15 +1695,27 @@ mod task1_layout_recovery_tests {
     #[test]
     fn admission_layout_recovery_status_parses_only_bounded_timeouts() {
         let parsed = Cli::try_parse_from([
-            "commit-ci-preflight", "admission", "layout-recovery", "status", "--json",
-            "--timeout-seconds", "5",
+            "commit-ci-preflight",
+            "admission",
+            "layout-recovery",
+            "status",
+            "--json",
+            "--timeout-seconds",
+            "5",
         ]);
         assert!(parsed.is_ok());
         for invalid in ["0", "61", "not-a-number"] {
-            assert!(Cli::try_parse_from([
-                "commit-ci-preflight", "admission", "layout-recovery", "status",
-                "--timeout-seconds", invalid,
-            ]).is_err());
+            assert!(
+                Cli::try_parse_from([
+                    "commit-ci-preflight",
+                    "admission",
+                    "layout-recovery",
+                    "status",
+                    "--timeout-seconds",
+                    invalid,
+                ])
+                .is_err()
+            );
         }
     }
 }
@@ -2228,6 +2329,7 @@ impl std::error::Error for GuardExecError {}
 
 #[derive(Debug)]
 enum CliError {
+    ReportedExit(i32),
     Usage(Box<dyn std::error::Error>),
     Cache(CacheError),
     Workspace(WorkspaceError),
@@ -2259,6 +2361,7 @@ impl CliError {
 
     fn exit_code(&self) -> i32 {
         match self {
+            Self::ReportedExit(code) => *code,
             Self::Usage(_) => 2,
             Self::Cache(error) => error.exit_code(),
             Self::Workspace(_) => 2,
@@ -2297,6 +2400,7 @@ impl CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ReportedExit(_) => formatter.write_str("command outcome already reported"),
             Self::Usage(error) => write!(formatter, "{error}"),
             Self::Cache(error) => write!(formatter, "{error}"),
             Self::Workspace(error) => write!(formatter, "{error}"),
@@ -2328,6 +2432,7 @@ impl fmt::Display for CliError {
 impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::ReportedExit(_) => None,
             Self::Usage(error) | Self::Internal(error) => Some(error.as_ref()),
             Self::Cache(error) => Some(error),
             Self::Workspace(error) => Some(error),
