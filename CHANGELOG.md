@@ -158,6 +158,9 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Plans with no artifact contracts now finalize with an empty artifact manifest
+  without requiring or creating a managed `artifacts` directory; plans with
+  declared contracts retain the existing fail-closed observation checks.
 - Added schema `1.1` explicit environment classes for single-runtime plans:
   fixed non-secret values are digest-bound and fail closed on a missing or
   altered private binding, runtime-internal values derive only from declared
