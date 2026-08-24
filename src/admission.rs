@@ -145,6 +145,8 @@ struct LayoutRecoveryEffects {
 
 impl LayoutRecoveryEffects {
     fn before_target_inventory(&self, path: &Path) -> Result<(), AdmissionError> {
+        #[cfg(not(test))]
+        let _ = path;
         #[cfg(test)]
         if self.deny_target_inventory {
             return Err(AdmissionError::Io {
@@ -2410,7 +2412,7 @@ mod tests {
             ("target staging", Box::new(|c| { fs::write(c.root().join("agent-tickets").join(".agent-ticket-staging-partial"), b"x").unwrap(); })),
             ("target file", Box::new(|c| { fs::remove_dir(c.root().join("agent-tickets")).unwrap(); fs::write(c.root().join("agent-tickets"), b"x").unwrap(); })),
             ("target symlink", Box::new(|c| { fs::remove_dir(c.root().join("agent-tickets")).unwrap(); std::os::unix::fs::symlink("tickets", c.root().join("agent-tickets")).unwrap(); })),
-            ("foreign owner", Box::new(|c| { fs::write(c.root().join(OWNER_FILE), b"{}\n").unwrap(); })),
+            ("foreign owner", Box::new(|c| { fs::write(c.root().join(OWNER_FILE), b"{\"owner\":\"foreign\",\"purpose\":\"host-admission-coordinator\",\"schema_version\":\"1.0\"}\n").unwrap(); })),
             ("malformed owner", Box::new(|c| { fs::write(c.root().join(OWNER_FILE), b"not-json\n").unwrap(); })),
             ("missing queue lock", Box::new(|c| { fs::remove_file(c.root().join(QUEUE_LOCK)).unwrap(); })),
             ("queue symlink", Box::new(|c| { fs::remove_file(c.root().join(QUEUE_LOCK)).unwrap(); std::os::unix::fs::symlink(SLOT_LOCK, c.root().join(QUEUE_LOCK)).unwrap(); })),
@@ -2425,7 +2427,9 @@ mod tests {
             mutate(&c);
             let before = tree_fingerprint(c.root());
             let report = c.layout_recovery_status_with_timeout(Duration::from_millis(200), &CancellationToken::default());
+            let expected = match name { "foreign owner" | "malformed owner" => AdmissionLayoutRecoveryReasonV1::ForeignOwner, "canonical ticket" | "canonical lease" => AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle, "target staging" => AdmissionLayoutRecoveryReasonV1::TargetNotEmpty, _ => AdmissionLayoutRecoveryReasonV1::UnsupportedLayout };
             assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired, "{name}");
+            assert_eq!(report.reason, expected, "{name}");
             assert!(report.plan_sha256.is_none(), "{name}");
             assert_eq!(before, tree_fingerprint(c.root()), "{name}");
         }
@@ -2441,10 +2445,35 @@ mod tests {
             let quarantine = c.root().join(QUARANTINE_DIR).join(format!("agent-tickets.recovered-v1-{plan}"));
             match mutate { 0 => { fs::write(c.root().join("agent-tickets").join("late"), b"x").unwrap(); }, 1 => { fs::write(c.root().join("unknown"), b"x").unwrap(); }, 2 => { fs::create_dir(quarantine).unwrap(); }, _ => { fs::write(c.root().join(TICKETS_DIR).join("ticket-000.json"), b"{}\n").unwrap(); } }
             let before = tree_fingerprint(c.root());
+            let quarantine_count = fs::read_dir(c.root().join(QUARANTINE_DIR)).unwrap().count();
             let result = c.apply_layout_recovery_with_timeout(&plan, Duration::from_secs(1), &CancellationToken::default());
             assert_eq!(result.outcome, AdmissionLayoutRecoveryOutcomeV1::NotApplied, "{name}");
             assert_eq!(before, tree_fingerprint(c.root()), "{name}");
+            assert_eq!(quarantine_count, fs::read_dir(c.root().join(QUARANTINE_DIR)).unwrap().count(), "{name}");
         }
+    }
+
+    #[test]
+    fn layout_recovery_serialization_privacy_and_schema_are_bounded() {
+        let statuses = [
+            AdmissionLayoutRecoveryClassificationV1::NotNeeded,
+            AdmissionLayoutRecoveryClassificationV1::RecoverableEmptyHistoricalAgentTickets,
+            AdmissionLayoutRecoveryClassificationV1::OperatorRequired,
+        ];
+        for classification in statuses {
+            let value = serde_json::to_value(AdmissionLayoutRecoveryStatusV1 { schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION.into(), classification, target_kind: None, reason: AdmissionLayoutRecoveryReasonV1::FilesystemUncertain, plan_sha256: None }).unwrap();
+            assert_eq!(value.as_object().unwrap().len(), 5);
+            let text = value.to_string();
+            for forbidden in ["ticket-000", "lease-", "HOME", "repository", "command"] { assert!(!text.contains(forbidden)); }
+            for (key, val) in value.as_object().unwrap() { if key != "schema_version" { assert!(!val.to_string().contains('/')); assert!(!val.to_string().contains('\\')); } }
+        }
+        for outcome in [AdmissionLayoutRecoveryOutcomeV1::Recovered, AdmissionLayoutRecoveryOutcomeV1::NotApplied, AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain] {
+            let value = serde_json::to_value(AdmissionLayoutRecoveryApplyV1 { schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION.into(), outcome, reason: AdmissionLayoutRecoveryReasonV1::FilesystemUncertain, quarantine_entry: None }).unwrap();
+            assert_eq!(value.as_object().unwrap().len(), 4);
+        }
+        let status = serde_json::to_value(AdmissionStatusV1 { schema_version: ADMISSION_STATUS_SCHEMA_VERSION.into(), active: false, queue_count: 0, ticket_ids: vec![], slot: AdmissionLockStatusV1 { kind: "slot".into(), state: "free".into(), owner_run_id: None, acquired_at_unix_seconds: None, heartbeat_at_unix_seconds: None, lease_state: "none".into() }, queue_lock: AdmissionLockStatusV1 { kind: "queue".into(), state: "free".into(), owner_run_id: None, acquired_at_unix_seconds: None, heartbeat_at_unix_seconds: None, lease_state: "none".into() }, process_visibility_note: PROCESS_VISIBILITY_NOTE.into() }).unwrap();
+        assert_eq!(ADMISSION_STATUS_SCHEMA_VERSION, "2.0");
+        assert_eq!(status.as_object().unwrap().len(), 7);
     }
 
     #[test]
@@ -2511,10 +2540,12 @@ mod tests {
             .open(coordinator.root().join(QUEUE_LOCK))
             .expect("queue");
         queue.try_lock_exclusive().expect("hold queue");
+        let started = Instant::now();
         let report = coordinator.layout_recovery_status_with_timeout(
             Duration::from_millis(30),
             &CancellationToken::default(),
         );
+        assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::LockTimeout);
         assert!(report.plan_sha256.is_none());
     }
@@ -2529,10 +2560,12 @@ mod tests {
             .open(coordinator.root().join(SLOT_LOCK))
             .expect("slot");
         slot.try_lock_exclusive().expect("hold slot");
+        let started = Instant::now();
         let report = coordinator.layout_recovery_status_with_timeout(
             Duration::from_millis(30),
             &CancellationToken::default(),
         );
+        assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::LockTimeout);
         assert!(report.plan_sha256.is_none());
     }
@@ -2738,8 +2771,10 @@ mod tests {
             .open(coordinator.root().join(SLOT_LOCK)).expect("slot");
         slot.try_lock_exclusive().expect("hold slot");
         let before = tree_fingerprint(coordinator.root());
+        let started = Instant::now();
         let result = coordinator.apply_layout_recovery_with_timeout(
             &plan, Duration::from_millis(50), &CancellationToken::default());
+        assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(result.outcome, AdmissionLayoutRecoveryOutcomeV1::NotApplied);
         assert_eq!(result.reason, AdmissionLayoutRecoveryReasonV1::LockTimeout);
         assert_eq!(before, tree_fingerprint(coordinator.root()));
