@@ -278,12 +278,25 @@ struct StaleTicket {
 #[derive(Debug, Clone)]
 pub struct AdmissionCoordinator {
     root: PathBuf,
+    #[cfg(test)]
+    durable_fault: Option<usize>,
 }
 
 impl AdmissionCoordinator {
     #[cfg(test)]
     pub(crate) fn test_at(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            durable_fault: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_at_with_durable_fault(root: PathBuf, fail_at: usize) -> Self {
+        Self {
+            root,
+            durable_fault: Some(fail_at),
+        }
     }
 
     pub fn platform() -> Result<Self, AdmissionError> {
@@ -304,7 +317,11 @@ impl AdmissionCoordinator {
 
     pub fn at(root: PathBuf) -> Result<Self, AdmissionError> {
         let root = validate_root_candidate(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            #[cfg(test)]
+            durable_fault: None,
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -727,6 +744,7 @@ impl AdmissionCoordinator {
             .collect::<String>();
         let quarantine = self
             .root
+            .join(QUARANTINE_DIR)
             .join(format!("agent-tickets.recovered-v1-{plan_sha256}"));
         if quarantine.exists() {
             return AdmissionLayoutRecoveryStatusV1 {
@@ -861,6 +879,15 @@ impl AdmissionCoordinator {
                 None,
             );
         }
+        if !self.root.join("agent-tickets").exists() {
+            let _ = unlock(&mut slot);
+            let _ = unlock(&mut queue);
+            return report(
+                AdmissionLayoutRecoveryOutcomeV1::NotApplied,
+                AdmissionLayoutRecoveryReasonV1::CanonicalLayout,
+                None,
+            );
+        }
         let Some(plan) = self.locked_layout_plan_sha256() else {
             let _ = unlock(&mut slot);
             let _ = unlock(&mut queue);
@@ -883,7 +910,14 @@ impl AdmissionCoordinator {
         let source = self.root.join("agent-tickets");
         let quarantine = self.root.join(QUARANTINE_DIR);
         let destination = quarantine.join(&entry);
-        let result = DurableFileSystem::default().relocate_empty_directory(&source, &destination);
+        #[cfg(test)]
+        let durable_fs = self
+            .durable_fault
+            .map(DurableFileSystem::failing_at)
+            .unwrap_or_default();
+        #[cfg(not(test))]
+        let durable_fs = DurableFileSystem::default();
+        let result = durable_fs.relocate_empty_directory(&source, &destination);
         let outcome = match result {
             Ok(()) => {
                 if self.validate_layout(true).is_ok() {
@@ -900,11 +934,22 @@ impl AdmissionCoordinator {
                     )
                 }
             }
-            Err(_) => (
-                AdmissionLayoutRecoveryOutcomeV1::NotApplied,
-                AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
-                None,
-            ),
+            Err(_) => {
+                let outcome = outcome_after_relocation_error(&source, &destination);
+                let entry =
+                    if matches!(outcome, AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain)
+                        && destination.exists()
+                    {
+                        Some(entry)
+                    } else {
+                        None
+                    };
+                (
+                    outcome,
+                    AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                    entry,
+                )
+            }
         };
         let unlock_slot = unlock(&mut slot);
         let unlock_queue = unlock(&mut queue);
@@ -1786,6 +1831,25 @@ fn unlock(file: &mut File) -> Result<(), AdmissionError> {
     })
 }
 
+fn outcome_after_relocation_error(
+    source: &Path,
+    destination: &Path,
+) -> AdmissionLayoutRecoveryOutcomeV1 {
+    match (
+        fs::symlink_metadata(source),
+        fs::symlink_metadata(destination),
+    ) {
+        (Ok(source_meta), Err(error))
+            if source_meta.is_dir()
+                && !source_meta.file_type().is_symlink()
+                && error.kind() == io::ErrorKind::NotFound =>
+        {
+            AdmissionLayoutRecoveryOutcomeV1::NotApplied
+        }
+        _ => AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+    }
+}
+
 fn durable_error(path: PathBuf, error: DurableFsError) -> AdmissionError {
     match error {
         DurableFsError::Io(source) => AdmissionError::Io { path, source },
@@ -2456,6 +2520,72 @@ mod tests {
         assert_eq!(result.outcome, AdmissionLayoutRecoveryOutcomeV1::NotApplied);
         assert_eq!(result.reason, AdmissionLayoutRecoveryReasonV1::PlanMismatch);
         assert_eq!(before, tree_fingerprint(coordinator.root()));
+    }
+
+    #[test]
+    fn status_rejects_existing_real_quarantine_destination() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-collision");
+        let plan = coordinator
+            .layout_recovery_status_with_timeout(
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .plan_sha256
+            .expect("plan");
+        fs::create_dir(
+            coordinator
+                .root()
+                .join(QUARANTINE_DIR)
+                .join(format!("agent-tickets.recovered-v1-{plan}")),
+        )
+        .expect("collision");
+        let status = coordinator.layout_recovery_status_with_timeout(
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(
+            status.classification,
+            AdmissionLayoutRecoveryClassificationV1::OperatorRequired
+        );
+        assert_eq!(
+            status.reason,
+            AdmissionLayoutRecoveryReasonV1::QuarantineCollision
+        );
+        assert!(status.plan_sha256.is_none());
+    }
+
+    #[test]
+    fn apply_reports_uncertain_when_durability_fails_after_rename() {
+        let base = coordinator_with_empty_historical_agent_tickets("layout-post-rename");
+        let coordinator =
+            AdmissionCoordinator::test_at_with_durable_fault(base.root().to_path_buf(), 2);
+        let plan = coordinator
+            .layout_recovery_status_with_timeout(
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .plan_sha256
+            .expect("plan");
+        let result = coordinator.apply_layout_recovery_with_timeout(
+            &plan,
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(
+            result.outcome,
+            AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain
+        );
+        assert_eq!(
+            result.quarantine_entry,
+            Some(format!("agent-tickets.recovered-v1-{plan}"))
+        );
+        assert!(
+            coordinator
+                .root()
+                .join(QUARANTINE_DIR)
+                .join(result.quarantine_entry.expect("entry"))
+                .is_dir()
+        );
     }
 
     #[test]
