@@ -630,6 +630,8 @@ struct ReceiptPolicyView<'a> {
     overall_status: EvidenceStatus,
 }
 
+// Direct ownership keeps both versioned receipt validation paths uniform.
+#[allow(clippy::large_enum_variant)]
 enum VerifiedReceipt {
     V1(ReceiptEnvelopeV1),
     V2(ReceiptEnvelopeV2),

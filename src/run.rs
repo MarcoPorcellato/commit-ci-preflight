@@ -244,6 +244,8 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
     )
 }
 
+// The explicit ports keep storage and lifecycle fault paths independently injectable.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
     request: &RunRequest<'_>,
     runtime: &dyn RuntimePort,
@@ -269,6 +271,8 @@ pub fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
     )
 }
 
+// The explicit ports preserve the public runtime-preflight test seam.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight(
     request: &RunRequest<'_>,
     runtime: &dyn RuntimePort,
@@ -295,6 +299,8 @@ pub fn execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight(
     )
 }
 
+// This private composition boundary wires independently injected run ports.
+#[allow(clippy::too_many_arguments)]
 fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
     request: &RunRequest<'_>,
     runtime: &dyn RuntimePort,
@@ -394,6 +400,8 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
     .map(|(receipt, _, _)| receipt)
 }
 
+// Receipt finalization shares the same explicit fault-injection ports as execution.
+#[allow(clippy::too_many_arguments)]
 fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
     request: &RunRequest<'_>,
     runtime: &dyn RuntimePort,

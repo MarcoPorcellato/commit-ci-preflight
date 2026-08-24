@@ -307,8 +307,7 @@ fn process_snapshot(parent_pid: u32) -> Result<Option<ProcessSnapshot>, AgentSes
             )
         };
         if actual_size == expected_size {
-            let observed_pid = u32::try_from(info.pbi_pid)
-                .map_err(|_| AgentSessionError::InvalidPlatformOutput("process PID"))?;
+            let observed_pid = info.pbi_pid;
             if observed_pid != parent_pid {
                 return Err(AgentSessionError::InvalidPlatformOutput("process PID"));
             }

@@ -1036,7 +1036,7 @@ fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError>
             remove_if_present(destination)?;
             return Ok(false);
         }
-        return Err(CacheError::Io(error));
+        Err(CacheError::Io(error))
     }
     #[cfg(not(target_os = "macos"))]
     {

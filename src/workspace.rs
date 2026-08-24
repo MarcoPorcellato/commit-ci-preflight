@@ -556,7 +556,7 @@ fn observe_directory(
             .map_err(|error| map_artifact_io(contract_path, error))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| map_artifact_io(contract_path, error))?;
-        children.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+        children.sort_by_key(|entry| entry.file_name());
         for child in children {
             let child_path = child.path();
             let metadata = fs::symlink_metadata(&child_path)
