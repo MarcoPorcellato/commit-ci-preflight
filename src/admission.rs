@@ -936,14 +936,7 @@ impl AdmissionCoordinator {
             }
             Err(_) => {
                 let outcome = outcome_after_relocation_error(&source, &destination);
-                let entry =
-                    if matches!(outcome, AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain)
-                        && destination.exists()
-                    {
-                        Some(entry)
-                    } else {
-                        None
-                    };
+                let entry = relocation_entry_after_error(outcome, entry);
                 (
                     outcome,
                     AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
@@ -1850,6 +1843,13 @@ fn outcome_after_relocation_error(
     }
 }
 
+fn relocation_entry_after_error(
+    outcome: AdmissionLayoutRecoveryOutcomeV1,
+    entry: String,
+) -> Option<String> {
+    matches!(outcome, AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain).then_some(entry)
+}
+
 fn durable_error(path: PathBuf, error: DurableFsError) -> AdmissionError {
     match error {
         DurableFsError::Io(source) => AdmissionError::Io { path, source },
@@ -2586,6 +2586,16 @@ mod tests {
                 .join(result.quarantine_entry.expect("entry"))
                 .is_dir()
         );
+    }
+
+    #[test]
+    fn uncertain_relocation_always_reports_planned_entry() {
+        let entry = "agent-tickets.recovered-v1-0123456789abcdef".to_owned();
+        let reported = relocation_entry_after_error(
+            AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+            entry.clone(),
+        );
+        assert_eq!(reported, Some(entry));
     }
 
     #[test]
