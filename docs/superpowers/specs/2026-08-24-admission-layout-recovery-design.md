@@ -201,12 +201,20 @@ normal admission status schema are unchanged.
 
 ## TDD and verification
 
-The first RED test is black-box: it constructs an owned temporary coordinator
-root containing only an empty plain `agent-tickets/` incompatibility, proves
-that normal status fails, then invokes `admission layout-recovery status`. The
-unmodified binary compiles but rejects that unknown subcommand, providing an
-observable RED without referencing an absent Rust API. GREEN introduces only
-the plan/status surface before apply.
+The first RED test exercises the CLI parser in-process: it constructs an owned
+temporary coordinator root containing only an empty plain `agent-tickets/`
+incompatibility, proves that normal status fails, then parses `admission
+layout-recovery status`. The unmodified binary parser rejects that unknown
+subcommand, providing an observable RED without referencing an absent Rust
+API. GREEN adds a dispatcher seam that accepts an explicitly injected
+coordinator only from `src/main.rs` unit tests; production dispatch continues
+to resolve `AdmissionCoordinator::platform()` internally.
+
+Integration behavior is covered through core coordinator tests plus in-process
+CLI parse/dispatch tests. The release binary gains no coordinator-root flag,
+environment override, hidden test mode, or path supplied by a caller. This is
+required because the production admission boundary intentionally rejects
+temporary roots and roots inside the current repository.
 
 Required deterministic coverage:
 
