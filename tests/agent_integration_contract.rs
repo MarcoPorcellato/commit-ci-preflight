@@ -124,6 +124,27 @@ fn multi_harness_reference_has_a_complete_truthful_l1_surface() {
     assert!(readme.contains("docs/agent-integrations/HARNESS_INTEGRATION.md"));
 }
 
+#[test]
+fn admission_layout_recovery_guidance_is_hash_bound_and_never_manual() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let runbook = read(root, "docs/COORDINATION_RUNBOOK.md");
+    let troubleshooting = read(root, "docs/TROUBLESHOOTING.md");
+    for required in [
+        "admission layout-recovery status --json",
+        "admission layout-recovery apply",
+        "--expected-plan",
+        "recovery_uncertain",
+        "does not authorize",
+        "Manual deletion",
+    ] {
+        assert!(
+            runbook.contains(required) || troubleshooting.contains(required),
+            "missing recovery boundary: {required}"
+        );
+    }
+    assert!(!runbook.contains("ignore `agent-tickets`"));
+}
+
 fn read(root: &Path, relative: &str) -> String {
     fs::read_to_string(root.join(relative)).unwrap_or_else(|error| {
         panic!("read {relative}: {error}");
