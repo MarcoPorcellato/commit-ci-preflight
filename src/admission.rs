@@ -16,6 +16,10 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
@@ -304,6 +308,8 @@ pub struct AdmissionCoordinator {
     root: PathBuf,
     #[cfg(test)]
     durable_fault: Option<usize>,
+    #[cfg(test)]
+    unlock_fault: Option<Arc<AtomicUsize>>,
 }
 
 impl AdmissionCoordinator {
@@ -312,6 +318,7 @@ impl AdmissionCoordinator {
         Self {
             root,
             durable_fault: None,
+            unlock_fault: None,
         }
     }
 
@@ -320,6 +327,16 @@ impl AdmissionCoordinator {
         Self {
             root,
             durable_fault: Some(fail_at),
+            unlock_fault: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_at_with_unlock_fault(root: PathBuf, fail_at: usize) -> Self {
+        Self {
+            root,
+            durable_fault: None,
+            unlock_fault: Some(Arc::new(AtomicUsize::new(fail_at))),
         }
     }
 
@@ -345,6 +362,8 @@ impl AdmissionCoordinator {
             root,
             #[cfg(test)]
             durable_fault: None,
+            #[cfg(test)]
+            unlock_fault: None,
         })
     }
 
@@ -657,22 +676,36 @@ impl AdmissionCoordinator {
         let Ok(snapshot_slot) = open_existing_lock_file(&self.root.join(SLOT_LOCK))
             .and_then(|x| x.ok_or(AdmissionError::UnsafeLayout(self.root.join(SLOT_LOCK))))
         else {
-            let _ = unlock(&mut snapshot_queue);
+            if self
+                .release_recovery_locks(None, &mut snapshot_queue)
+                .is_err()
+            {
+                return base();
+            }
             return AdmissionLayoutRecoveryStatusV1 {
                 reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout,
                 ..base()
             };
         };
         if snapshot_slot.try_lock_exclusive().is_err() {
-            let _ = unlock(&mut snapshot_queue);
+            if self
+                .release_recovery_locks(None, &mut snapshot_queue)
+                .is_err()
+            {
+                return base();
+            }
             return AdmissionLayoutRecoveryStatusV1 {
                 reason: AdmissionLayoutRecoveryReasonV1::LockTimeout,
                 ..base()
             };
         }
         let mut snapshot_slot = snapshot_slot;
-        let _ = unlock(&mut snapshot_slot);
-        let _ = unlock(&mut snapshot_queue);
+        if self
+            .release_recovery_locks(Some(&mut snapshot_slot), &mut snapshot_queue)
+            .is_err()
+        {
+            return base();
+        }
         if !target {
             return AdmissionLayoutRecoveryStatusV1 {
                 classification: AdmissionLayoutRecoveryClassificationV1::NotNeeded,
@@ -734,28 +767,41 @@ impl AdmissionCoordinator {
         let slot = match open_existing_lock_file(&self.root.join(SLOT_LOCK)) {
             Ok(Some(file)) => file,
             Ok(None) => {
-                let _ = unlock(&mut queue);
+                let release = self.release_recovery_locks(None, &mut queue);
+                if release.is_err() {
+                    return base();
+                }
                 return AdmissionLayoutRecoveryStatusV1 {
                     reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout,
                     ..base()
                 };
             }
             Err(_) => {
-                let _ = unlock(&mut queue);
+                let release = self.release_recovery_locks(None, &mut queue);
+                if release.is_err() {
+                    return base();
+                }
                 return base();
             }
         };
         let slot_free = slot.try_lock_exclusive().is_ok();
         if !slot_free {
-            let _ = unlock(&mut queue);
+            let release = self.release_recovery_locks(None, &mut queue);
+            if release.is_err() {
+                return base();
+            }
             return AdmissionLayoutRecoveryStatusV1 {
                 reason: AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle,
                 ..base()
             };
         }
         let mut slot = slot;
-        let _ = unlock(&mut slot);
-        let _ = unlock(&mut queue);
+        if self
+            .release_recovery_locks(Some(&mut slot), &mut queue)
+            .is_err()
+        {
+            return base();
+        }
         root_entries.sort_by(|a, b| a.name.cmp(&b.name));
         let plan = AdmissionLayoutRecoveryPlanV1 {
             schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION,
@@ -800,6 +846,53 @@ impl AdmissionCoordinator {
             reason: AdmissionLayoutRecoveryReasonV1::EmptyHistoricalAgentTickets,
             plan_sha256: Some(plan_sha256),
         }
+    }
+
+    #[cfg(test)]
+    fn recovery_unlock(&self, file: &mut File, path: &Path) -> Result<(), AdmissionError> {
+        let result = FileExt::unlock(file).map_err(|source| AdmissionError::Lock {
+            path: path.to_path_buf(),
+            source,
+        });
+        if let Some(counter) = &self.unlock_fault
+            && counter
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            && result.is_ok()
+        {
+            return Err(AdmissionError::Lock {
+                path: path.to_path_buf(),
+                source: io::Error::new(io::ErrorKind::Other, "injected unlock failure"),
+            });
+        }
+        result
+    }
+
+    fn release_recovery_locks(
+        &self,
+        slot: Option<&mut File>,
+        queue: &mut File,
+    ) -> Result<(), AdmissionError> {
+        let mut error = None;
+        if let Some(slot) = slot {
+            #[cfg(test)]
+            let result = self.recovery_unlock(slot, &self.root.join(SLOT_LOCK));
+            #[cfg(not(test))]
+            let result = unlock(slot);
+            if let Err(err) = result {
+                error = Some(err);
+            }
+        }
+        #[cfg(test)]
+        let result = self.recovery_unlock(queue, &self.root.join(QUEUE_LOCK));
+        #[cfg(not(test))]
+        let result = unlock(queue);
+        if let Err(err) = result {
+            if error.is_none() {
+                error = Some(err);
+            }
+        }
+        error.map_or(Ok(()), Err)
     }
 
     fn locked_layout_plan_sha256(&self) -> Option<String> {
@@ -903,7 +996,13 @@ impl AdmissionCoordinator {
         let mut slot = match open_existing_lock_file(&self.root.join(SLOT_LOCK)) {
             Ok(Some(f)) => f,
             _ => {
-                let _ = unlock(&mut queue);
+                if self.release_recovery_locks(None, &mut queue).is_err() {
+                    return report(
+                        AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+                        AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                        None,
+                    );
+                }
                 return report(
                     AdmissionLayoutRecoveryOutcomeV1::NotApplied,
                     AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
@@ -912,7 +1011,13 @@ impl AdmissionCoordinator {
             }
         };
         if slot.try_lock_exclusive().is_err() {
-            let _ = unlock(&mut queue);
+            if self.release_recovery_locks(None, &mut queue).is_err() {
+                return report(
+                    AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+                    AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                    None,
+                );
+            }
             return report(
                 AdmissionLayoutRecoveryOutcomeV1::NotApplied,
                 AdmissionLayoutRecoveryReasonV1::LockTimeout,
@@ -920,8 +1025,14 @@ impl AdmissionCoordinator {
             );
         }
         if !self.root.join("agent-tickets").exists() {
-            let _ = unlock(&mut slot);
-            let _ = unlock(&mut queue);
+            let release = self.release_recovery_locks(Some(&mut slot), &mut queue);
+            if release.is_err() {
+                return report(
+                    AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+                    AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                    None,
+                );
+            }
             return report(
                 AdmissionLayoutRecoveryOutcomeV1::NotApplied,
                 AdmissionLayoutRecoveryReasonV1::CanonicalLayout,
@@ -929,8 +1040,14 @@ impl AdmissionCoordinator {
             );
         }
         let Some(plan) = self.locked_layout_plan_sha256() else {
-            let _ = unlock(&mut slot);
-            let _ = unlock(&mut queue);
+            let release = self.release_recovery_locks(Some(&mut slot), &mut queue);
+            if release.is_err() {
+                return report(
+                    AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+                    AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                    None,
+                );
+            }
             return report(
                 AdmissionLayoutRecoveryOutcomeV1::NotApplied,
                 AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
@@ -938,8 +1055,14 @@ impl AdmissionCoordinator {
             );
         };
         if plan != expected_plan {
-            let _ = unlock(&mut slot);
-            let _ = unlock(&mut queue);
+            let release = self.release_recovery_locks(Some(&mut slot), &mut queue);
+            if release.is_err() {
+                return report(
+                    AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+                    AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                    None,
+                );
+            }
             return report(
                 AdmissionLayoutRecoveryOutcomeV1::NotApplied,
                 AdmissionLayoutRecoveryReasonV1::PlanMismatch,
@@ -951,8 +1074,14 @@ impl AdmissionCoordinator {
                 .map(|mut entries| entries.next().is_some())
                 .unwrap_or(true)
             {
-                let _ = unlock(&mut slot);
-                let _ = unlock(&mut queue);
+                let release = self.release_recovery_locks(Some(&mut slot), &mut queue);
+                if release.is_err() {
+                    return report(
+                        AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+                        AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                        None,
+                    );
+                }
                 return report(
                     AdmissionLayoutRecoveryOutcomeV1::NotApplied,
                     AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle,
@@ -965,8 +1094,14 @@ impl AdmissionCoordinator {
         let quarantine = self.root.join(QUARANTINE_DIR);
         let destination = quarantine.join(&entry);
         if destination.exists() {
-            let _ = unlock(&mut slot);
-            let _ = unlock(&mut queue);
+            let release = self.release_recovery_locks(Some(&mut slot), &mut queue);
+            if release.is_err() {
+                return report(
+                    AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
+                    AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                    None,
+                );
+            }
             return report(
                 AdmissionLayoutRecoveryOutcomeV1::NotApplied,
                 AdmissionLayoutRecoveryReasonV1::QuarantineCollision,
@@ -1007,9 +1142,10 @@ impl AdmissionCoordinator {
                 )
             }
         };
-        let unlock_slot = unlock(&mut slot);
-        let unlock_queue = unlock(&mut queue);
-        if unlock_slot.is_err() || unlock_queue.is_err() {
+        if self
+            .release_recovery_locks(Some(&mut slot), &mut queue)
+            .is_err()
+        {
             return report(
                 AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain,
                 AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
@@ -2585,6 +2721,135 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn layout_recovery_status_unlock_failure_is_filesystem_uncertain() {
+        let ordinary = coordinator_with_empty_historical_agent_tickets("layout-unlock-status");
+        let coordinator =
+            AdmissionCoordinator::test_at_with_unlock_fault(ordinary.root().to_path_buf(), 1);
+        let report = coordinator.layout_recovery_status_with_timeout(
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(
+            report.classification,
+            AdmissionLayoutRecoveryClassificationV1::OperatorRequired
+        );
+        assert_eq!(
+            report.reason,
+            AdmissionLayoutRecoveryReasonV1::FilesystemUncertain
+        );
+    }
+
+    #[test]
+    fn layout_recovery_canonical_snapshot_release_failure_is_uncertain() {
+        let ordinary = coordinator_with_empty_historical_agent_tickets("layout-unlock-canonical");
+        fs::remove_dir(ordinary.root().join("agent-tickets")).expect("canonical target absent");
+        let coordinator =
+            AdmissionCoordinator::test_at_with_unlock_fault(ordinary.root().to_path_buf(), 1);
+        let report = coordinator.layout_recovery_status_with_timeout(
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(
+            report.classification,
+            AdmissionLayoutRecoveryClassificationV1::OperatorRequired
+        );
+        assert_eq!(
+            report.reason,
+            AdmissionLayoutRecoveryReasonV1::FilesystemUncertain
+        );
+    }
+
+    #[test]
+    fn layout_recovery_apply_pre_move_unlock_failure_is_uncertain_and_non_mutating() {
+        let ordinary = coordinator_with_empty_historical_agent_tickets("layout-unlock-premove");
+        let plan = ordinary
+            .layout_recovery_status_with_timeout(
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .plan_sha256
+            .expect("plan");
+        fs::write(ordinary.root().join("late-unknown"), b"x").expect("race mutation");
+        let before = tree_fingerprint(ordinary.root());
+        let coordinator =
+            AdmissionCoordinator::test_at_with_unlock_fault(ordinary.root().to_path_buf(), 1);
+        let result = coordinator.apply_layout_recovery_with_timeout(
+            &plan,
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(
+            result.outcome,
+            AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain
+        );
+        assert_eq!(
+            result.reason,
+            AdmissionLayoutRecoveryReasonV1::FilesystemUncertain
+        );
+        assert_eq!(before, tree_fingerprint(ordinary.root()));
+    }
+
+    #[test]
+    fn layout_recovery_apply_final_unlock_failure_preserves_moved_entry() {
+        let ordinary = coordinator_with_empty_historical_agent_tickets("layout-unlock-final");
+        let plan = ordinary
+            .layout_recovery_status_with_timeout(
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .plan_sha256
+            .expect("plan");
+        let coordinator =
+            AdmissionCoordinator::test_at_with_unlock_fault(ordinary.root().to_path_buf(), 1);
+        let result = coordinator.apply_layout_recovery_with_timeout(
+            &plan,
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(
+            result.outcome,
+            AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain
+        );
+        assert_eq!(
+            result.reason,
+            AdmissionLayoutRecoveryReasonV1::FilesystemUncertain
+        );
+        let entry = result.quarantine_entry.expect("preserved entry");
+        assert!(coordinator.root().join(QUARANTINE_DIR).join(entry).is_dir());
+    }
+
+    #[test]
+    fn layout_recovery_apply_missing_slot_release_failure_is_uncertain() {
+        let ordinary =
+            coordinator_with_empty_historical_agent_tickets("layout-unlock-missing-slot");
+        let plan = ordinary
+            .layout_recovery_status_with_timeout(
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .plan_sha256
+            .expect("plan");
+        fs::remove_file(ordinary.root().join(SLOT_LOCK)).expect("replace slot lock");
+        let before = tree_fingerprint(ordinary.root());
+        let coordinator =
+            AdmissionCoordinator::test_at_with_unlock_fault(ordinary.root().to_path_buf(), 1);
+        let result = coordinator.apply_layout_recovery_with_timeout(
+            &plan,
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(
+            result.outcome,
+            AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain
+        );
+        assert_eq!(
+            result.reason,
+            AdmissionLayoutRecoveryReasonV1::FilesystemUncertain
+        );
+        assert_eq!(before, tree_fingerprint(ordinary.root()));
     }
 
     #[test]
