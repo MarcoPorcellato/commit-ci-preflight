@@ -326,9 +326,15 @@ impl AdmissionCoordinator {
         if !self.root_exists()? {
             return Ok(empty_status());
         }
-        self.validate_layout(true)?;
+        if !self.valid_owner_marker_exists()? {
+            return Err(AdmissionError::ForeignOwner(self.root.join(OWNER_FILE)));
+        }
         let queue_lock = self.lock_status(QUEUE_LOCK, "queue_lock")?;
         let mut queue = self.lock_queue_until(&deadline, cancellation)?;
+        if !self.valid_owner_marker_exists()? {
+            return Err(AdmissionError::ForeignOwner(self.root.join(OWNER_FILE)));
+        }
+        self.validate_layout(true)?;
         let (live, _stale) = self.scan_tickets(None, false)?;
         let slot = self.slot_status()?;
         let active = slot.state == "held";
@@ -368,9 +374,20 @@ impl AdmissionCoordinator {
             path: self.root.clone(),
             source,
         })?;
-        self.validate_layout(false)?;
-        let mut queue = self.open_queue(true)?;
+        let initialized = self.valid_owner_marker_exists()?;
+        if !initialized {
+            self.validate_layout(false)?;
+        }
+        let mut queue = self.open_queue(!initialized)?;
         lock_exclusive_until(&queue, &self.root.join(QUEUE_LOCK), deadline, cancellation)?;
+        if initialized {
+            if !self.valid_owner_marker_exists()? {
+                return Err(AdmissionError::ForeignOwner(self.root.join(OWNER_FILE)));
+            }
+            self.validate_layout(true)?;
+        } else {
+            self.validate_layout(false)?;
+        }
         self.ensure_owner_marker()?;
         let tickets = self.root.join(TICKETS_DIR);
         if let Ok(metadata) = fs::symlink_metadata(&tickets) {
@@ -409,7 +426,7 @@ impl AdmissionCoordinator {
         unlock(&mut queue)
     }
 
-    fn ensure_owner_marker(&self) -> Result<(), AdmissionError> {
+    fn valid_owner_marker_exists(&self) -> Result<bool, AdmissionError> {
         let path = self.root.join(OWNER_FILE);
         match fs::symlink_metadata(&path) {
             Ok(metadata) => {
@@ -423,9 +440,18 @@ impl AdmissionCoordinator {
                 if actual != OWNER_BYTES {
                     return Err(AdmissionError::ForeignOwner(path));
                 }
-                Ok(())
+                Ok(true)
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(source) => Err(AdmissionError::Io { path, source }),
+        }
+    }
+
+    fn ensure_owner_marker(&self) -> Result<(), AdmissionError> {
+        let path = self.root.join(OWNER_FILE);
+        match self.valid_owner_marker_exists()? {
+            true => Ok(()),
+            false => {
                 let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
@@ -442,7 +468,6 @@ impl AdmissionCoordinator {
                 file.sync_all()
                     .map_err(|source| AdmissionError::Io { path, source })
             }
-            Err(source) => Err(AdmissionError::Io { path, source }),
         }
     }
 
@@ -1744,6 +1769,72 @@ mod tests {
         first.finish();
         second.finish();
         fs::remove_dir_all(root).expect("remove test coordinator");
+    }
+
+    #[test]
+    fn initialized_root_waits_for_queue_owned_durable_temporary_before_validation() {
+        let coordinator = coordinator("durable-layout-race");
+        coordinator.initialize().expect("initialize coordinator");
+
+        let mut queue = coordinator.open_queue(false).expect("open queue lock");
+        queue.lock_exclusive().expect("hold queue lock");
+        let temporary = coordinator
+            .root()
+            .join(format!(".ccp-durable-tmp-{}-test", std::process::id()));
+        fs::write(&temporary, b"owned staging\n").expect("temporary durable file");
+
+        assert!(
+            matches!(
+                coordinator
+                    .status_with_timeout(Duration::from_millis(60), &CancellationToken::default(),),
+                Err(AdmissionError::Timeout)
+            ),
+            "status must wait for the queue-owned durable write"
+        );
+        fs::remove_file(&temporary).expect("remove temporary durable file");
+        unlock(&mut queue).expect("release queue lock");
+        assert!(!coordinator.status().expect("status").active);
+
+        queue.lock_exclusive().expect("hold queue lock again");
+        fs::write(&temporary, b"owned staging\n").expect("temporary durable file");
+        assert!(
+            matches!(
+                coordinator.acquire(Duration::from_millis(60), &CancellationToken::default(),),
+                Err(AdmissionError::Timeout)
+            ),
+            "acquire must wait for the queue-owned durable write"
+        );
+        fs::remove_file(&temporary).expect("remove temporary durable file");
+        unlock(&mut queue).expect("release queue lock");
+        let guard = coordinator
+            .acquire(Duration::from_secs(2), &CancellationToken::default())
+            .expect("acquire");
+        drop(guard);
+        fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
+    }
+
+    #[test]
+    fn unlocked_durable_temporary_remains_fail_closed() {
+        let coordinator = coordinator("unlocked-durable-temporary");
+        coordinator.initialize().expect("initialize coordinator");
+        let temporary = coordinator
+            .root()
+            .join(format!(".ccp-durable-tmp-{}-foreign", std::process::id()));
+        fs::write(&temporary, b"untrusted staging\n").expect("foreign temporary file");
+
+        assert!(matches!(
+            coordinator.status(),
+            Err(AdmissionError::UnsafeLayout(path)) if path == temporary
+        ));
+        assert!(matches!(
+            coordinator.acquire(Duration::from_secs(1), &CancellationToken::default()),
+            Err(AdmissionError::UnsafeLayout(path)) if path == temporary
+        ));
+        assert!(
+            temporary.exists(),
+            "admission must not remove unknown state"
+        );
+        fs::remove_dir_all(coordinator.root()).expect("remove test coordinator");
     }
 
     #[test]
