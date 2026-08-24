@@ -424,16 +424,20 @@ pub fn observe_artifacts(
     plan: &crate::config::ExecutionPlanV1,
     run_root: &Path,
 ) -> Result<Vec<ArtifactEvidence>, ArtifactObservationError> {
-    let artifact_root = run_root.join("artifacts");
-    validate_under_root(&artifact_root, run_root)
-        .map_err(|_| ArtifactObservationError::PathEscape)?;
-    ensure_plain_directory_chain(run_root, &artifact_root, "artifacts")?;
     let mut contracts = plan
         .checks
         .iter()
         .flat_map(|check| check.artifact_contracts.iter())
         .collect::<Vec<_>>();
     contracts.sort_by(|left, right| left.path.cmp(&right.path));
+    if contracts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let artifact_root = run_root.join("artifacts");
+    validate_under_root(&artifact_root, run_root)
+        .map_err(|_| ArtifactObservationError::PathEscape)?;
+    ensure_plain_directory_chain(run_root, &artifact_root, "artifacts")?;
 
     contracts
         .into_iter()
@@ -1172,6 +1176,27 @@ max_entries = 1
         assert_eq!(first[0].total_bytes, 7);
         assert!(first[0].manifest_digest.starts_with("sha256:"));
 
+        drop(prepared);
+        fs::remove_dir_all(test_root(name)).expect("clean fixture");
+    }
+
+    #[test]
+    fn artifact_observer_accepts_plan_without_artifact_contracts_or_mounts() {
+        let name = "artifact-observer-no-artifacts";
+        let (repository, resolved, mut envelope) = fixture(name);
+        envelope.plan.checks[0].artifacts.clear();
+        assert!(envelope.plan.checks[0].artifact_contracts.is_empty());
+        let cache = ManagedCache::initialize(resolved).expect("cache");
+        let prepared =
+            PreparedWorkspace::prepare(&envelope, &repository, &cache).expect("prepare workspace");
+        let artifact_root = prepared.plan.run_root.join("artifacts");
+        assert!(!artifact_root.exists());
+
+        let evidence =
+            observe_artifacts(&envelope.plan, &prepared.plan.run_root).expect("empty observation");
+
+        assert!(evidence.is_empty());
+        assert!(!artifact_root.exists());
         drop(prepared);
         fs::remove_dir_all(test_root(name)).expect("clean fixture");
     }
