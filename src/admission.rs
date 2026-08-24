@@ -137,6 +137,28 @@ const PROCESS_VISIBILITY_NOTE: &str =
     "No process visible in the local shell does not prove global inactivity.";
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Copy, Default)]
+struct LayoutRecoveryEffects {
+    #[cfg(test)]
+    deny_target_inventory: bool,
+}
+
+impl LayoutRecoveryEffects {
+    fn before_target_inventory(&self, path: &Path) -> Result<(), AdmissionError> {
+        #[cfg(test)]
+        if self.deny_target_inventory {
+            return Err(AdmissionError::Io {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "injected layout recovery permission denial",
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct AdmissionDeadline {
     at: Instant,
@@ -454,6 +476,15 @@ impl AdmissionCoordinator {
         timeout: Duration,
         cancellation: &CancellationToken,
     ) -> AdmissionLayoutRecoveryStatusV1 {
+        self.layout_recovery_status_with_effects(timeout, cancellation, LayoutRecoveryEffects::default())
+    }
+
+    fn layout_recovery_status_with_effects(
+        &self,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+        effects: LayoutRecoveryEffects,
+    ) -> AdmissionLayoutRecoveryStatusV1 {
         let base = || AdmissionLayoutRecoveryStatusV1 {
             schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION.to_owned(),
             classification: AdmissionLayoutRecoveryClassificationV1::OperatorRequired,
@@ -644,6 +675,9 @@ impl AdmissionCoordinator {
             };
         }
         let target_path = self.root.join("agent-tickets");
+        if effects.before_target_inventory(&target_path).is_err() {
+            return base();
+        }
         let Ok(meta) = fs::symlink_metadata(&target_path) else {
             return base();
         };
@@ -875,7 +909,7 @@ impl AdmissionCoordinator {
             let _ = unlock(&mut queue);
             return report(
                 AdmissionLayoutRecoveryOutcomeV1::NotApplied,
-                AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle,
+                AdmissionLayoutRecoveryReasonV1::LockTimeout,
                 None,
             );
         }
@@ -2328,6 +2362,26 @@ mod tests {
     }
 
     #[test]
+    fn layout_recovery_target_inventory_denial_is_uncertain_and_non_mutating() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-denied-inventory");
+        let before = tree_fingerprint(coordinator.root());
+        let report = coordinator.layout_recovery_status_with_effects(
+            Duration::from_millis(200),
+            &CancellationToken::default(),
+            LayoutRecoveryEffects {
+                #[cfg(test)]
+                deny_target_inventory: true,
+            },
+        );
+        assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired);
+        assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::FilesystemUncertain);
+        assert!(report.plan_sha256.is_none());
+        let json = serde_json::to_string(&report).expect("serialize report");
+        assert!(!json.contains(coordinator.root().to_string_lossy().as_ref()));
+        assert_eq!(before, tree_fingerprint(coordinator.root()));
+    }
+
+    #[test]
     fn layout_recovery_malformed_canonical_without_target_is_not_canonical() {
         let coordinator = coordinator("layout-malformed-canonical");
         fs::create_dir_all(coordinator.root()).expect("root");
@@ -2586,6 +2640,43 @@ mod tests {
                 .join(result.quarantine_entry.expect("entry"))
                 .is_dir()
         );
+    }
+
+    #[test]
+    fn apply_reports_not_applied_when_durability_fails_before_rename() {
+        let base = coordinator_with_empty_historical_agent_tickets("layout-pre-rename");
+        let coordinator = AdmissionCoordinator::test_at_with_durable_fault(base.root().to_path_buf(), 1);
+        let plan = coordinator
+            .layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default())
+            .plan_sha256
+            .expect("plan");
+        let before = tree_fingerprint(coordinator.root());
+        let result = coordinator.apply_layout_recovery_with_timeout(
+            &plan,
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(result.outcome, AdmissionLayoutRecoveryOutcomeV1::NotApplied);
+        assert_eq!(before, tree_fingerprint(coordinator.root()));
+        assert!(coordinator.root().join("agent-tickets").is_dir());
+    }
+
+    #[test]
+    fn apply_reports_lock_timeout_without_mutation() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-apply-lock-timeout");
+        let plan = coordinator
+            .layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default())
+            .plan_sha256
+            .expect("plan");
+        let slot = OpenOptions::new().read(true).write(true)
+            .open(coordinator.root().join(SLOT_LOCK)).expect("slot");
+        slot.try_lock_exclusive().expect("hold slot");
+        let before = tree_fingerprint(coordinator.root());
+        let result = coordinator.apply_layout_recovery_with_timeout(
+            &plan, Duration::from_millis(50), &CancellationToken::default());
+        assert_eq!(result.outcome, AdmissionLayoutRecoveryOutcomeV1::NotApplied);
+        assert_eq!(result.reason, AdmissionLayoutRecoveryReasonV1::LockTimeout);
+        assert_eq!(before, tree_fingerprint(coordinator.root()));
     }
 
     #[test]
