@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
@@ -28,6 +28,13 @@ fn fixture() -> &'static Path {
 
 fn matryca_matrix_fixture() -> &'static Path {
     Path::new("tests/fixtures/config-v2-matryca-three-runtimes.toml")
+}
+
+fn executable_fixture_root(prefix: &str) -> PathBuf {
+    std::env::var_os("CCP_TEST_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(format!("{prefix}-{}", std::process::id()))
 }
 
 #[test]
@@ -229,7 +236,7 @@ fn matrix_dry_run_human_output_labels_every_runtime() {
 fn matrix_doctor_probes_all_matryca_runtimes_with_labeled_output() {
     use std::os::unix::fs::PermissionsExt;
 
-    let root = std::env::temp_dir().join(format!("ccp-matrix-doctor-{}", std::process::id()));
+    let root = executable_fixture_root("ccp-matrix-doctor");
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("fake docker root");
     let marker = root.join("probe-count");
