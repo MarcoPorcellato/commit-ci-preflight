@@ -940,10 +940,33 @@ impl AdmissionCoordinator {
                 None,
             );
         }
+        for directory in [TICKETS_DIR, LEASES_DIR] {
+            if fs::read_dir(self.root.join(directory))
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(true)
+            {
+                let _ = unlock(&mut slot);
+                let _ = unlock(&mut queue);
+                return report(
+                    AdmissionLayoutRecoveryOutcomeV1::NotApplied,
+                    AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle,
+                    None,
+                );
+            }
+        }
         let entry = format!("agent-tickets.recovered-v1-{plan}");
         let source = self.root.join("agent-tickets");
         let quarantine = self.root.join(QUARANTINE_DIR);
         let destination = quarantine.join(&entry);
+        if destination.exists() {
+            let _ = unlock(&mut slot);
+            let _ = unlock(&mut queue);
+            return report(
+                AdmissionLayoutRecoveryOutcomeV1::NotApplied,
+                AdmissionLayoutRecoveryReasonV1::QuarantineCollision,
+                None,
+            );
+        }
         #[cfg(test)]
         let durable_fs = self
             .durable_fault
@@ -2379,6 +2402,49 @@ mod tests {
         let json = serde_json::to_string(&report).expect("serialize report");
         assert!(!json.contains(coordinator.root().to_string_lossy().as_ref()));
         assert_eq!(before, tree_fingerprint(coordinator.root()));
+    }
+
+    #[test]
+    fn layout_recovery_rejects_unsupported_or_nonempty_state_without_mutation() {
+        let cases: Vec<(&str, Box<dyn Fn(&AdmissionCoordinator)>)> = vec![
+            ("target staging", Box::new(|c| { fs::write(c.root().join("agent-tickets").join(".agent-ticket-staging-partial"), b"x").unwrap(); })),
+            ("target file", Box::new(|c| { fs::remove_dir(c.root().join("agent-tickets")).unwrap(); fs::write(c.root().join("agent-tickets"), b"x").unwrap(); })),
+            ("target symlink", Box::new(|c| { fs::remove_dir(c.root().join("agent-tickets")).unwrap(); std::os::unix::fs::symlink("tickets", c.root().join("agent-tickets")).unwrap(); })),
+            ("foreign owner", Box::new(|c| { fs::write(c.root().join(OWNER_FILE), b"{}\n").unwrap(); })),
+            ("malformed owner", Box::new(|c| { fs::write(c.root().join(OWNER_FILE), b"not-json\n").unwrap(); })),
+            ("missing queue lock", Box::new(|c| { fs::remove_file(c.root().join(QUEUE_LOCK)).unwrap(); })),
+            ("queue symlink", Box::new(|c| { fs::remove_file(c.root().join(QUEUE_LOCK)).unwrap(); std::os::unix::fs::symlink(SLOT_LOCK, c.root().join(QUEUE_LOCK)).unwrap(); })),
+            ("missing slot lock", Box::new(|c| { fs::remove_file(c.root().join(SLOT_LOCK)).unwrap(); })),
+            ("slot symlink", Box::new(|c| { fs::remove_file(c.root().join(SLOT_LOCK)).unwrap(); std::os::unix::fs::symlink(QUEUE_LOCK, c.root().join(SLOT_LOCK)).unwrap(); })),
+            ("canonical ticket", Box::new(|c| { fs::write(c.root().join(TICKETS_DIR).join("ticket-000.json"), b"{}\n").unwrap(); })),
+            ("canonical lease", Box::new(|c| { fs::write(c.root().join(LEASES_DIR).join("lease-000.json"), b"{}\n").unwrap(); })),
+            ("unknown sibling", Box::new(|c| { fs::write(c.root().join("unknown"), b"x").unwrap(); })),
+        ];
+        for (name, mutate) in cases {
+            let c = coordinator_with_empty_historical_agent_tickets(&format!("layout-case-{name}"));
+            mutate(&c);
+            let before = tree_fingerprint(c.root());
+            let report = c.layout_recovery_status_with_timeout(Duration::from_millis(200), &CancellationToken::default());
+            assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired, "{name}");
+            assert!(report.plan_sha256.is_none(), "{name}");
+            assert_eq!(before, tree_fingerprint(c.root()), "{name}");
+        }
+    }
+
+    #[test]
+    fn layout_recovery_apply_stale_plan_matrix_is_non_mutating() {
+        for (name, mutate) in [
+            ("target-entry", 0), ("unknown-sibling", 1), ("collision", 2), ("ticket", 3)
+        ] {
+            let c = coordinator_with_empty_historical_agent_tickets(&format!("layout-race-{name}"));
+            let plan = c.layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default()).plan_sha256.unwrap();
+            let quarantine = c.root().join(QUARANTINE_DIR).join(format!("agent-tickets.recovered-v1-{plan}"));
+            match mutate { 0 => { fs::write(c.root().join("agent-tickets").join("late"), b"x").unwrap(); }, 1 => { fs::write(c.root().join("unknown"), b"x").unwrap(); }, 2 => { fs::create_dir(quarantine).unwrap(); }, _ => { fs::write(c.root().join(TICKETS_DIR).join("ticket-000.json"), b"{}\n").unwrap(); } }
+            let before = tree_fingerprint(c.root());
+            let result = c.apply_layout_recovery_with_timeout(&plan, Duration::from_secs(1), &CancellationToken::default());
+            assert_eq!(result.outcome, AdmissionLayoutRecoveryOutcomeV1::NotApplied, "{name}");
+            assert_eq!(before, tree_fingerprint(c.root()), "{name}");
+        }
     }
 
     #[test]

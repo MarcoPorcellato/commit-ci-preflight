@@ -1718,6 +1718,19 @@ mod task1_layout_recovery_tests {
             );
         }
     }
+
+    #[test]
+    fn admission_layout_recovery_apply_parses_plan_and_timeout() {
+        let parsed = Cli::try_parse_from(["commit-ci-preflight", "admission", "layout-recovery", "apply", "--plan-sha256", &"a".repeat(64), "--timeout-seconds", "1"]);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn admission_layout_recovery_rejects_zero_and_sixty_one_before_dispatch() {
+        for value in ["0", "61"] {
+            assert!(Cli::try_parse_from(["commit-ci-preflight", "admission", "layout-recovery", "apply", "--plan-sha256", &"b".repeat(64), "--timeout-seconds", value]).is_err());
+        }
+    }
 }
 
 fn print_resource_history(json: bool) -> Result<(), CliError> {
