@@ -392,13 +392,27 @@ impl AdmissionCoordinator {
         let Ok(entries) = fs::read_dir(&self.root) else { return base() };
         let mut root_entries = Vec::new();
         let mut target = false;
+        let mut required = [false; 5];
         for entry in entries.flatten() {
             let path = entry.path(); let name = entry.file_name().to_string_lossy().into_owned();
             if name == "agent-tickets" { target = true; continue; }
+            let known = match name.as_str() {
+                OWNER_FILE => { required[0] = true; true },
+                QUEUE_LOCK => { required[1] = true; true },
+                SLOT_LOCK => { required[2] = true; true },
+                NEXT_TICKET => { required[3] = true; true },
+                TICKETS_DIR => { required[4] = true; true },
+                LEASES_DIR | QUARANTINE_DIR => true,
+                _ => false,
+            };
+            if !known { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
             let Ok(meta) = fs::symlink_metadata(&path) else { return base() };
             if meta.file_type().is_symlink() || (!meta.is_dir() && !meta.is_file()) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
+            if matches!(name.as_str(), TICKETS_DIR | LEASES_DIR | QUARANTINE_DIR) && !meta.is_dir() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
+            if matches!(name.as_str(), OWNER_FILE | QUEUE_LOCK | SLOT_LOCK | NEXT_TICKET) && !meta.is_file() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
             root_entries.push(RecoveryRootEntryV1 { name, kind: if meta.is_dir() { "directory" } else { "file" }.to_owned() });
         }
+        if !required.into_iter().all(|value| value) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
         if !target { return AdmissionLayoutRecoveryStatusV1 { classification: AdmissionLayoutRecoveryClassificationV1::NotNeeded, reason: AdmissionLayoutRecoveryReasonV1::CanonicalLayout, ..base() }; }
         let target_path = self.root.join("agent-tickets");
         let Ok(meta) = fs::symlink_metadata(&target_path) else { return base() };
@@ -1720,6 +1734,7 @@ mod tests {
         let coordinator = coordinator(label);
         coordinator.initialize().expect("canonical coordinator");
         File::create(coordinator.root().join(SLOT_LOCK)).expect("pre-existing slot lock");
+        File::create(coordinator.root().join(NEXT_TICKET)).expect("pre-existing ticket counter");
         fs::create_dir(coordinator.root().join("agent-tickets"))
             .expect("historical empty directory");
         coordinator
@@ -1735,6 +1750,28 @@ mod tests {
         assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::UnsupportedLayout);
         assert!(report.plan_sha256.is_none());
         assert_eq!(before, tree_fingerprint(coordinator.root()));
+    }
+
+    #[test]
+    fn layout_recovery_unknown_sibling_is_operator_required() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-unknown");
+        fs::write(coordinator.root().join("unexpected"), b"x").expect("unknown sibling");
+        let report = coordinator.layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default());
+        assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired);
+        assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::UnsupportedLayout);
+        assert!(report.plan_sha256.is_none());
+    }
+
+    #[test]
+    fn layout_recovery_malformed_canonical_without_target_is_not_canonical() {
+        let coordinator = coordinator("layout-malformed-canonical");
+        fs::create_dir_all(coordinator.root()).expect("root");
+        fs::write(coordinator.root().join(OWNER_FILE), OWNER_BYTES).expect("owner");
+        fs::write(coordinator.root().join(QUEUE_LOCK), b"locked").expect("queue lock");
+        let report = coordinator.layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default());
+        assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired);
+        assert_ne!(report.reason, AdmissionLayoutRecoveryReasonV1::CanonicalLayout);
+        assert!(report.plan_sha256.is_none());
     }
 
     fn tree_fingerprint(root: &Path) -> Vec<(PathBuf, &'static str, Vec<u8>)> {
