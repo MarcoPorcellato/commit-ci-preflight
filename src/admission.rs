@@ -23,6 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::durable_fs::{DurableFileSystem, DurableFsError};
 use crate::process::CancellationToken;
@@ -32,6 +33,37 @@ pub const ADMISSION_STATUS_SCHEMA_VERSION: &str = "2.0";
 pub const DEFAULT_QUEUE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const DEFAULT_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_QUEUE_TICKETS: usize = 1024;
+pub const ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION: &str = "admission-layout-recovery/1.0";
+pub const DEFAULT_LAYOUT_RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS: u64 = 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionLayoutRecoveryClassificationV1 { NotNeeded, RecoverableEmptyHistoricalAgentTickets, OperatorRequired }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionLayoutRecoveryReasonV1 { CanonicalLayout, EmptyHistoricalAgentTickets, LockTimeout, ForeignOwner, UnsupportedLayout, TargetNotEmpty, CoordinatorNotIdle, QuarantineCollision, PlanMismatch, FilesystemUncertain }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdmissionLayoutRecoveryStatusV1 {
+    pub schema_version: String,
+    pub classification: AdmissionLayoutRecoveryClassificationV1,
+    pub target_kind: Option<String>,
+    pub reason: AdmissionLayoutRecoveryReasonV1,
+    pub plan_sha256: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AdmissionLayoutRecoveryPlanV1 {
+    schema_version: &'static str, recovery_kind: &'static str, owner: String, purpose: String,
+    owner_schema_version: String, root_entries: Vec<RecoveryRootEntryV1>,
+    queue_lock_name: &'static str, queue_lock_kind: &'static str, queue_lock_exclusively_held: bool,
+    slot_lock_name: &'static str, slot_lock_kind: &'static str, slot_lock_was_free: bool,
+    ticket_count: usize, lease_count: usize, target_entry_count: usize,
+}
+#[derive(Serialize)]
+struct RecoveryRootEntryV1 { name: String, kind: String }
 
 const OWNER_FILE: &str = ".ccp-admission-root-v1.json";
 const PLATFORM_DIRECTORY: &str = "commit-ci-preflight-admission";
@@ -200,7 +232,7 @@ pub struct AdmissionCoordinator {
 
 impl AdmissionCoordinator {
     #[cfg(test)]
-    fn test_at(root: PathBuf) -> Self {
+    pub(crate) fn test_at(root: PathBuf) -> Self {
         Self { root }
     }
 
@@ -348,6 +380,42 @@ impl AdmissionCoordinator {
             queue_lock,
             process_visibility_note: PROCESS_VISIBILITY_NOTE.to_owned(),
         })
+    }
+
+    pub fn layout_recovery_status_with_timeout(&self, timeout: Duration, cancellation: &CancellationToken) -> AdmissionLayoutRecoveryStatusV1 {
+        let base = || AdmissionLayoutRecoveryStatusV1 { schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION.to_owned(), classification: AdmissionLayoutRecoveryClassificationV1::OperatorRequired, target_kind: None, reason: AdmissionLayoutRecoveryReasonV1::FilesystemUncertain, plan_sha256: None };
+        let Ok(deadline) = AdmissionDeadline::from_timeout(timeout) else { return base() };
+        if !self.root_exists().unwrap_or(false) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
+        let Ok(entries) = fs::read_dir(&self.root) else { return base() };
+        let mut root_entries = Vec::new();
+        let mut target = false;
+        for entry in entries.flatten() {
+            let path = entry.path(); let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "agent-tickets" { target = true; continue; }
+            let Ok(meta) = fs::symlink_metadata(&path) else { return base() };
+            if meta.file_type().is_symlink() || (!meta.is_dir() && !meta.is_file()) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
+            root_entries.push(RecoveryRootEntryV1 { name, kind: if meta.is_dir() { "directory" } else { "file" }.to_owned() });
+        }
+        if !target { return AdmissionLayoutRecoveryStatusV1 { classification: AdmissionLayoutRecoveryClassificationV1::NotNeeded, reason: AdmissionLayoutRecoveryReasonV1::CanonicalLayout, ..base() }; }
+        let target_path = self.root.join("agent-tickets");
+        let Ok(meta) = fs::symlink_metadata(&target_path) else { return base() };
+        if meta.file_type().is_symlink() || !meta.is_dir() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
+        if fs::read_dir(&target_path).map(|mut d| d.next().is_some()).unwrap_or(true) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::TargetNotEmpty, ..base() }; }
+        let Ok(owner) = fs::read(self.root.join(OWNER_FILE)) else { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::ForeignOwner, ..base() }; };
+        if owner != OWNER_BYTES { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::ForeignOwner, ..base() }; }
+        let Ok(mut queue) = self.open_queue(false) else { return base() };
+        if lock_exclusive_until(&queue, &self.root.join(QUEUE_LOCK), &deadline, cancellation).is_err() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::LockTimeout, ..base() }; }
+        let slot = match open_existing_lock_file(&self.root.join(SLOT_LOCK)) { Ok(Some(file)) => file, Ok(None) => { let _ = unlock(&mut queue); return AdmissionLayoutRecoveryStatusV1 { classification: AdmissionLayoutRecoveryClassificationV1::RecoverableEmptyHistoricalAgentTickets, target_kind: Some("historical_agent_tickets".into()), reason: AdmissionLayoutRecoveryReasonV1::EmptyHistoricalAgentTickets, plan_sha256: Some("0".repeat(64)), ..base() }; }, Err(_) => { let _ = unlock(&mut queue); return base(); } };
+        let slot_free = slot.try_lock_exclusive().is_ok();
+        if !slot_free { let _ = unlock(&mut queue); return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle, ..base() }; }
+        let mut slot = slot; let _ = unlock(&mut slot);
+        let _ = unlock(&mut queue);
+        root_entries.sort_by(|a,b| a.name.cmp(&b.name));
+        let plan = AdmissionLayoutRecoveryPlanV1 { schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION, recovery_kind: "empty_historical_agent_tickets", owner: "commit-ci-preflight".into(), purpose: "host-admission-coordinator".into(), owner_schema_version: "1.0".into(), root_entries, queue_lock_name: QUEUE_LOCK, queue_lock_kind: "queue_lock", queue_lock_exclusively_held: true, slot_lock_name: SLOT_LOCK, slot_lock_kind: "slot_lock", slot_lock_was_free: true, ticket_count: 0, lease_count: 0, target_entry_count: 0 };
+        let Ok(bytes) = serde_json::to_vec(&plan) else { return base() }; let digest = Sha256::digest(bytes); let plan_sha256 = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let quarantine = self.root.join(format!("agent-tickets.recovered-v1-{plan_sha256}"));
+        if quarantine.exists() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::QuarantineCollision, ..base() }; }
+        AdmissionLayoutRecoveryStatusV1 { schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION.to_owned(), classification: AdmissionLayoutRecoveryClassificationV1::RecoverableEmptyHistoricalAgentTickets, target_kind: Some("historical_agent_tickets".into()), reason: AdmissionLayoutRecoveryReasonV1::EmptyHistoricalAgentTickets, plan_sha256: Some(plan_sha256) }
     }
 
     #[cfg(test)]
@@ -1642,6 +1710,54 @@ mod tests {
         let root = test_root(name);
         let _ = fs::remove_dir_all(&root);
         AdmissionCoordinator::test_at(root)
+    }
+
+    fn coordinator_with_empty_historical_agent_tickets(label: &str) -> AdmissionCoordinator {
+        let coordinator = coordinator(label);
+        coordinator.initialize().expect("canonical coordinator");
+        fs::create_dir(coordinator.root().join("agent-tickets"))
+            .expect("historical empty directory");
+        coordinator
+    }
+
+    fn tree_fingerprint(root: &Path) -> Vec<(PathBuf, &'static str, Vec<u8>)> {
+        fn walk(root: &Path, path: &Path, out: &mut Vec<(PathBuf, &'static str, Vec<u8>)>) {
+            let mut entries = fs::read_dir(path).expect("read fingerprint directory")
+                .collect::<Result<Vec<_>, _>>().expect("fingerprint entries");
+            entries.sort_by_key(fs::DirEntry::file_name);
+            for entry in entries {
+                let path = entry.path();
+                let relative = path.strip_prefix(root).expect("relative path").to_path_buf();
+                let metadata = fs::symlink_metadata(&path).expect("fingerprint metadata");
+                if metadata.file_type().is_symlink() {
+                    out.push((relative, "symlink", fs::read_link(&path).expect("symlink target")
+                        .to_string_lossy().as_bytes().to_vec()));
+                } else if metadata.is_dir() {
+                    out.push((relative, "directory", Vec::new()));
+                    walk(root, &path, out);
+                } else {
+                    out.push((relative, "file", fs::read(&path).expect("file bytes")));
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        walk(root, root, &mut entries);
+        entries
+    }
+
+    #[test]
+    fn layout_recovery_normal_status_stays_closed_but_plans_empty_historical_directory() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-status");
+        assert!(matches!(coordinator.status(), Err(AdmissionError::UnsafeLayout(_))));
+        let before = tree_fingerprint(coordinator.root());
+        let report = coordinator.layout_recovery_status_with_timeout(
+            Duration::from_secs(1), &CancellationToken::default());
+        assert_eq!(report.classification,
+            AdmissionLayoutRecoveryClassificationV1::RecoverableEmptyHistoricalAgentTickets);
+        let digest = report.plan_sha256.expect("recovery plan");
+        assert_eq!(digest.len(), 64);
+        assert!(digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert_eq!(before, tree_fingerprint(coordinator.root()));
     }
 
     struct ChildHandle {

@@ -25,6 +25,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
     ADMISSION_STATUS_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
     DEFAULT_QUEUE_TIMEOUT, DEFAULT_STATUS_TIMEOUT,
+    DEFAULT_LAYOUT_RECOVERY_TIMEOUT, MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS,
 };
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
@@ -431,6 +432,26 @@ enum AdmissionCommand {
         #[arg(long, default_value_t = DEFAULT_STATUS_TIMEOUT.as_secs())]
         timeout_seconds: u64,
     },
+    LayoutRecovery {
+        #[command(subcommand)]
+        action: AdmissionLayoutRecoveryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdmissionLayoutRecoveryCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = DEFAULT_LAYOUT_RECOVERY_TIMEOUT.as_secs(), value_parser = parse_layout_recovery_timeout)]
+        timeout_seconds: u64,
+    },
+}
+
+fn parse_layout_recovery_timeout(value: &str) -> Result<u64, String> {
+    let seconds = value.parse::<u64>().map_err(|_| "layout recovery timeout must be an integer from 1 through 60".to_owned())?;
+    if !(1..=MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS).contains(&seconds) { return Err("layout recovery timeout must be an integer from 1 through 60".to_owned()); }
+    Ok(seconds)
 }
 
 fn main() {
@@ -1562,6 +1583,12 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
             }
             Ok(())
         }
+        AdmissionCommand::LayoutRecovery { action: AdmissionLayoutRecoveryCommand::Status { json, timeout_seconds } } => {
+            let report = AdmissionCoordinator::platform().map_err(CliError::Admission)?.layout_recovery_status_with_timeout(Duration::from_secs(timeout_seconds), &CancellationToken::default());
+            if json { println!("{}", serde_json::to_string(&report).map_err(CliError::internal)?); }
+            else { println!("Layout recovery schema: {}", report.schema_version); println!("Classification: {:?}", report.classification); println!("Reason: {:?}", report.reason); println!("Plan SHA-256: {:?}", report.plan_sha256); println!("Read-only: no state was changed."); }
+            Ok(())
+        }
     }
 }
 
@@ -1569,6 +1596,26 @@ fn run_resource_command(action: ResourceAction) -> Result<(), CliError> {
     match action {
         ResourceAction::Status { json } => print_resource_status(json),
         ResourceAction::History { json } => print_resource_history(json),
+    }
+}
+
+#[cfg(test)]
+mod task1_layout_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn admission_layout_recovery_status_parses_only_bounded_timeouts() {
+        let parsed = Cli::try_parse_from([
+            "commit-ci-preflight", "admission", "layout-recovery", "status", "--json",
+            "--timeout-seconds", "5",
+        ]);
+        assert!(parsed.is_ok());
+        for invalid in ["0", "61", "not-a-number"] {
+            assert!(Cli::try_parse_from([
+                "commit-ci-preflight", "admission", "layout-recovery", "status",
+                "--timeout-seconds", invalid,
+            ]).is_err());
+        }
     }
 }
 
