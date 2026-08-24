@@ -26,6 +26,10 @@ fn fixture() -> &'static Path {
     Path::new("tests/fixtures/config-v1-read-only.toml")
 }
 
+fn matryca_matrix_fixture() -> &'static Path {
+    Path::new("tests/fixtures/config-v2-matryca-three-runtimes.toml")
+}
+
 #[test]
 fn dry_run_json_is_deterministic_and_never_executes_the_declared_argv() {
     let marker = std::env::temp_dir().join(format!("ccp-dry-run-marker-{}", std::process::id()));
@@ -144,4 +148,145 @@ fn dry_run_human_output_states_that_argv_is_not_a_shell_and_was_not_run() {
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
     assert!(stdout.contains("Argv (not shell)"));
     assert!(stdout.contains("Dry-run: no command was executed."));
+}
+
+#[test]
+fn matrix_dry_run_renders_all_matryca_runtimes_without_execution() {
+    let output = Command::new(binary())
+        .args(["dry-run", "--config"])
+        .arg(matryca_matrix_fixture())
+        .arg("--json")
+        .output()
+        .expect("matrix dry-run");
+
+    assert!(
+        output.status.success(),
+        "matrix dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("matrix dry-run JSON");
+    assert_eq!(value["schema_version"], "2.0");
+    assert!(
+        value["plan_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:"))
+    );
+    let runtimes = value["runtimes"].as_array().expect("runtime array");
+    assert_eq!(runtimes.len(), 3);
+    assert_eq!(
+        runtimes
+            .iter()
+            .map(|runtime| runtime["runtime_id"].as_str().expect("runtime id"))
+            .collect::<Vec<_>>(),
+        vec!["node22", "python312", "python313"]
+    );
+    for runtime in runtimes {
+        assert!(
+            runtime["configuration_digest"]
+                .as_str()
+                .is_some_and(|digest| digest.starts_with("sha256:"))
+        );
+        let dry_run = &runtime["dry_run"];
+        assert_eq!(dry_run["executed"], false);
+        assert_eq!(dry_run["workspace_mount_policy"], "explicit_bindings");
+        let mounts = dry_run["workspace"]["mounts"]
+            .as_array()
+            .expect("explicit mounts");
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0]["access"], "read_only");
+        assert_eq!(mounts[0]["purpose"], "repository");
+        assert_eq!(mounts[1]["access"], "read_write");
+        assert_eq!(mounts[1]["purpose"], "cache");
+    }
+}
+
+#[test]
+fn matrix_dry_run_human_output_labels_every_runtime() {
+    let output = Command::new(binary())
+        .args(["dry-run", "--config"])
+        .arg(matryca_matrix_fixture())
+        .output()
+        .expect("matrix dry-run human output");
+
+    assert!(
+        output.status.success(),
+        "matrix dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
+    assert!(stdout.contains("Matrix plan: sha256:"));
+    assert!(stdout.contains("Runtime ID: node22"));
+    assert!(stdout.contains("Runtime ID: python312"));
+    assert!(stdout.contains("Runtime ID: python313"));
+    assert_eq!(
+        stdout.matches("Dry-run: no command was executed.").count(),
+        3
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn matrix_doctor_probes_all_matryca_runtimes_with_labeled_output() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("ccp-matrix-doctor-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("fake docker root");
+    let marker = root.join("probe-count");
+    let docker = root.join("docker");
+    fs::write(
+        &docker,
+        format!(
+            "#!/bin/sh\nprintf 'probe\\n' >> '{}'\nprintf '%s\\n' '{{\"ServerVersion\":\"29.4.0\",\"OperatingSystem\":\"OrbStack\",\"OSType\":\"linux\",\"MemoryLimit\":true,\"SwapLimit\":true}}'\n",
+            marker.display()
+        ),
+    )
+    .expect("fake docker");
+    let mut permissions = fs::metadata(&docker)
+        .expect("fake docker metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&docker, permissions).expect("fake docker executable");
+
+    let output = Command::new(binary())
+        .args(["doctor", "--config"])
+        .arg(matryca_matrix_fixture())
+        .arg("--json")
+        .env("PATH", &root)
+        .output()
+        .expect("matrix doctor");
+
+    assert!(
+        output.status.success(),
+        "matrix doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("matrix doctor JSON");
+    assert_eq!(value["schema_version"], "2.0");
+    let runtimes = value["runtimes"].as_array().expect("runtime array");
+    assert_eq!(runtimes.len(), 3);
+    assert_eq!(
+        runtimes
+            .iter()
+            .map(|runtime| runtime["runtime_id"].as_str().expect("runtime id"))
+            .collect::<Vec<_>>(),
+        vec!["node22", "python312", "python313"]
+    );
+    assert!(runtimes.iter().all(|runtime| {
+        runtime["configuration_digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:"))
+    }));
+    assert!(runtimes.iter().all(|runtime| {
+        runtime["probe"]["runtime"] == "docker_compatible"
+            && runtime["probe"]["flavor"] == "orb_stack"
+    }));
+    assert_eq!(
+        fs::read_to_string(&marker)
+            .expect("probe marker")
+            .lines()
+            .count(),
+        3
+    );
+    fs::remove_dir_all(root).expect("remove fake docker root");
 }

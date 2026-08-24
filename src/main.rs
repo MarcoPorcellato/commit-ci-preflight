@@ -35,7 +35,7 @@ use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
 };
 use commit_ci_preflight::matrix::{
-    MatrixConfigV2, MatrixError, MatrixRunRequestV2, execute_matrix_run_v2,
+    MatrixConfigV2, MatrixError, MatrixPlanEnvelopeV2, MatrixRunRequestV2, execute_matrix_run_v2,
 };
 use commit_ci_preflight::process::{
     CancellationReason, CancellationToken, GenerationGuard, OutputMode, ProcessRequest,
@@ -1353,6 +1353,9 @@ fn print_plan(path: &Path, json: bool) -> Result<(), CliError> {
 }
 
 fn print_dry_run(path: &Path, location: &CacheLocationArgs, json: bool) -> Result<(), CliError> {
+    if config_schema_version(path)?.as_deref() == Some("2.0") {
+        return print_matrix_dry_run(path, location, json);
+    }
     let envelope = load_plan(path)?;
     let cache = resolve_cache_root(location)?;
     let workspace = WorkspacePlanV1::build(&envelope, &location.repository, &cache)
@@ -1368,6 +1371,64 @@ fn print_dry_run(path: &Path, location: &CacheLocationArgs, json: bool) -> Resul
         );
     } else {
         print_human_dry_run(&dry_run)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct MatrixDryRunReportV2 {
+    schema_version: &'static str,
+    plan_digest: String,
+    runtimes: Vec<MatrixRuntimeDryRunV2>,
+}
+
+#[derive(Debug, Serialize)]
+struct MatrixRuntimeDryRunV2 {
+    runtime_id: String,
+    configuration_digest: String,
+    dry_run: DryRunPlan,
+}
+
+fn print_matrix_dry_run(
+    path: &Path,
+    location: &CacheLocationArgs,
+    json: bool,
+) -> Result<(), CliError> {
+    let envelope = MatrixConfigV2::load(path)
+        .map_err(CliError::Matrix)?
+        .into_plan()
+        .map_err(CliError::Matrix)?;
+    let cache = resolve_cache_root(location)?;
+    let mut runtimes = Vec::with_capacity(envelope.plan.runtimes.len());
+    for (runtime_id, runtime_envelope) in envelope.runtime_envelopes().map_err(CliError::Matrix)? {
+        let workspace = WorkspacePlanV1::build(&runtime_envelope, &location.repository, &cache)
+            .map_err(CliError::Workspace)?;
+        let runtime = runtime_for(runtime_envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
+        let dry_run = runtime
+            .dry_run(&runtime_envelope, &workspace)
+            .map_err(CliError::Runtime)?;
+        runtimes.push(MatrixRuntimeDryRunV2 {
+            runtime_id,
+            configuration_digest: runtime_envelope.plan_digest,
+            dry_run,
+        });
+    }
+    let report = MatrixDryRunReportV2 {
+        schema_version: "2.0",
+        plan_digest: envelope.plan_digest,
+        runtimes,
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(CliError::internal)?
+        );
+    } else {
+        println!("Matrix plan: {}", report.plan_digest);
+        for runtime in &report.runtimes {
+            println!("Runtime ID: {}", runtime.runtime_id);
+            print_human_dry_run(&runtime.dry_run)?;
+        }
     }
     Ok(())
 }
@@ -2032,6 +2093,9 @@ fn print_serializable_or_path(
 }
 
 fn print_doctor(path: &Path, json: bool) -> Result<(), CliError> {
+    if config_schema_version(path)?.as_deref() == Some("2.0") {
+        return print_matrix_doctor(path, json);
+    }
     let envelope = load_plan(path)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
     let supervisor = ProcessSupervisor::standard();
@@ -2055,6 +2119,78 @@ fn print_doctor(path: &Path, json: bool) -> Result<(), CliError> {
         );
     } else {
         print_human_probe(&probe);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct MatrixDoctorReportV2 {
+    schema_version: &'static str,
+    plan_digest: String,
+    runtimes: Vec<MatrixRuntimeDoctorV2>,
+}
+
+#[derive(Debug, Serialize)]
+struct MatrixRuntimeDoctorV2 {
+    runtime_id: String,
+    configuration_digest: String,
+    probe: RuntimeProbe,
+}
+
+fn collect_matrix_doctor_report(
+    envelope: &MatrixPlanEnvelopeV2,
+    mut probe_runtime: impl FnMut(&ExecutionPlanEnvelopeV1) -> Result<RuntimeProbe, CliError>,
+) -> Result<MatrixDoctorReportV2, CliError> {
+    let mut runtimes = Vec::with_capacity(envelope.plan.runtimes.len());
+    for (runtime_id, runtime_envelope) in envelope.runtime_envelopes().map_err(CliError::Matrix)? {
+        let configuration_digest = runtime_envelope.plan_digest.clone();
+        let probe = probe_runtime(&runtime_envelope)?;
+        runtimes.push(MatrixRuntimeDoctorV2 {
+            runtime_id,
+            configuration_digest,
+            probe,
+        });
+    }
+    Ok(MatrixDoctorReportV2 {
+        schema_version: "2.0",
+        plan_digest: envelope.plan_digest.clone(),
+        runtimes,
+    })
+}
+
+fn print_matrix_doctor(path: &Path, json: bool) -> Result<(), CliError> {
+    let envelope = MatrixConfigV2::load(path)
+        .map_err(CliError::Matrix)?
+        .into_plan()
+        .map_err(CliError::Matrix)?;
+    let supervisor = ProcessSupervisor::standard();
+    let cancellation = CancellationToken::default();
+    install_cancellation_handler(&cancellation)?;
+    let current_dir = std::env::current_dir().map_err(CliError::internal)?;
+    let report = collect_matrix_doctor_report(&envelope, |runtime_envelope| {
+        let runtime = runtime_for(runtime_envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
+        let generation = doctor_guard(runtime_envelope);
+        runtime
+            .probe(
+                runtime_envelope,
+                &supervisor,
+                &current_dir,
+                &cancellation,
+                &generation,
+            )
+            .map_err(CliError::Runtime)
+    })?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(CliError::internal)?
+        );
+    } else {
+        println!("Matrix plan: {}", report.plan_digest);
+        for runtime in &report.runtimes {
+            println!("Runtime ID: {}", runtime.runtime_id);
+            print_human_probe(&runtime.probe);
+        }
     }
     Ok(())
 }
