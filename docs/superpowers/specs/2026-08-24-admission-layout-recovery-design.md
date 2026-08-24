@@ -100,6 +100,12 @@ malformed, or mismatched digest fails closed and performs no mutation. The
 command is not invoked implicitly and is not evidence that a later heavy run
 is authorized.
 
+Apply outcomes are closed: `recovered` means the move, synchronization,
+post-validation, and explicit lock release all completed; `not_applied` means
+no recovery mutation occurred; `recovery_uncertain` means the directory may
+already have moved but a later synchronization, validation, or unlock step
+failed. Both non-success outcomes exit `70`; only `recovered` exits `0`.
+
 The JSON is privacy-bounded. It contains schema, classification, target kind,
 bounded reason codes, plan digest, and outcome. It omits absolute paths,
 process data, commands, repositories, users, raw record contents, and
@@ -142,7 +148,8 @@ The recovery snapshot follows the coordinator's lock order:
 
 1. validate that the root and existing queue-lock path are plain objects;
 2. acquire `queue.lock` exclusively with the bounded timeout;
-3. acquire `slot.lock` exclusively without changing either lock file;
+3. require the existing `slot.lock` to be a plain file and acquire it
+   exclusively without creating or changing either lock file;
 4. validate the exact CCP owner marker;
 5. validate every canonical root child and reject any unknown sibling other
    than the exact `agent-tickets` target;
@@ -178,9 +185,10 @@ After reconstructing and matching the plan under both locks, `apply`:
 
 No file is deleted. If the rename fails, the target remains in its original
 location and the command reports a failure. If post-rename durable sync or
-validation is uncertain, the command returns the internal/unsafe-state exit
-class and does not claim successful recovery. The preserved quarantine entry
-remains operator evidence.
+validation or explicit lock release is uncertain, the command returns
+`recovery_uncertain` with the internal/unsafe-state exit class and does not
+claim successful recovery. The preserved quarantine entry remains operator
+evidence.
 
 Re-running `status` after a successful apply returns `not_needed`. Re-running
 `apply` with the old digest is non-actionable and does not change state.
@@ -190,9 +198,10 @@ Re-running `status` after a successful apply returns `not_needed`. Re-running
 - `src/admission.rs`: recovery report/plan types, strict snapshot validation,
   lock-scoped status and apply operations, and unit tests.
 - `src/main.rs`: nested CLI parsing, bounded JSON/text rendering, and existing
-  admission error/exit-code mapping.
-- A focused integration test file for the CLI contract and no-mutation failure
-  cases.
+  admission error/exit-code mapping; its unit tests exercise parsing and the
+  test-only injected-coordinator dispatch seam.
+- `src/admission.rs` unit tests cover coordinator behavior and no-mutation
+  failure cases against owned temporary roots.
 - `docs/COORDINATION_RUNBOOK.md` and `docs/TROUBLESHOOTING.md`: exact operator
   sequence and explicit statement that manual recovery remains unsupported.
 
