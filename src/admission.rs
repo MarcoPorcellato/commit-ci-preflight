@@ -422,6 +422,11 @@ impl AdmissionCoordinator {
             let path = self.root.join(directory);
             if fs::read_dir(path).map(|mut entries| entries.next().is_some()).unwrap_or(true) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle, ..base() }; }
         }
+        let Ok(mut snapshot_queue) = self.open_queue(false) else { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; };
+        if lock_exclusive_until(&snapshot_queue, &self.root.join(QUEUE_LOCK), &deadline, cancellation).is_err() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::LockTimeout, ..base() }; }
+        let Ok(snapshot_slot) = open_existing_lock_file(&self.root.join(SLOT_LOCK)).and_then(|x| x.ok_or(AdmissionError::UnsafeLayout(self.root.join(SLOT_LOCK)))) else { let _ = unlock(&mut snapshot_queue); return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; };
+        if snapshot_slot.try_lock_exclusive().is_err() { let _ = unlock(&mut snapshot_queue); return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::LockTimeout, ..base() }; }
+        let mut snapshot_slot = snapshot_slot; let _ = unlock(&mut snapshot_slot); let _ = unlock(&mut snapshot_queue);
         if !target { return AdmissionLayoutRecoveryStatusV1 { classification: AdmissionLayoutRecoveryClassificationV1::NotNeeded, reason: AdmissionLayoutRecoveryReasonV1::CanonicalLayout, ..base() }; }
         let target_path = self.root.join("agent-tickets");
         let Ok(meta) = fs::symlink_metadata(&target_path) else { return base() };
@@ -1801,6 +1806,28 @@ mod tests {
         fs::write(coordinator.root().join(NEXT_TICKET), b"invalid\n").expect("bad counter");
         let report = coordinator.layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default());
         assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired);
+        assert!(report.plan_sha256.is_none());
+    }
+
+    #[test]
+    fn layout_recovery_target_absent_held_queue_lock_is_operator_required() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-held-queue");
+        fs::remove_dir(coordinator.root().join("agent-tickets")).expect("remove target");
+        let queue = OpenOptions::new().read(true).write(true).open(coordinator.root().join(QUEUE_LOCK)).expect("queue");
+        queue.try_lock_exclusive().expect("hold queue");
+        let report = coordinator.layout_recovery_status_with_timeout(Duration::from_millis(30), &CancellationToken::default());
+        assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::LockTimeout);
+        assert!(report.plan_sha256.is_none());
+    }
+
+    #[test]
+    fn layout_recovery_target_absent_held_slot_lock_is_operator_required() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-held-slot");
+        fs::remove_dir(coordinator.root().join("agent-tickets")).expect("remove target");
+        let slot = OpenOptions::new().read(true).write(true).open(coordinator.root().join(SLOT_LOCK)).expect("slot");
+        slot.try_lock_exclusive().expect("hold slot");
+        let report = coordinator.layout_recovery_status_with_timeout(Duration::from_millis(30), &CancellationToken::default());
+        assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::LockTimeout);
         assert!(report.plan_sha256.is_none());
     }
 
