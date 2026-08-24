@@ -137,6 +137,20 @@ The `--json` form includes the same named per-runtime digests bound by the
 outer matrix digest. Copy those reviewed values into the v2 policy before a
 qualification; never derive them from a completed receipt.
 
+The read-only inspection commands also understand schema v2:
+
+```console
+commit-ci-preflight doctor --config .commit-ci-preflight.toml --json
+commit-ci-preflight dry-run --config .commit-ci-preflight.toml --json
+```
+
+Both reports include the outer matrix digest plus each lexically ordered
+runtime ID and its normalized configuration digest. `doctor` performs one
+bounded runtime probe for every declared runtime and labels each result with
+its runtime ID. `dry-run` performs no runtime probe and executes no check; it
+renders each runtime's explicit read-only repository mount, writable cache
+mounts, and container argv independently.
+
 The GitHub receipt gate continues to run only the verifier against trusted base
 policy and the event head. It does not check out, build, or execute candidate
 project code.

@@ -1,0 +1,61 @@
+schema_version = "2.0"
+project = "example/matryca"
+
+[receipt]
+output = ".ccp/receipt.json"
+freshness_seconds = 300
+
+[[runtimes]]
+id = "python312"
+kind = "docker_compatible"
+image = "example.invalid/python312@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 256
+pids_limit = 64
+network = false
+
+[[runtimes]]
+id = "python313"
+kind = "docker_compatible"
+image = "example.invalid/python313@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+cpu_count = 1
+memory_mib = 256
+pids_limit = 64
+network = false
+
+[[runtimes]]
+id = "node22"
+kind = "docker_compatible"
+image = "example.invalid/node22@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+cpu_count = 1
+memory_mib = 256
+pids_limit = 64
+network = false
+
+[[caches]]
+id = "shared"
+mount_path = ".ccp-mounts/shared"
+
+[[checks]]
+id = "python312-check"
+runtime_id = "python312"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 30
+
+[[checks]]
+id = "python313-check"
+runtime_id = "python313"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 30
+
+[[checks]]
+id = "node22-check"
+runtime_id = "node22"
+required = true
+argv = ["node", "--version"]
+working_directory = "."
+timeout_seconds = 30

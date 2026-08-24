@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Matrix v2 `doctor` and `dry-run` now inspect every declared runtime using
+  lexically ordered, digest-labeled reports. Doctor performs one bounded
+  runtime probe per entry; dry-run renders each explicit workspace and command
+  without executing project checks.
 - T8 runtime-capability source sub-slice: opt-in schema `1.3` binds
   `pull_policy = "never"` and `swap_mode = "disabled"` into the normalized
   single-runtime plan, renders Docker no-pull and explicit disabled-swap argv,
