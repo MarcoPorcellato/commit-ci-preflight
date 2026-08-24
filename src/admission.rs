@@ -413,6 +413,15 @@ impl AdmissionCoordinator {
             root_entries.push(RecoveryRootEntryV1 { name, kind: if meta.is_dir() { "directory" } else { "file" }.to_owned() });
         }
         if !required.into_iter().all(|value| value) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
+        let Ok(owner_bytes) = fs::read(self.root.join(OWNER_FILE)) else { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::ForeignOwner, ..base() }; };
+        if owner_bytes != OWNER_BYTES { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::ForeignOwner, ..base() }; }
+        if serde_json::from_slice::<CoordinatorOwnerMarkerV1>(&owner_bytes).is_err() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::ForeignOwner, ..base() }; }
+        let Ok(counter) = fs::read_to_string(self.root.join(NEXT_TICKET)) else { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; };
+        if counter.trim().parse::<u64>().ok().filter(|value| *value > 0).is_none() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }
+        for directory in [TICKETS_DIR, LEASES_DIR] {
+            let path = self.root.join(directory);
+            if fs::read_dir(path).map(|mut entries| entries.next().is_some()).unwrap_or(true) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle, ..base() }; }
+        }
         if !target { return AdmissionLayoutRecoveryStatusV1 { classification: AdmissionLayoutRecoveryClassificationV1::NotNeeded, reason: AdmissionLayoutRecoveryReasonV1::CanonicalLayout, ..base() }; }
         let target_path = self.root.join("agent-tickets");
         let Ok(meta) = fs::symlink_metadata(&target_path) else { return base() };
@@ -1734,7 +1743,7 @@ mod tests {
         let coordinator = coordinator(label);
         coordinator.initialize().expect("canonical coordinator");
         File::create(coordinator.root().join(SLOT_LOCK)).expect("pre-existing slot lock");
-        File::create(coordinator.root().join(NEXT_TICKET)).expect("pre-existing ticket counter");
+        fs::write(coordinator.root().join(NEXT_TICKET), b"1\n").expect("pre-existing ticket counter");
         fs::create_dir(coordinator.root().join("agent-tickets"))
             .expect("historical empty directory");
         coordinator
@@ -1771,6 +1780,27 @@ mod tests {
         let report = coordinator.layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default());
         assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired);
         assert_ne!(report.reason, AdmissionLayoutRecoveryReasonV1::CanonicalLayout);
+        assert!(report.plan_sha256.is_none());
+    }
+
+    #[test]
+    fn layout_recovery_target_absent_wrong_owner_is_operator_required() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-owner");
+        fs::remove_dir(coordinator.root().join("agent-tickets")).expect("remove target");
+        fs::write(coordinator.root().join(OWNER_FILE), b"{}\n").expect("wrong owner");
+        let report = coordinator.layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default());
+        assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired);
+        assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::ForeignOwner);
+        assert!(report.plan_sha256.is_none());
+    }
+
+    #[test]
+    fn layout_recovery_target_absent_malformed_counter_is_operator_required() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-counter");
+        fs::remove_dir(coordinator.root().join("agent-tickets")).expect("remove target");
+        fs::write(coordinator.root().join(NEXT_TICKET), b"invalid\n").expect("bad counter");
+        let report = coordinator.layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default());
+        assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired);
         assert!(report.plan_sha256.is_none());
     }
 
