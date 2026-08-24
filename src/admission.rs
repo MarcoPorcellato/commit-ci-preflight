@@ -2477,6 +2477,36 @@ mod tests {
     }
 
     #[test]
+    fn layout_recovery_apply_serialization_privacy_covers_all_outcomes() {
+        let basename = "agent-tickets.recovered-v1-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        for (outcome, entry) in [
+            (AdmissionLayoutRecoveryOutcomeV1::Recovered, Some(basename.to_owned())),
+            (AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain, Some(basename.to_owned())),
+            (AdmissionLayoutRecoveryOutcomeV1::NotApplied, None),
+        ] {
+            let value = serde_json::to_value(AdmissionLayoutRecoveryApplyV1 {
+                schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION.into(),
+                outcome,
+                reason: AdmissionLayoutRecoveryReasonV1::FilesystemUncertain,
+                quarantine_entry: entry,
+            }).unwrap();
+            assert_eq!(value.as_object().unwrap().len(), 4);
+            assert_eq!(value["schema_version"], ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION);
+            let text = value.to_string();
+            for forbidden in ["ticket-000", "lease-", "HOME", "repository", "command"] {
+                assert!(!text.contains(forbidden));
+            }
+            for (key, val) in value.as_object().unwrap() {
+                if key != "schema_version" {
+                    let rendered = val.to_string();
+                    assert!(!rendered.contains('/'));
+                    assert!(!rendered.contains('\\'));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn layout_recovery_malformed_canonical_without_target_is_not_canonical() {
         let coordinator = coordinator("layout-malformed-canonical");
         fs::create_dir_all(coordinator.root()).expect("root");
