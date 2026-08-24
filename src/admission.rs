@@ -64,6 +64,9 @@ struct AdmissionLayoutRecoveryPlanV1 {
 }
 #[derive(Serialize)]
 struct RecoveryRootEntryV1 { name: String, kind: String }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoordinatorOwnerMarkerV1 { owner: String, purpose: String, schema_version: String }
 
 const OWNER_FILE: &str = ".ccp-admission-root-v1.json";
 const PLATFORM_DIRECTORY: &str = "commit-ci-preflight-admission";
@@ -403,15 +406,16 @@ impl AdmissionCoordinator {
         if fs::read_dir(&target_path).map(|mut d| d.next().is_some()).unwrap_or(true) { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::TargetNotEmpty, ..base() }; }
         let Ok(owner) = fs::read(self.root.join(OWNER_FILE)) else { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::ForeignOwner, ..base() }; };
         if owner != OWNER_BYTES { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::ForeignOwner, ..base() }; }
+        let Ok(owner_marker) = serde_json::from_slice::<CoordinatorOwnerMarkerV1>(&owner) else { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::ForeignOwner, ..base() }; };
         let Ok(mut queue) = self.open_queue(false) else { return base() };
         if lock_exclusive_until(&queue, &self.root.join(QUEUE_LOCK), &deadline, cancellation).is_err() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::LockTimeout, ..base() }; }
-        let slot = match open_existing_lock_file(&self.root.join(SLOT_LOCK)) { Ok(Some(file)) => file, Ok(None) => { let _ = unlock(&mut queue); return AdmissionLayoutRecoveryStatusV1 { classification: AdmissionLayoutRecoveryClassificationV1::RecoverableEmptyHistoricalAgentTickets, target_kind: Some("historical_agent_tickets".into()), reason: AdmissionLayoutRecoveryReasonV1::EmptyHistoricalAgentTickets, plan_sha256: Some("0".repeat(64)), ..base() }; }, Err(_) => { let _ = unlock(&mut queue); return base(); } };
+        let slot = match open_existing_lock_file(&self.root.join(SLOT_LOCK)) { Ok(Some(file)) => file, Ok(None) => { let _ = unlock(&mut queue); return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::UnsupportedLayout, ..base() }; }, Err(_) => { let _ = unlock(&mut queue); return base(); } };
         let slot_free = slot.try_lock_exclusive().is_ok();
         if !slot_free { let _ = unlock(&mut queue); return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::CoordinatorNotIdle, ..base() }; }
         let mut slot = slot; let _ = unlock(&mut slot);
         let _ = unlock(&mut queue);
         root_entries.sort_by(|a,b| a.name.cmp(&b.name));
-        let plan = AdmissionLayoutRecoveryPlanV1 { schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION, recovery_kind: "empty_historical_agent_tickets", owner: "commit-ci-preflight".into(), purpose: "host-admission-coordinator".into(), owner_schema_version: "1.0".into(), root_entries, queue_lock_name: QUEUE_LOCK, queue_lock_kind: "queue_lock", queue_lock_exclusively_held: true, slot_lock_name: SLOT_LOCK, slot_lock_kind: "slot_lock", slot_lock_was_free: true, ticket_count: 0, lease_count: 0, target_entry_count: 0 };
+        let plan = AdmissionLayoutRecoveryPlanV1 { schema_version: ADMISSION_LAYOUT_RECOVERY_SCHEMA_VERSION, recovery_kind: "empty_historical_agent_tickets", owner: owner_marker.owner, purpose: owner_marker.purpose, owner_schema_version: owner_marker.schema_version, root_entries, queue_lock_name: QUEUE_LOCK, queue_lock_kind: "queue_lock", queue_lock_exclusively_held: true, slot_lock_name: SLOT_LOCK, slot_lock_kind: "slot_lock", slot_lock_was_free: true, ticket_count: 0, lease_count: 0, target_entry_count: 0 };
         let Ok(bytes) = serde_json::to_vec(&plan) else { return base() }; let digest = Sha256::digest(bytes); let plan_sha256 = digest.iter().map(|b| format!("{b:02x}")).collect::<String>();
         let quarantine = self.root.join(format!("agent-tickets.recovered-v1-{plan_sha256}"));
         if quarantine.exists() { return AdmissionLayoutRecoveryStatusV1 { reason: AdmissionLayoutRecoveryReasonV1::QuarantineCollision, ..base() }; }
@@ -1715,9 +1719,22 @@ mod tests {
     fn coordinator_with_empty_historical_agent_tickets(label: &str) -> AdmissionCoordinator {
         let coordinator = coordinator(label);
         coordinator.initialize().expect("canonical coordinator");
+        File::create(coordinator.root().join(SLOT_LOCK)).expect("pre-existing slot lock");
         fs::create_dir(coordinator.root().join("agent-tickets"))
             .expect("historical empty directory");
         coordinator
+    }
+
+    #[test]
+    fn layout_recovery_missing_required_lock_is_operator_required_without_plan() {
+        let coordinator = coordinator_with_empty_historical_agent_tickets("layout-missing-lock");
+        fs::remove_file(coordinator.root().join(SLOT_LOCK)).expect("remove slot lock");
+        let before = tree_fingerprint(coordinator.root());
+        let report = coordinator.layout_recovery_status_with_timeout(Duration::from_secs(1), &CancellationToken::default());
+        assert_eq!(report.classification, AdmissionLayoutRecoveryClassificationV1::OperatorRequired);
+        assert_eq!(report.reason, AdmissionLayoutRecoveryReasonV1::UnsupportedLayout);
+        assert!(report.plan_sha256.is_none());
+        assert_eq!(before, tree_fingerprint(coordinator.root()));
     }
 
     fn tree_fingerprint(root: &Path) -> Vec<(PathBuf, &'static str, Vec<u8>)> {
