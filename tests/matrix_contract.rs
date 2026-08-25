@@ -3,10 +3,14 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
+use commit_ci_preflight::config::{
+    ArtifactKind, NormalizedArtifactContract, NormalizedFixedEnvironment,
+    NormalizedRuntimeInternalEnvironment, RuntimePullPolicy, RuntimeSwapMode,
+};
 use commit_ci_preflight::matrix::{
     MATRIX_CONFIG_SCHEMA_VERSION, MATRIX_POLICY_SCHEMA_VERSION, MATRIX_RECEIPT_SCHEMA_VERSION,
-    MatrixConfigV2, MatrixError, MatrixPlanProfile, MatrixReceiptEnvelopeV2, MatrixReceiptV2,
-    MatrixRequiredCheckV2, MatrixRuntimePolicyV2, MatrixRuntimeReceiptV2,
+    MatrixConfigV2, MatrixError, MatrixPlanEnvelopeV2, MatrixPlanProfile, MatrixReceiptEnvelopeV2,
+    MatrixReceiptV2, MatrixRequiredCheckV2, MatrixRuntimePolicyV2, MatrixRuntimeReceiptV2,
     MatrixVerificationPolicyV2, build_matrix_plan, matrix_config_schema_json,
     matrix_policy_schema_json, matrix_receipt_schema_json, verify_matrix_receipt_document,
 };
@@ -283,7 +287,7 @@ fn legacy_profile_reproduces_historical_plan() {
     assert_eq!(MatrixPlanProfile::default(), MatrixPlanProfile::CurrentV2);
     assert_eq!(envelope.profile(), MatrixPlanProfile::LegacyV1);
     assert_eq!(
-        envelope.plan_digest(),
+        envelope.plan_digest().expect("legacy digest"),
         provenance["outer_digest"].as_str().expect("outer digest")
     );
     for runtime in ["python311", "python312"] {
@@ -311,7 +315,10 @@ fn legacy_profile_is_canonical_across_runtime_and_check_declaration_order() {
 
     let first = build_matrix_plan(first, MatrixPlanProfile::LegacyV1).expect("first plan");
     let second = build_matrix_plan(reordered, MatrixPlanProfile::LegacyV1).expect("second plan");
-    assert_eq!(first.plan_digest(), second.plan_digest());
+    assert_eq!(
+        first.plan_digest().expect("first digest"),
+        second.plan_digest().expect("second digest")
+    );
     for runtime in ["python311", "python312"] {
         assert_eq!(
             first
@@ -322,6 +329,101 @@ fn legacy_profile_is_canonical_across_runtime_and_check_declaration_order() {
                 .expect("second runtime")
         );
     }
+}
+
+#[test]
+fn legacy_profile_accessors_reject_mutated_public_plan() {
+    let mut envelope = build_matrix_plan(
+        MatrixConfigV2::parse(legacy_compatible_config()).expect("parse fixture"),
+        MatrixPlanProfile::LegacyV1,
+    )
+    .expect("legacy plan");
+    envelope.plan.project = "example/mutated-project".to_owned();
+
+    assert!(matches!(
+        envelope.plan_digest(),
+        Err(MatrixError::PlanDigestMismatch)
+    ));
+    assert!(matches!(
+        envelope.runtime_configuration_digest("python311"),
+        Err(MatrixError::PlanDigestMismatch)
+    ));
+}
+
+#[test]
+fn legacy_profile_rejects_each_non_representable_current_field() {
+    let cases: [(&str, fn(&mut MatrixPlanEnvelopeV2)); 6] =
+        [
+            ("runtime.pull_policy", |envelope| {
+                envelope.plan.runtimes[0].runtime.pull_policy = Some(RuntimePullPolicy::Never);
+            }),
+            ("runtime.swap_mode", |envelope| {
+                envelope.plan.runtimes[0].runtime.swap_mode = Some(RuntimeSwapMode::Disabled);
+            }),
+            ("environment.fixed", |envelope| {
+                envelope
+                    .plan
+                    .environment
+                    .fixed
+                    .push(NormalizedFixedEnvironment {
+                        name: "FIXED".to_owned(),
+                        value_digest: DIGEST.to_owned(),
+                    });
+            }),
+            ("environment.runtime_internal", |envelope| {
+                envelope.plan.environment.runtime_internal.push(
+                    NormalizedRuntimeInternalEnvironment {
+                        name: "INTERNAL".to_owned(),
+                        cache_id: "cargo".to_owned(),
+                        container_target: "/cache".to_owned(),
+                    },
+                );
+            }),
+            ("environment.remote_secret_only", |envelope| {
+                envelope
+                    .plan
+                    .environment
+                    .remote_secret_only
+                    .push("SECRET".to_owned());
+            }),
+            ("checks.artifact_contracts", |envelope| {
+                envelope.plan.runtimes[0].checks[0].artifact_contracts.push(
+                    NormalizedArtifactContract {
+                        path: "artifact.txt".to_owned(),
+                        kind: ArtifactKind::RegularFile,
+                        max_bytes: 1,
+                        max_entries: 1,
+                        producer_check: "python311-version".to_owned(),
+                    },
+                );
+            }),
+        ];
+
+    for (field, mutate) in cases {
+        let mut envelope = build_matrix_plan(
+            MatrixConfigV2::parse(legacy_compatible_config()).expect("parse fixture"),
+            MatrixPlanProfile::LegacyV1,
+        )
+        .expect("legacy plan");
+        mutate(&mut envelope);
+        assert!(matches!(
+            envelope.plan_digest(),
+            Err(MatrixError::LegacyPlanNotRepresentable(actual)) if actual == field
+        ));
+    }
+}
+
+#[test]
+fn default_matrix_plan_matches_explicit_current_profile() {
+    let config = MatrixConfigV2::parse(legacy_compatible_config()).expect("parse fixture");
+    let default = config.clone().into_plan().expect("default plan");
+    let current = build_matrix_plan(config, MatrixPlanProfile::CurrentV2).expect("current plan");
+
+    assert_eq!(default, current);
+    assert_eq!(
+        default.plan_digest().expect("default digest"),
+        current.plan_digest().expect("current digest")
+    );
 }
 
 #[test]

@@ -333,14 +333,20 @@ impl MatrixPlanEnvelopeV2 {
         self.profile
     }
 
-    pub fn plan_digest(&self) -> &str {
-        &self.plan_digest
+    pub fn plan_digest(&self) -> Result<&str, MatrixError> {
+        self.validate_profile_binding()?;
+        Ok(&self.plan_digest)
     }
 
     pub fn runtime_configuration_digest(&self, id: &str) -> Result<&str, MatrixError> {
-        match &self.legacy_basis {
-            Some(basis) => basis.runtime_digest(id),
-            None => self
+        self.validate_profile_binding()?;
+        match self.profile {
+            MatrixPlanProfile::LegacyV1 => self
+                .legacy_basis
+                .as_ref()
+                .ok_or(MatrixError::PlanDigestMismatch)?
+                .runtime_digest(id),
+            MatrixPlanProfile::CurrentV2 => self
                 .plan
                 .runtimes
                 .iter()
@@ -348,6 +354,35 @@ impl MatrixPlanEnvelopeV2 {
                 .map(|runtime| runtime.configuration_digest.as_str())
                 .ok_or_else(|| MatrixError::UnknownRuntime(id.to_owned())),
         }
+    }
+
+    fn validate_profile_binding(&self) -> Result<(), MatrixError> {
+        match self.profile {
+            MatrixPlanProfile::CurrentV2 => {
+                if self.legacy_basis.is_some()
+                    || canonical_digest(&self.plan).map_err(MatrixError::Receipt)?
+                        != self.plan_digest
+                {
+                    return Err(MatrixError::PlanDigestMismatch);
+                }
+            }
+            MatrixPlanProfile::LegacyV1 => {
+                let basis = self
+                    .legacy_basis
+                    .as_ref()
+                    .ok_or(MatrixError::PlanDigestMismatch)?;
+                let projected = project_legacy_basis(&self.plan)?;
+                if &projected != basis || projected.outer_digest()? != self.plan_digest {
+                    return Err(MatrixError::PlanDigestMismatch);
+                }
+                for runtime in &self.plan.runtimes {
+                    if projected.runtime_digest(&runtime.id)? != runtime.configuration_digest {
+                        return Err(MatrixError::PlanDigestMismatch);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixError> {

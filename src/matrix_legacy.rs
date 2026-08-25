@@ -92,25 +92,36 @@ struct LegacyMatrixRuntimePlanV2 {
 pub(crate) fn project_legacy_basis(
     plan: &MatrixPlanV2,
 ) -> Result<LegacyMatrixDigestBasisV1, MatrixError> {
-    for runtime in &plan.runtimes {
+    let MatrixPlanV2 {
+        schema_version,
+        project,
+        receipt,
+        environment,
+        caches,
+        runtimes,
+    } = plan;
+    // Matrix V2 has no storage field today. This intentionally exhaustive
+    // destructuring makes any future field addition fail compilation until its
+    // legacy representability classification, including storage, is explicit.
+    for runtime in runtimes {
         validate_runtime_representability(&runtime.runtime)?;
     }
-    if !plan.environment.fixed.is_empty() {
+    if !environment.fixed.is_empty() {
         return Err(MatrixError::LegacyPlanNotRepresentable("environment.fixed"));
     }
-    if !plan.environment.runtime_internal.is_empty() {
+    if !environment.runtime_internal.is_empty() {
         return Err(MatrixError::LegacyPlanNotRepresentable(
             "environment.runtime_internal",
         ));
     }
-    if !plan.environment.remote_secret_only.is_empty() {
+    if !environment.remote_secret_only.is_empty() {
         return Err(MatrixError::LegacyPlanNotRepresentable(
             "environment.remote_secret_only",
         ));
     }
     let mut runtime_digests = BTreeMap::new();
-    let mut runtimes = Vec::with_capacity(plan.runtimes.len());
-    for runtime in &plan.runtimes {
+    let mut legacy_runtimes = Vec::with_capacity(runtimes.len());
+    for runtime in runtimes {
         let checks = runtime
             .checks
             .iter()
@@ -134,16 +145,16 @@ pub(crate) fn project_legacy_basis(
         let legacy_runtime = legacy_runtime(&runtime.runtime);
         let configuration_digest = canonical_digest(&LegacyExecutionPlanV1 {
             schema_version: "1.0".to_owned(),
-            project: plan.project.clone(),
+            project: project.clone(),
             runtime: legacy_runtime.clone(),
-            receipt: plan.receipt.clone(),
-            environment_allow: plan.environment.inherit.clone(),
-            caches: plan.caches.clone(),
+            receipt: receipt.clone(),
+            environment_allow: environment.inherit.clone(),
+            caches: caches.clone(),
             checks: checks.clone(),
         })
         .map_err(MatrixError::Receipt)?;
         runtime_digests.insert(runtime.id.clone(), configuration_digest.clone());
-        runtimes.push(LegacyMatrixRuntimePlanV2 {
+        legacy_runtimes.push(LegacyMatrixRuntimePlanV2 {
             id: runtime.id.clone(),
             configuration_digest,
             runtime: legacy_runtime,
@@ -153,12 +164,12 @@ pub(crate) fn project_legacy_basis(
 
     Ok(LegacyMatrixDigestBasisV1 {
         plan: LegacyMatrixPlanV2 {
-            schema_version: plan.schema_version.clone(),
-            project: plan.project.clone(),
-            receipt: plan.receipt.clone(),
-            environment_allow: plan.environment.inherit.clone(),
-            caches: plan.caches.clone(),
-            runtimes,
+            schema_version: schema_version.clone(),
+            project: project.clone(),
+            receipt: receipt.clone(),
+            environment_allow: environment.inherit.clone(),
+            caches: caches.clone(),
+            runtimes: legacy_runtimes,
         },
         runtime_digests,
     })
