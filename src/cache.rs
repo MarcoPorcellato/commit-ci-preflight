@@ -401,6 +401,13 @@ impl ManagedCache {
             state: "staging".to_owned(),
         };
         write_generation_manifest(&staging_path, &manifest)?;
+        let owner = Arc::new(PreparedCacheGenerationOwner {
+            staging_path: staging_path.clone(),
+            key_digest: key.digest.clone(),
+            plan_digest: plan_digest.to_owned(),
+            generation,
+            entry_lock,
+        });
         Ok(PreparedCacheEntry {
             path,
             data_path,
@@ -408,7 +415,7 @@ impl ManagedCache {
             key_digest: key.digest.clone(),
             plan_digest: plan_digest.to_owned(),
             generation,
-            _entry_lock: entry_lock,
+            owner,
             was_complete: complete,
         })
     }
@@ -742,11 +749,20 @@ pub struct PreparedCacheEntry {
     key_digest: String,
     plan_digest: String,
     generation: u64,
-    _entry_lock: Arc<File>,
+    owner: Arc<PreparedCacheGenerationOwner>,
     pub was_complete: bool,
 }
 
-impl Drop for PreparedCacheEntry {
+#[derive(Debug)]
+struct PreparedCacheGenerationOwner {
+    staging_path: PathBuf,
+    key_digest: String,
+    plan_digest: String,
+    generation: u64,
+    entry_lock: Arc<File>,
+}
+
+impl Drop for PreparedCacheGenerationOwner {
     fn drop(&mut self) {
         let Ok(manifest) =
             read_generation_manifest(&self.staging_path.join(GENERATION_MANIFEST_FILE))
@@ -760,6 +776,25 @@ impl Drop for PreparedCacheEntry {
             && manifest.state == "staging"
         {
             let _ = fs::remove_dir_all(&self.staging_path);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CacheGenerationExpectation {
+    pub key_digest: String,
+    pub plan_digest: String,
+    pub generation: u64,
+    pub state: &'static str,
+}
+
+impl PreparedCacheEntry {
+    pub(crate) fn generation_expectation(&self) -> CacheGenerationExpectation {
+        CacheGenerationExpectation {
+            key_digest: self.key_digest.clone(),
+            plan_digest: self.plan_digest.clone(),
+            generation: self.generation,
+            state: "staging",
         }
     }
 }
@@ -2002,6 +2037,35 @@ timeout_seconds = 60
             .expect("preparation after release");
         drop(second);
 
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn prepared_entry_clones_share_cleanup_and_lock_until_final_drop() {
+        let (repo, resolved) = resolved_fixture("entry-clone-lifetime");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let envelope = envelope();
+        let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
+        let first = cache
+            .prepare_entry(&key, &envelope.plan_digest, 7)
+            .expect("prepare");
+        let staging = first.staging_path.clone();
+        let clone = first.clone();
+
+        drop(first);
+        assert!(staging.is_dir(), "one clone must not remove live staging");
+        assert!(matches!(
+            cache.prepare_entry(&key, &envelope.plan_digest, 8),
+            Err(CacheError::LockBusy(_))
+        ));
+
+        drop(clone);
+        assert!(!staging.exists(), "final owner removes matching staging");
+        let next = cache
+            .prepare_entry(&key, &envelope.plan_digest, 8)
+            .expect("lock released after final owner");
+        drop(next);
         clean(&resolved.path);
         clean(&repo);
     }
