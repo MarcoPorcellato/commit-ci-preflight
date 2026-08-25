@@ -780,8 +780,6 @@ impl Drop for PreparedCacheGenerationOwner {
     }
 }
 
-/// Temporary Task 2 handoff API; remove this allowance when Task 2 consumes it.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CacheGenerationExpectation {
     pub key_digest: String,
@@ -791,8 +789,6 @@ pub(crate) struct CacheGenerationExpectation {
 }
 
 impl PreparedCacheEntry {
-    /// Temporary Task 2 handoff API; remove this allowance when Task 2 consumes it.
-    #[allow(dead_code)]
     pub(crate) fn generation_expectation(&self) -> CacheGenerationExpectation {
         CacheGenerationExpectation {
             key_digest: self.key_digest.clone(),
@@ -801,6 +797,23 @@ impl PreparedCacheEntry {
             state: "staging",
         }
     }
+}
+
+pub(crate) fn revalidate_generation_source(
+    source: &Path,
+    expected: &CacheGenerationExpectation,
+) -> Result<(), CacheError> {
+    let staging = source.parent().ok_or(CacheError::PromotionUncertain)?;
+    let manifest = read_generation_manifest(&staging.join(GENERATION_MANIFEST_FILE))?;
+    if manifest.schema_version != GENERATION_SCHEMA_VERSION
+        || manifest.key_digest != expected.key_digest
+        || manifest.plan_digest != expected.plan_digest
+        || manifest.generation != expected.generation
+        || manifest.state != expected.state
+    {
+        return Err(CacheError::PromotionUncertain);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

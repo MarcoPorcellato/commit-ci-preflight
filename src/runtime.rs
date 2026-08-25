@@ -1696,6 +1696,7 @@ timeout_seconds = 60
             access: MountAccess::ReadOnly,
             purpose: crate::workspace::MountPurpose::Repository,
             logical_id: None,
+            expectation: None,
         };
         for source in [
             "/safe,comma",
