@@ -780,6 +780,8 @@ impl Drop for PreparedCacheGenerationOwner {
     }
 }
 
+/// Temporary Task 2 handoff API; remove this allowance when Task 2 consumes it.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CacheGenerationExpectation {
     pub key_digest: String,
@@ -789,6 +791,8 @@ pub(crate) struct CacheGenerationExpectation {
 }
 
 impl PreparedCacheEntry {
+    /// Temporary Task 2 handoff API; remove this allowance when Task 2 consumes it.
+    #[allow(dead_code)]
     pub(crate) fn generation_expectation(&self) -> CacheGenerationExpectation {
         CacheGenerationExpectation {
             key_digest: self.key_digest.clone(),
@@ -797,31 +801,6 @@ impl PreparedCacheEntry {
             state: "staging",
         }
     }
-}
-
-pub(crate) fn revalidate_generation_source(
-    source: &Path,
-    expected: &CacheGenerationExpectation,
-) -> Result<(), CacheError> {
-    let metadata = fs::symlink_metadata(source).map_err(CacheError::Io)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(CacheError::GenerationMismatch);
-    }
-    let manifest = read_generation_manifest(
-        &source
-            .parent()
-            .ok_or(CacheError::GenerationMismatch)?
-            .join(GENERATION_MANIFEST_FILE),
-    )?;
-    if manifest.schema_version != GENERATION_SCHEMA_VERSION
-        || manifest.key_digest != expected.key_digest
-        || manifest.plan_digest != expected.plan_digest
-        || manifest.generation != expected.generation
-        || manifest.state != expected.state
-    {
-        return Err(CacheError::GenerationMismatch);
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -22,10 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::cache::{
-    CacheError, CacheGenerationExpectation, CacheKey, CachePromotionOutcome, ManagedCache,
-    ResolvedCacheRoot,
-};
+use crate::cache::{CacheError, CacheKey, CachePromotionOutcome, ManagedCache, ResolvedCacheRoot};
 use crate::config::{ArtifactKind, ExecutionPlanEnvelopeV1, NormalizedCheck};
 use crate::receipt::{ArtifactEvidence, canonical_digest};
 
@@ -48,20 +45,6 @@ pub enum MountPurpose {
     Artifact,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MountSourceKind {
-    Directory,
-    RegularFile,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MountSourceExpectation {
-    pub kind: MountSourceKind,
-    pub canonical_anchor: PathBuf,
-    pub exact_repository: Option<PathBuf>,
-    pub cache_generation: Option<CacheGenerationExpectation>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MountBinding {
     pub source: PathBuf,
@@ -70,8 +53,6 @@ pub struct MountBinding {
     pub purpose: MountPurpose,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logical_id: Option<String>,
-    #[serde(skip)]
-    pub(crate) expectation: Option<MountSourceExpectation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -116,12 +97,6 @@ impl WorkspacePlanV1 {
             access: MountAccess::ReadOnly,
             purpose: MountPurpose::Repository,
             logical_id: None,
-            expectation: Some(MountSourceExpectation {
-                kind: MountSourceKind::Directory,
-                canonical_anchor: repository.clone(),
-                exact_repository: Some(repository.clone()),
-                cache_generation: None,
-            }),
         }];
         let mut targets = BTreeSet::from([CONTAINER_WORKSPACE.to_owned()]);
 
@@ -143,12 +118,6 @@ impl WorkspacePlanV1 {
                 access: MountAccess::ReadWrite,
                 purpose: MountPurpose::Cache,
                 logical_id: Some(declared.id.clone()),
-                expectation: Some(MountSourceExpectation {
-                    kind: MountSourceKind::Directory,
-                    canonical_anchor: cache.path.clone(),
-                    exact_repository: None,
-                    cache_generation: None,
-                }),
             });
         }
 
@@ -166,16 +135,6 @@ impl WorkspacePlanV1 {
                     access: MountAccess::ReadWrite,
                     purpose: MountPurpose::Artifact,
                     logical_id: Some(format!("{}:{artifact}", check.id)),
-                    expectation: Some(MountSourceExpectation {
-                        kind: if artifact_kind_for(check, artifact) == ArtifactKind::Directory {
-                            MountSourceKind::Directory
-                        } else {
-                            MountSourceKind::RegularFile
-                        },
-                        canonical_anchor: run_root.clone(),
-                        exact_repository: None,
-                        cache_generation: None,
-                    }),
                 });
             }
         }
@@ -244,19 +203,6 @@ impl PreparedWorkspace {
             &cache_sources,
             None,
         )?;
-        let mut plan = plan;
-        for mount in &mut plan.mounts {
-            if mount.purpose == MountPurpose::Cache {
-                if let Some(entry) = cache_entries
-                    .iter()
-                    .find(|entry| entry.data_path == mount.source)
-                {
-                    if let Some(expectation) = mount.expectation.as_mut() {
-                        expectation.cache_generation = Some(entry.generation_expectation());
-                    }
-                }
-            }
-        }
         Ok(Self {
             plan,
             cache_entries,
@@ -812,74 +758,6 @@ pub fn validate_host_path(path: &Path) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
-pub(crate) fn revalidate_mount_sources(mounts: &[MountBinding]) -> Result<(), WorkspaceError> {
-    for mount in mounts {
-        let expectation = mount
-            .expectation
-            .as_ref()
-            .ok_or(WorkspaceError::MountExpectationMissing)?;
-        let relative = mount
-            .source
-            .strip_prefix(&expectation.canonical_anchor)
-            .map_err(|_| WorkspaceError::MountSourceChanged {
-                purpose: mount.purpose,
-            })?;
-        let mut current = expectation.canonical_anchor.clone();
-        for component in relative.components() {
-            current.push(component.as_os_str());
-            let metadata =
-                fs::symlink_metadata(&current).map_err(|_| WorkspaceError::MountSourceChanged {
-                    purpose: mount.purpose,
-                })?;
-            if metadata.file_type().is_symlink() {
-                return Err(WorkspaceError::MountSourceChanged {
-                    purpose: mount.purpose,
-                });
-            }
-        }
-        let metadata = fs::symlink_metadata(&mount.source).map_err(|_| {
-            WorkspaceError::MountSourceChanged {
-                purpose: mount.purpose,
-            }
-        })?;
-        let kind_ok = match expectation.kind {
-            MountSourceKind::Directory => metadata.is_dir(),
-            MountSourceKind::RegularFile => metadata.is_file(),
-        };
-        if !kind_ok
-            || expectation
-                .exact_repository
-                .as_ref()
-                .is_some_and(|path| fs::canonicalize(&mount.source).ok().as_ref() != Some(path))
-        {
-            return Err(WorkspaceError::MountSourceChanged {
-                purpose: mount.purpose,
-            });
-        }
-        let canonical =
-            fs::canonicalize(&mount.source).map_err(|_| WorkspaceError::MountSourceChanged {
-                purpose: mount.purpose,
-            })?;
-        if !canonical.starts_with(&expectation.canonical_anchor) {
-            return Err(WorkspaceError::MountSourceChanged {
-                purpose: mount.purpose,
-            });
-        }
-        validate_host_path(&mount.source)?;
-        if mount.purpose == MountPurpose::Cache {
-            crate::cache::revalidate_generation_source(
-                &mount.source,
-                expectation
-                    .cache_generation
-                    .as_ref()
-                    .ok_or(WorkspaceError::MountExpectationMissing)?,
-            )
-            .map_err(WorkspaceError::Cache)?;
-        }
-    }
-    Ok(())
-}
-
 pub fn validate_container_mount_target(target: &str) -> Result<(), WorkspaceError> {
     if target.contains(',')
         || target.contains('=')
@@ -916,8 +794,6 @@ pub enum WorkspaceError {
     PathEscape,
     Busy(PathBuf),
     UnsafeManagedObject,
-    MountExpectationMissing,
-    MountSourceChanged { purpose: MountPurpose },
     Cache(CacheError),
     Io(std::io::Error),
 }
@@ -949,12 +825,6 @@ impl fmt::Display for WorkspaceError {
             ),
             Self::UnsafeManagedObject => {
                 formatter.write_str("unsafe object found inside managed workspace")
-            }
-            Self::MountExpectationMissing => {
-                formatter.write_str("mount source expectation is missing")
-            }
-            Self::MountSourceChanged { purpose } => {
-                write!(formatter, "mount source changed for {purpose:?}")
             }
             Self::Cache(error) => write!(formatter, "{error}"),
             Self::Io(_) => formatter.write_str("workspace filesystem operation failed"),

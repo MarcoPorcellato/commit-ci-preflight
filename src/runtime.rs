@@ -222,8 +222,6 @@ impl RuntimePort for DockerCompatibleRuntime {
         rendered: &DryRunCheck,
         context: &RuntimeExecutionContext<'_>,
     ) -> Result<ProcessResult, RuntimeError> {
-        crate::workspace::revalidate_mount_sources(&rendered.mounts)
-            .map_err(RuntimeError::Workspace)?;
         let lifecycle = DockerLifecyclePlan::build(context.run_id, check, rendered)?;
         let cleanup_cancellation = CancellationToken::default();
         let create = self.execute_cli(&lifecycle.create_argv, context, context.cancellation)?;
@@ -755,7 +753,6 @@ fn docker_dry_run_check(
         program: "docker",
         argv,
         depends_on: check.depends_on.clone(),
-        mounts: workspace.mounts.clone(),
     })
 }
 
@@ -870,8 +867,6 @@ pub struct DryRunCheck {
     pub program: &'static str,
     pub argv: Vec<String>,
     pub depends_on: Vec<String>,
-    #[serde(skip)]
-    pub(crate) mounts: Vec<crate::workspace::MountBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1701,7 +1696,6 @@ timeout_seconds = 60
             access: MountAccess::ReadOnly,
             purpose: crate::workspace::MountPurpose::Repository,
             logical_id: None,
-            expectation: None,
         };
         for source in [
             "/safe,comma",
