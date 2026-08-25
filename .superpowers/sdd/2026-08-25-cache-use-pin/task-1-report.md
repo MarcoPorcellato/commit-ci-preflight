@@ -43,7 +43,7 @@ subsequent lock release.
 
 ## Commit
 
-Commit SHA: `bd759e2`.
+Implementation commit SHA: `2812da8302c6cbf73e392dbd69cf43a4a04def01`.
 
 ## Concerns
 
