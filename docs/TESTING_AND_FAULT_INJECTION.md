@@ -86,6 +86,24 @@ journal avoids the limitation by publishing immutable create-new events.
 Native crash/power-loss and Windows-host qualification remain separate gates.
 Deterministic source tests do not claim either result.
 
+## Managed-cache pin contract
+
+The managed-cache pin tests are deterministic contract tests over an owned
+fixture root. They cover canonical completed-entry selection, duplicate
+deduplication and stable ordering, advisory-lock lifetime, invalid roots and
+components, missing or incomplete entries, symlink and wrong-type rejection,
+and release of previously acquired pins when a later acquisition fails. The
+pin API does not initialize, repair, delete, quarantine, or publish receipts.
+
+The lifecycle tests separately verify spawn-boundary revalidation and that a
+failed validation makes zero child calls. The non-cooperative race test is
+bounded to a change after pin acquisition but before the child spawn: the
+validator must fail and the child-call count must remain zero. Replacement
+after spawn-boundary revalidation is not prevented or guaranteed by this pin;
+it is an unsupported external race and must not be converted into a success
+claim. Qualification of a real runtime or receipt is a separate
+native/evidence-gated activity.
+
 ## Compatibility fixtures
 
 The v1 compatibility baseline remains pinned in:

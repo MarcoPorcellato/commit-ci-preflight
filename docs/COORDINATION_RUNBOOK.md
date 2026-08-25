@@ -37,6 +37,28 @@ CCP's own integration tests and any command that invokes `run`, `benchmark`, or
 `guard exec` internally must not be wrapped in another `guard exec`. Admission
 is intentionally non-reentrant.
 
+### Standard run lock and opt-in cache pins
+
+The host-wide admission slot remains the primary coordination mechanism for
+`run`, `benchmark`, and `guard exec`. An opt-in `guard exec` managed-cache pin
+is an additional filesystem-use boundary for already-complete cache entries;
+it is not a second scheduler, a replacement for admission, or a receipt
+qualification signal. Pins use the entry's existing advisory lock and remain
+held for the guarded child lifecycle; they have no TTL and are released when
+the guarded operation returns.
+
+Only explicitly declared, completed managed-cache sources are pinned; in
+particular, `undeclared paths are not pinned`. A path used by a raw launcher
+but omitted from the pin arguments receives no CCP ownership or race
+protection. Pin acquisition and spawn-boundary revalidation
+must succeed before the child starts. A cooperative mutator must use the same
+entry lock and revalidate after acquiring it; manual deletion, quarantine,
+replacement, or other non-cooperative mutation is outside this guarantee.
+
+Pins do not initialize, repair, delete, quarantine, or publish receipts. A
+qualification result remains separate and requires its own exact source,
+configuration, runtime, and receipt evidence.
+
 ## Required preflight before heavy work
 
 Every activity must perform these checks immediately before reserving a heavy

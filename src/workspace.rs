@@ -45,6 +45,19 @@ pub enum MountPurpose {
     Artifact,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MountSourceKind {
+    Directory,
+    RegularFile,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MountSourceExpectation {
+    pub kind: MountSourceKind,
+    pub canonical_anchor: PathBuf,
+    pub exact_repository: Option<PathBuf>,
+    pub cache_generation: Option<crate::cache::CacheGenerationExpectation>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MountBinding {
     pub source: PathBuf,
@@ -53,6 +66,8 @@ pub struct MountBinding {
     pub purpose: MountPurpose,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logical_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) expectation: Option<MountSourceExpectation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -97,6 +112,12 @@ impl WorkspacePlanV1 {
             access: MountAccess::ReadOnly,
             purpose: MountPurpose::Repository,
             logical_id: None,
+            expectation: Some(MountSourceExpectation {
+                kind: MountSourceKind::Directory,
+                canonical_anchor: repository.clone(),
+                exact_repository: Some(repository.clone()),
+                cache_generation: None,
+            }),
         }];
         let mut targets = BTreeSet::from([CONTAINER_WORKSPACE.to_owned()]);
 
@@ -118,6 +139,12 @@ impl WorkspacePlanV1 {
                 access: MountAccess::ReadWrite,
                 purpose: MountPurpose::Cache,
                 logical_id: Some(declared.id.clone()),
+                expectation: Some(MountSourceExpectation {
+                    kind: MountSourceKind::Directory,
+                    canonical_anchor: cache.path.clone(),
+                    exact_repository: None,
+                    cache_generation: None,
+                }),
             });
         }
 
@@ -135,6 +162,16 @@ impl WorkspacePlanV1 {
                     access: MountAccess::ReadWrite,
                     purpose: MountPurpose::Artifact,
                     logical_id: Some(format!("{}:{artifact}", check.id)),
+                    expectation: Some(MountSourceExpectation {
+                        kind: if artifact_kind_for(check, artifact) == ArtifactKind::Directory {
+                            MountSourceKind::Directory
+                        } else {
+                            MountSourceKind::RegularFile
+                        },
+                        canonical_anchor: run_root.clone(),
+                        exact_repository: None,
+                        cache_generation: None,
+                    }),
                 });
             }
         }
@@ -203,6 +240,18 @@ impl PreparedWorkspace {
             &cache_sources,
             None,
         )?;
+        let mut plan = plan;
+        for entry in &cache_entries {
+            if let Some(mount) = plan
+                .mounts
+                .iter_mut()
+                .find(|m| m.purpose == MountPurpose::Cache && m.source == entry.data_path)
+            {
+                if let Some(expectation) = mount.expectation.as_mut() {
+                    expectation.cache_generation = Some(entry.generation_expectation());
+                }
+            }
+        }
         Ok(Self {
             plan,
             cache_entries,
@@ -758,6 +807,80 @@ pub fn validate_host_path(path: &Path) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
+pub(crate) fn revalidate_mount_sources(mounts: &[MountBinding]) -> Result<(), WorkspaceError> {
+    for mount in mounts {
+        let expectation = mount
+            .expectation
+            .as_ref()
+            .ok_or(WorkspaceError::MountExpectationMissing)?;
+        let mut current = expectation.canonical_anchor.clone();
+        let relative = mount
+            .source
+            .strip_prefix(&expectation.canonical_anchor)
+            .map_err(|_| WorkspaceError::MountSourceChanged {
+                purpose: mount.purpose,
+            })?;
+        for component in relative.components() {
+            current.push(component);
+            let metadata =
+                fs::symlink_metadata(&current).map_err(|_| WorkspaceError::MountSourceChanged {
+                    purpose: mount.purpose,
+                })?;
+            if metadata.file_type().is_symlink() {
+                return Err(WorkspaceError::MountSourceChanged {
+                    purpose: mount.purpose,
+                });
+            }
+        }
+        let metadata = fs::symlink_metadata(&mount.source).map_err(|_| {
+            WorkspaceError::MountSourceChanged {
+                purpose: mount.purpose,
+            }
+        })?;
+        let right_kind = match expectation.kind {
+            MountSourceKind::Directory => metadata.is_dir(),
+            MountSourceKind::RegularFile => metadata.is_file(),
+        };
+        if !right_kind {
+            return Err(WorkspaceError::MountSourceChanged {
+                purpose: mount.purpose,
+            });
+        }
+        validate_host_path(&mount.source).map_err(|_| WorkspaceError::MountSourceChanged {
+            purpose: mount.purpose,
+        })?;
+        let canonical =
+            fs::canonicalize(&mount.source).map_err(|_| WorkspaceError::MountSourceChanged {
+                purpose: mount.purpose,
+            })?;
+        if let Some(repository) = &expectation.exact_repository {
+            if &canonical != repository {
+                return Err(WorkspaceError::MountSourceChanged {
+                    purpose: mount.purpose,
+                });
+            }
+        }
+        if !canonical.starts_with(&expectation.canonical_anchor) {
+            return Err(WorkspaceError::MountSourceChanged {
+                purpose: mount.purpose,
+            });
+        }
+        if mount.purpose == MountPurpose::Cache {
+            let generation = expectation.cache_generation.as_ref().ok_or(
+                WorkspaceError::MountSourceChanged {
+                    purpose: mount.purpose,
+                },
+            )?;
+            crate::cache::revalidate_generation_source(&mount.source, generation).map_err(
+                |_| WorkspaceError::MountSourceChanged {
+                    purpose: mount.purpose,
+                },
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_container_mount_target(target: &str) -> Result<(), WorkspaceError> {
     if target.contains(',')
         || target.contains('=')
@@ -785,6 +908,8 @@ pub fn validate_container_mount_target(target: &str) -> Result<(), WorkspaceErro
 
 #[derive(Debug)]
 pub enum WorkspaceError {
+    MountExpectationMissing,
+    MountSourceChanged { purpose: MountPurpose },
     RepositoryNotDirectory,
     InvalidLogicalPath,
     UnsupportedHostPath,
@@ -801,6 +926,10 @@ pub enum WorkspaceError {
 impl fmt::Display for WorkspaceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MountExpectationMissing => formatter.write_str("mount expectation is missing"),
+            Self::MountSourceChanged { purpose } => {
+                write!(formatter, "mount source changed: {purpose:?}")
+            }
             Self::RepositoryNotDirectory => formatter.write_str("repository is not a directory"),
             Self::InvalidLogicalPath => formatter.write_str("workspace logical path is invalid"),
             Self::UnsupportedHostPath => {
@@ -1328,5 +1457,269 @@ max_entries = 1
         assert_eq!(plan.mounts[0].source, snapshot);
         assert_ne!(plan.mounts[0].source, repository);
         fs::remove_dir_all(test_root(name)).expect("clean fixture");
+    }
+
+    #[test]
+    fn live_mount_revalidation_accepts_prepared_mounts() {
+        let name = "revalidate-red";
+        let (repository, resolved, envelope) = fixture(name);
+        let cache = ManagedCache::initialize(resolved).expect("cache");
+        let prepared =
+            PreparedWorkspace::prepare_with_generation(&envelope, &repository, &cache, 7)
+                .expect("prepare");
+        let cache_mount = prepared
+            .plan
+            .mounts
+            .iter()
+            .find(|mount| mount.purpose == MountPurpose::Cache)
+            .expect("cache mount");
+        assert!(
+            cache_mount
+                .expectation
+                .as_ref()
+                .and_then(|value| value.cache_generation.as_ref())
+                .is_some()
+        );
+        assert!(revalidate_mount_sources(&prepared.plan.mounts).is_ok());
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(test_root(name)).expect("clean fixture");
+    }
+
+    fn prepared_fixture(name: &str) -> (PathBuf, ManagedCache, PreparedWorkspace) {
+        let (repository, resolved, envelope) = fixture(name);
+        let base = repository
+            .parent()
+            .expect("repository parent")
+            .to_path_buf();
+        let cache = ManagedCache::initialize(resolved).expect("cache");
+        let prepared =
+            PreparedWorkspace::prepare_with_generation(&envelope, &repository, &cache, 7)
+                .expect("prepared workspace");
+        (base, cache, prepared)
+    }
+
+    #[test]
+    fn live_mount_revalidation_accepts_regular_and_directory_artifacts() {
+        let (repository, resolved, _) = fixture("revalidate-directory-artifact");
+        fs::create_dir_all(repository.join("target/reports")).expect("directory artifact target");
+        let envelope = ConfigV1::parse(
+            r#"schema_version = "1.0"
+project = "owner/repository"
+[runtime]
+kind = "docker_compatible"
+image = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+[[caches]]
+id = "cargo"
+mount_path = ".cache/cargo"
+[[checks]]
+id = "reports"
+required = true
+argv = ["fixture", "reports"]
+working_directory = "."
+timeout_seconds = 60
+artifacts = ["target/reports"]
+[[checks.artifact_contracts]]
+path = "target/reports"
+kind = "directory"
+max_bytes = 1024
+max_entries = 10
+"#,
+        )
+        .expect("config")
+        .into_plan()
+        .expect("plan");
+        let base = repository
+            .parent()
+            .expect("repository parent")
+            .to_path_buf();
+        let cache = ManagedCache::initialize(resolved).expect("cache");
+        let prepared =
+            PreparedWorkspace::prepare_with_generation(&envelope, &repository, &cache, 7)
+                .expect("prepared workspace");
+        assert!(revalidate_mount_sources(&prepared.plan.mounts).is_ok());
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn live_mount_revalidation_rejects_missing_source() {
+        let (base, cache, prepared) = prepared_fixture("revalidate-missing");
+        let source = prepared
+            .plan
+            .mounts
+            .iter()
+            .find(|m| m.purpose == MountPurpose::Cache)
+            .expect("cache")
+            .source
+            .clone();
+        fs::remove_dir_all(source).expect("remove source");
+        assert!(matches!(
+            revalidate_mount_sources(&prepared.plan.mounts),
+            Err(WorkspaceError::MountSourceChanged { .. })
+        ));
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn live_mount_revalidation_rejects_wrong_kind() {
+        let (base, cache, prepared) = prepared_fixture("revalidate-kind");
+        let old = prepared
+            .plan
+            .mounts
+            .iter()
+            .find(|m| m.purpose == MountPurpose::Cache)
+            .expect("cache")
+            .source
+            .clone();
+        fs::remove_dir_all(&old).expect("remove source");
+        fs::write(&old, b"wrong kind").expect("replace source");
+        assert!(matches!(
+            revalidate_mount_sources(&prepared.plan.mounts),
+            Err(WorkspaceError::MountSourceChanged { .. })
+        ));
+        fs::remove_file(old).expect("remove replacement");
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_mount_revalidation_rejects_leaf_symlink() {
+        use std::os::unix::fs::symlink;
+        let (base, cache, prepared) = prepared_fixture("revalidate-symlink");
+        let old = prepared
+            .plan
+            .mounts
+            .iter()
+            .find(|m| m.purpose == MountPurpose::Cache)
+            .expect("cache")
+            .source
+            .clone();
+        let target = old.with_extension("real");
+        fs::rename(&old, &target).expect("move source");
+        symlink(&target, &old).expect("leaf symlink");
+        assert!(matches!(
+            revalidate_mount_sources(&prepared.plan.mounts),
+            Err(WorkspaceError::MountSourceChanged { .. })
+        ));
+        fs::remove_file(&old).expect("remove leaf");
+        fs::rename(&target, &old).expect("restore source");
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    fn mutate_manifest(name: &str, field: &str, value: serde_json::Value) {
+        let (base, cache, prepared) = prepared_fixture(name);
+        let source = prepared
+            .plan
+            .mounts
+            .iter()
+            .find(|m| m.purpose == MountPurpose::Cache)
+            .expect("cache")
+            .source
+            .clone();
+        let manifest = source
+            .parent()
+            .expect("staging parent")
+            .join(".generation-v1.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest).expect("manifest")).expect("json");
+        json[field] = value;
+        fs::write(&manifest, serde_json::to_vec(&json).expect("encode")).expect("write manifest");
+        assert!(matches!(
+            revalidate_mount_sources(&prepared.plan.mounts),
+            Err(WorkspaceError::MountSourceChanged { .. })
+        ));
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_mount_revalidation_rejects_symlinked_parent_below_anchor() {
+        use std::os::unix::fs::symlink;
+        let (base, cache, prepared) = prepared_fixture("revalidate-parent-symlink");
+        let mount = prepared
+            .plan
+            .mounts
+            .iter()
+            .find(|m| m.purpose == MountPurpose::Cache)
+            .expect("cache");
+        let anchor = mount.source.parent().expect("anchor").to_path_buf();
+        let external = base.join("external");
+        fs::create_dir_all(&external).expect("external");
+        let moved = external.join("staging");
+        fs::rename(&anchor, &moved).expect("move staging parent");
+        symlink(&moved, &anchor).expect("parent symlink");
+        assert!(matches!(
+            revalidate_mount_sources(&prepared.plan.mounts),
+            Err(WorkspaceError::MountSourceChanged { .. })
+        ));
+        fs::remove_file(&anchor).expect("remove symlink");
+        fs::rename(&moved, &anchor).expect("restore staging parent");
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(base).expect("cleanup");
+    }
+
+    #[test]
+    fn live_mount_revalidation_rejects_key_digest_change() {
+        mutate_manifest("revalidate-key", "key_digest", serde_json::json!("bad"));
+    }
+    #[test]
+    fn live_mount_revalidation_rejects_plan_digest_change() {
+        mutate_manifest("revalidate-plan", "plan_digest", serde_json::json!("bad"));
+    }
+    #[test]
+    fn live_mount_revalidation_rejects_generation_change() {
+        mutate_manifest("revalidate-generation", "generation", serde_json::json!(99));
+    }
+    #[test]
+    fn live_mount_revalidation_rejects_state_change() {
+        mutate_manifest("revalidate-state", "state", serde_json::json!("complete"));
+    }
+
+    #[test]
+    fn snapshot_preparation_populates_cache_expectation() {
+        let (repository, resolved, envelope) = fixture("revalidate-snapshot");
+        let base = repository
+            .parent()
+            .expect("repository parent")
+            .to_path_buf();
+        let cache = ManagedCache::initialize(resolved).expect("cache");
+        let prepared = PreparedWorkspace::prepare_snapshot_with_generation(
+            &envelope,
+            &repository,
+            "snapshot-digest",
+            &cache,
+            7,
+        )
+        .expect("snapshot");
+        let cache_mount = prepared
+            .plan
+            .mounts
+            .iter()
+            .find(|m| m.purpose == MountPurpose::Cache)
+            .expect("cache");
+        assert!(
+            cache_mount
+                .expectation
+                .as_ref()
+                .and_then(|e| e.cache_generation.as_ref())
+                .is_some()
+        );
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(base).expect("cleanup");
     }
 }

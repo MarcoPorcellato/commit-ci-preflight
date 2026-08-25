@@ -179,3 +179,28 @@ Current evidence proves deterministic source behavior and macOS execution of
 the test suite. Windows and Linux native cache/path behavior remains PENDING
 until it is executed on those platforms; no macOS result is relabeled as native
 evidence for another platform.
+
+Standard `run` retains its prepared-entry lock for the full execution
+lifecycle and revalidates the exact staging generation immediately before
+Docker creation. A changed, missing, or ambiguous generation fails closed.
+
+`guard exec` may opt into a cooperative pin for an already completed source:
+
+```console
+commit-ci-preflight guard exec \
+  --managed-cache-root /absolute/owned/cache-root \
+  --managed-cache-source /absolute/owned/cache-root/entries/sha256-<64>/data \
+  -- <program> [args...]
+```
+
+`--managed-cache-source` is repeatable and requires one owned root. Each source
+must be the exact completed `entries/sha256-<64>/data` directory beneath it;
+staging paths, workspaces, incomplete entries, symlinks, wrong object types,
+and escapes fail closed. Sources must already be canonical; aliases are
+rejected. Accepted sources are deduplicated and locked in stable order. The
+existing advisory entry lock is held through child
+cleanup and guard-session release; no additional TTL or heartbeat format is
+introduced. The declaration is cooperative and non-attesting: undeclared
+paths are not pinned, and manual or non-cooperative replacement is unsupported.
+Pinning does not initialize, repair, delete, quarantine, publish, or attest
+cache contents.

@@ -163,3 +163,15 @@ runner does not mount the Docker socket into a job, enable privileged mode,
 insert a shell, or expose undeclared host paths. Network remains disabled unless
 the configuration explicitly enables it. See `docs/LOCAL_RUN.md` for evidence
 and remaining platform limitations.
+
+The standard `run` path retains its prepared-entry lock through execution and
+performs spawn-boundary revalidation of the exact staging generation
+immediately before Docker creation. A changed, missing, or ambiguous source
+fails closed at that boundary.
+
+`guard exec` supports an opt-in cooperative pin for exact completed managed
+cache sources. The existing advisory entry lock remains held through child
+cleanup and session release. Only sources declared beneath one managed root
+are covered; undeclared paths are not pinned, and arbitrary child argv is not
+parsed or attested. No additional TTL or heartbeat lease is introduced.
+Manual or non-cooperative replacement remains unsupported.

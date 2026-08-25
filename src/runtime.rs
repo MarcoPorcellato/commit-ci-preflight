@@ -33,7 +33,7 @@ use crate::process::{
 };
 use crate::receipt::canonical_digest;
 use crate::workspace::{
-    MountAccess, WorkspaceError, WorkspacePlanV1, validate_container_mount_target,
+    MountAccess, MountBinding, WorkspaceError, WorkspacePlanV1, validate_container_mount_target,
     validate_host_path,
 };
 
@@ -222,6 +222,8 @@ impl RuntimePort for DockerCompatibleRuntime {
         rendered: &DryRunCheck,
         context: &RuntimeExecutionContext<'_>,
     ) -> Result<ProcessResult, RuntimeError> {
+        crate::workspace::revalidate_mount_sources(&rendered.mounts)
+            .map_err(RuntimeError::Workspace)?;
         let lifecycle = DockerLifecyclePlan::build(context.run_id, check, rendered)?;
         let cleanup_cancellation = CancellationToken::default();
         let create = self.execute_cli(&lifecycle.create_argv, context, context.cancellation)?;
@@ -753,6 +755,7 @@ fn docker_dry_run_check(
         program: "docker",
         argv,
         depends_on: check.depends_on.clone(),
+        mounts: workspace.mounts.clone(),
     })
 }
 
@@ -867,6 +870,8 @@ pub struct DryRunCheck {
     pub program: &'static str,
     pub argv: Vec<String>,
     pub depends_on: Vec<String>,
+    #[serde(skip)]
+    mounts: Vec<MountBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1141,6 +1146,8 @@ mod tests {
     use crate::config::ConfigV1;
     use crate::process::{CapturedStream, ExitOutcome};
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -1278,6 +1285,122 @@ timeout_seconds = 60
             source: CacheRootSource::Explicit,
         };
         WorkspacePlanV1::build(envelope, &repository, &cache).expect("workspace")
+    }
+
+    #[test]
+    fn execute_check_revalidates_mounts_before_supervisor() {
+        let config = CONFIG.replace(
+            "[[checks]]",
+            "[[caches]]\nid = \"cargo\"\nmount_path = \".cache/cargo\"\n\n[[checks]]",
+        );
+        let envelope = ConfigV1::parse(&config)
+            .expect("config")
+            .into_plan()
+            .expect("plan");
+        let temp_root = fs::canonicalize(std::env::temp_dir()).expect("canonical temp root");
+        let root = temp_root.join(format!(
+            "ccp-runtime-task-2b-{}-{}",
+            std::process::id(),
+            envelope.plan_digest
+        ));
+        fs::create_dir_all(&root).expect("fixture root");
+        let repository = root.join("repository");
+        fs::create_dir_all(repository.join(".cache/cargo")).expect("fixture repository");
+        let cache = crate::cache::ManagedCache::initialize(ResolvedCacheRoot {
+            path: root.join("cache"),
+            source: CacheRootSource::Explicit,
+        })
+        .expect("cache");
+        let prepared = crate::workspace::PreparedWorkspace::prepare_with_generation(
+            &envelope,
+            &repository,
+            &cache,
+            7,
+        )
+        .expect("prepared workspace");
+        let dry_run = DockerCompatibleRuntime
+            .dry_run(&envelope, &prepared.plan)
+            .expect("dry run");
+        let cache_source = prepared
+            .plan
+            .mounts
+            .iter()
+            .find(|mount| mount.purpose == crate::workspace::MountPurpose::Cache)
+            .expect("cache mount")
+            .source
+            .clone();
+        fs::remove_dir_all(cache_source).expect("remove owned cache source");
+
+        let identity = RunIdentity {
+            project: envelope.plan.project.clone(),
+            commit: Some("a".repeat(40)),
+            config_digest: envelope.plan_digest.clone(),
+            generation: "1".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let supervisor = LifecycleSupervisor::new();
+        let execution_root = PathBuf::from("/workspace");
+        let environment = BTreeMap::new();
+        let cancellation = CancellationToken::default();
+        let context = RuntimeExecutionContext {
+            execution_root: execution_root.as_path(),
+            environment: &environment,
+            identity: &identity,
+            run_id: "sha256:run",
+            supervisor: &supervisor,
+            cancellation: &cancellation,
+            generation: &generation,
+            timeout_seconds: 60,
+        };
+        let result = DockerCompatibleRuntime.execute_check(
+            &envelope.plan.checks[0],
+            &dry_run.checks[0],
+            &context,
+        );
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Workspace(
+                WorkspaceError::MountSourceChanged { .. }
+            ))
+        ));
+        assert!(supervisor.calls.lock().expect("calls").is_empty());
+        drop(prepared);
+        drop(cache);
+        fs::remove_dir_all(root).expect("cleanup fixture");
+    }
+
+    #[test]
+    fn dry_run_private_mount_expectations_are_not_serialized() {
+        let envelope = envelope();
+        let workspace = workspace(&envelope);
+        let dry_run = DockerCompatibleRuntime
+            .dry_run(&envelope, &workspace)
+            .expect("dry run");
+        let check = &dry_run.checks[0];
+        let _private_mounts = &check.mounts;
+        let json = serde_json::to_value(&dry_run).expect("serialize dry run");
+        assert!(json["checks"][0].get("mounts").is_none());
+        assert!(json.to_string().contains("workspace_mount_policy"));
+        assert!(json["workspace"]["mounts"][0].get("source").is_some());
+        assert!(
+            json["workspace"]["mounts"][0]
+                .get("canonical_anchor")
+                .is_none()
+        );
+        assert!(
+            json["workspace"]["mounts"][0]
+                .get("exact_repository")
+                .is_none()
+        );
+        assert!(
+            json["workspace"]["mounts"][0]
+                .get("cache_generation")
+                .is_none()
+        );
+        let serialized = json.to_string();
+        assert!(!serialized.contains("canonical_anchor"));
+        assert!(!serialized.contains("exact_repository"));
+        assert!(!serialized.contains("cache_generation"));
     }
 
     #[derive(Clone, Copy)]
@@ -1696,6 +1819,7 @@ timeout_seconds = 60
             access: MountAccess::ReadOnly,
             purpose: crate::workspace::MountPurpose::Repository,
             logical_id: None,
+            expectation: None,
         };
         for source in [
             "/safe,comma",

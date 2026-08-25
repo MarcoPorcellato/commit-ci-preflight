@@ -191,3 +191,23 @@ These are macOS-hosted OrbStack results. They are not Windows-native,
 Linux-host-native, hosted-runner, identity-attestation, or GitHub policy
 evidence. PR 06 adds an independent verifier; later plan tranches add the small
 remote gate and cross-platform qualification.
+
+For a cooperative child using a completed CCP cache entry, declare one
+`--managed-cache-root` and repeatable `--managed-cache-source` options:
+
+```console
+commit-ci-preflight guard exec \
+  --managed-cache-root /absolute/owned/cache-root \
+  --managed-cache-source /absolute/owned/cache-root/entries/sha256-<64>/data \
+  -- <program> [args...]
+```
+
+The source must be the exact completed `entries/sha256-<64>/data` directory
+under that root. Sources must already be canonical; aliases are rejected.
+Accepted declarations are deduplicated and locked in a stable order, then
+revalidated immediately before child spawn. The
+existing advisory entry lock stays held through child cleanup and guard-session
+release. This declaration is cooperative and non-attesting: undeclared paths
+are not pinned, and manual or non-cooperative replacement is unsupported. The
+flags do not initialize, repair, delete, quarantine, publish, or attest cache
+contents. Legacy `guard exec` without these flags remains unchanged.

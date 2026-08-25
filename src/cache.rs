@@ -354,6 +354,48 @@ impl ManagedCache {
         self.root.workspace_path(plan_digest)
     }
 
+    /// Pins completed cache entries for the lifetime of the returned guards.
+    ///
+    /// Sources are deliberately accepted only in their canonical, exact
+    /// `entries/sha256-<digest>/data` form.  This keeps the lock ownership
+    /// bound to the entry which is actually going to be mounted.
+    pub fn pin_completed_sources(
+        &self,
+        sources: &[PathBuf],
+    ) -> Result<Vec<CacheUsePin>, CacheError> {
+        validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
+        validate_plain_directory(&self.root.path.join(ENTRIES_DIR))?;
+        validate_plain_directory(&self.root.path.join(WORKSPACES_DIR))?;
+
+        let mut ordered = BTreeSet::new();
+        for source in sources {
+            ordered.insert(validate_pin_source_path(&self.root.path, source)?);
+        }
+
+        let mut pins = Vec::with_capacity(ordered.len());
+        for source in ordered {
+            let entry_path = source
+                .parent()
+                .ok_or(CacheError::UnsafePath("cache source has no entry parent"))?
+                .to_path_buf();
+            let lock_path = entry_path.join(ENTRY_LOCK_FILE);
+            match fs::symlink_metadata(&lock_path) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(CacheError::SymlinkInManagedRoot(lock_path));
+                }
+                Ok(metadata) if !metadata.is_file() => {
+                    return Err(CacheError::UnexpectedEntry(lock_path));
+                }
+                Ok(_) => {}
+                Err(error) => return Err(CacheError::Io(error)),
+            }
+            let entry_lock = acquire_existing_entry_lock(&entry_path)?;
+            let pin = CacheUsePin::from_locked_source(self, source, entry_lock)?;
+            pins.push(pin);
+        }
+        Ok(pins)
+    }
+
     pub fn prepare_entry(
         &self,
         key: &CacheKey,
@@ -401,6 +443,13 @@ impl ManagedCache {
             state: "staging".to_owned(),
         };
         write_generation_manifest(&staging_path, &manifest)?;
+        let owner = Arc::new(PreparedCacheGenerationOwner {
+            staging_path: staging_path.clone(),
+            key_digest: key.digest.clone(),
+            plan_digest: plan_digest.to_owned(),
+            generation,
+            _entry_lock: entry_lock,
+        });
         Ok(PreparedCacheEntry {
             path,
             data_path,
@@ -408,7 +457,7 @@ impl ManagedCache {
             key_digest: key.digest.clone(),
             plan_digest: plan_digest.to_owned(),
             generation,
-            _entry_lock: entry_lock,
+            _generation_owner: owner,
             was_complete: complete,
         })
     }
@@ -734,6 +783,144 @@ impl ManagedCache {
     }
 }
 
+#[derive(Debug)]
+pub struct CacheUsePin {
+    entry_path: PathBuf,
+    data_path: PathBuf,
+    key_digest: String,
+    plan_digest: String,
+    generation: u64,
+    _entry_lock: Arc<File>,
+}
+
+impl CacheUsePin {
+    fn from_locked_source(
+        cache: &ManagedCache,
+        source: PathBuf,
+        entry_lock: Arc<File>,
+    ) -> Result<Self, CacheError> {
+        let entry_path = source
+            .parent()
+            .ok_or(CacheError::UnsafePath("cache source has no entry parent"))?
+            .to_path_buf();
+        let manifest = validate_completed_entry(&cache.root.path, &source, &entry_path)?;
+        Ok(Self {
+            key_digest: manifest.key_digest,
+            plan_digest: manifest.plan_digest,
+            generation: manifest.generation,
+            entry_path,
+            data_path: source,
+            _entry_lock: entry_lock,
+        })
+    }
+
+    pub fn revalidate(&self) -> Result<(), CacheError> {
+        let root = self
+            .entry_path
+            .parent()
+            .and_then(Path::parent)
+            .ok_or(CacheError::UnsafePath("cache pin has no managed root"))?;
+        validate_owner_marker(&root.join(OWNER_FILE))?;
+        validate_plain_directory(&root.join(ENTRIES_DIR))?;
+        validate_plain_directory(&root.join(WORKSPACES_DIR))?;
+        let manifest = validate_completed_entry(root, &self.data_path, &self.entry_path)?;
+        if manifest.key_digest != self.key_digest
+            || manifest.plan_digest != self.plan_digest
+            || manifest.generation != self.generation
+        {
+            return Err(CacheError::GenerationMismatch);
+        }
+        Ok(())
+    }
+}
+
+fn validate_pin_source_path(root: &Path, source: &Path) -> Result<PathBuf, CacheError> {
+    if !source.is_absolute() {
+        return Err(CacheError::UnsafePath("cache source must be absolute"));
+    }
+    reject_lexical_escape(source)?;
+    reject_symlink_components(source)?;
+    let canonical = fs::canonicalize(source).map_err(CacheError::Io)?;
+    if canonical != source {
+        return Err(CacheError::UnsafePath("cache source must be canonical"));
+    }
+    let relative = source
+        .strip_prefix(root)
+        .map_err(|_| CacheError::UnsafePath("cache source is outside managed root"))?;
+    let components: Vec<_> = relative.components().collect();
+    if components.len() != 3
+        || components[0].as_os_str() != ENTRIES_DIR
+        || components[2].as_os_str() != "data"
+    {
+        return Err(CacheError::UnsafePath(
+            "cache source must be an entry data path",
+        ));
+    }
+    let key_name = components[1]
+        .as_os_str()
+        .to_str()
+        .ok_or(CacheError::InvalidDigest)?;
+    let key_hex = key_name
+        .strip_prefix("sha256-")
+        .ok_or(CacheError::InvalidDigest)?;
+    if key_hex.len() != 64
+        || !key_hex
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err(CacheError::InvalidDigest);
+    }
+    Ok(source.to_path_buf())
+}
+
+fn validate_completed_entry(
+    root: &Path,
+    data_path: &Path,
+    entry_path: &Path,
+) -> Result<CacheGenerationManifestV1, CacheError> {
+    validate_pin_source_path(root, data_path)?;
+    validate_plain_directory(entry_path)?;
+    validate_plain_directory(data_path)?;
+    let marker = entry_path.join(COMPLETE_FILE);
+    match fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CacheError::SymlinkInManagedRoot(marker));
+        }
+        Ok(metadata) if !metadata.is_file() => return Err(CacheError::UnexpectedEntry(marker)),
+        Err(error) => return Err(CacheError::Io(error)),
+        Ok(_) => {}
+    }
+    if fs::read(&marker).map_err(CacheError::Io)? != COMPLETE_BYTES {
+        return Err(CacheError::GenerationMismatch);
+    }
+    let manifest_path = entry_path.join(GENERATION_MANIFEST_FILE);
+    match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(CacheError::SymlinkInManagedRoot(manifest_path));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(CacheError::UnexpectedEntry(manifest_path));
+        }
+        Err(error) => return Err(CacheError::Io(error)),
+        Ok(_) => {}
+    }
+    let manifest = read_generation_manifest(&manifest_path)?;
+    let key_name = entry_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(CacheError::InvalidDigest)?;
+    let key_digest = format!("sha256:{}", &key_name[7..]);
+    validated_digest_hex(&manifest.plan_digest)?;
+    if manifest.schema_version != GENERATION_SCHEMA_VERSION
+        || manifest.key_digest != key_digest
+        || manifest.state != "complete"
+    {
+        return Err(CacheError::GenerationMismatch);
+    }
+    Ok(manifest)
+}
+
 #[derive(Debug, Clone)]
 pub struct PreparedCacheEntry {
     pub path: PathBuf,
@@ -742,11 +929,20 @@ pub struct PreparedCacheEntry {
     key_digest: String,
     plan_digest: String,
     generation: u64,
-    _entry_lock: Arc<File>,
+    _generation_owner: Arc<PreparedCacheGenerationOwner>,
     pub was_complete: bool,
 }
 
-impl Drop for PreparedCacheEntry {
+#[derive(Debug)]
+struct PreparedCacheGenerationOwner {
+    staging_path: PathBuf,
+    key_digest: String,
+    plan_digest: String,
+    generation: u64,
+    _entry_lock: Arc<File>,
+}
+
+impl Drop for PreparedCacheGenerationOwner {
     fn drop(&mut self) {
         let Ok(manifest) =
             read_generation_manifest(&self.staging_path.join(GENERATION_MANIFEST_FILE))
@@ -762,6 +958,42 @@ impl Drop for PreparedCacheEntry {
             let _ = fs::remove_dir_all(&self.staging_path);
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CacheGenerationExpectation {
+    pub key_digest: String,
+    pub plan_digest: String,
+    pub generation: u64,
+    pub state: &'static str,
+}
+
+impl PreparedCacheEntry {
+    pub(crate) fn generation_expectation(&self) -> CacheGenerationExpectation {
+        CacheGenerationExpectation {
+            key_digest: self.key_digest.clone(),
+            plan_digest: self.plan_digest.clone(),
+            generation: self.generation,
+            state: "staging",
+        }
+    }
+}
+
+pub(crate) fn revalidate_generation_source(
+    source: &Path,
+    expected: &CacheGenerationExpectation,
+) -> Result<(), CacheError> {
+    let staging = source.parent().ok_or(CacheError::PromotionUncertain)?;
+    let manifest = read_generation_manifest(&staging.join(GENERATION_MANIFEST_FILE))?;
+    if manifest.schema_version != GENERATION_SCHEMA_VERSION
+        || manifest.key_digest != expected.key_digest
+        || manifest.plan_digest != expected.plan_digest
+        || manifest.generation != expected.generation
+        || manifest.state != expected.state
+    {
+        return Err(CacheError::PromotionUncertain);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1191,11 +1423,30 @@ fn acquire_entry_lock(entry: &Path) -> Result<Arc<File>, CacheError> {
     acquire_advisory_lock(&entry.join(ENTRY_LOCK_FILE), "cache entry")
 }
 
+fn acquire_existing_entry_lock(entry: &Path) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock_existing(&entry.join(ENTRY_LOCK_FILE), "cache entry")
+}
+
 fn acquire_promotion_lock(root: &Path) -> Result<Arc<File>, CacheError> {
     acquire_advisory_lock(&root.join(PROMOTION_LOCK_FILE), "cache promotion")
 }
 
 fn acquire_advisory_lock(path: &Path, label: &'static str) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock_with_mode(path, label, true)
+}
+
+fn acquire_advisory_lock_existing(
+    path: &Path,
+    label: &'static str,
+) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock_with_mode(path, label, false)
+}
+
+fn acquire_advisory_lock_with_mode(
+    path: &Path,
+    label: &'static str,
+    create: bool,
+) -> Result<Arc<File>, CacheError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()));
@@ -1207,13 +1458,12 @@ fn acquire_advisory_lock(path: &Path, label: &'static str) -> Result<Arc<File>, 
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(CacheError::Io(error)),
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(CacheError::Io)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).truncate(false);
+    if create {
+        options.create(true);
+    }
+    let mut file = options.open(path).map_err(CacheError::Io)?;
     if let Err(error) = file.try_lock_exclusive() {
         if error.kind() == io::ErrorKind::WouldBlock {
             return Err(CacheError::LockBusy(path.to_path_buf()));
@@ -2007,6 +2257,35 @@ timeout_seconds = 60
     }
 
     #[test]
+    fn prepared_entry_clones_share_cleanup_and_lock_until_final_drop() {
+        let (repo, resolved) = resolved_fixture("entry-clone-lifetime");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let envelope = envelope();
+        let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
+        let first = cache
+            .prepare_entry(&key, &envelope.plan_digest, 7)
+            .expect("prepare");
+        let staging = first.staging_path.clone();
+        let clone = first.clone();
+
+        drop(first);
+        assert!(staging.is_dir(), "one clone must not remove live staging");
+        assert!(matches!(
+            cache.prepare_entry(&key, &envelope.plan_digest, 8),
+            Err(CacheError::LockBusy(_))
+        ));
+
+        drop(clone);
+        assert!(!staging.exists(), "final owner removes matching staging");
+        let next = cache
+            .prepare_entry(&key, &envelope.plan_digest, 8)
+            .expect("lock released after final owner");
+        drop(next);
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
     fn multi_entry_promotion_is_journaled_and_cleans_only_after_success() {
         let (repo, resolved) = resolved_fixture("multi-entry-promotion");
         let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
@@ -2091,5 +2370,321 @@ timeout_seconds = 60
         assert_eq!(journal.entries.len(), 1);
         clean(&resolved.path);
         clean(&repo);
+    }
+
+    struct CompletedSourceFixture {
+        repo: PathBuf,
+        resolved: ResolvedCacheRoot,
+        cache: ManagedCache,
+        data_path: PathBuf,
+        entry_path: PathBuf,
+    }
+
+    fn completed_entry_fixture(name: &str) -> CompletedSourceFixture {
+        let (repo, resolved) = resolved_fixture(name);
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let prepared = cache
+            .prepare_entry(&key, &plan.plan_digest, 1)
+            .expect("prepare");
+        fs::write(prepared.data_path.join("payload"), b"owned fixture").expect("payload");
+        cache.promote_entry(&prepared).expect("promote");
+        let entry_path = cache.entry_path(&key);
+        CompletedSourceFixture {
+            repo,
+            resolved,
+            cache,
+            data_path: entry_path.join("data"),
+            entry_path,
+        }
+    }
+
+    fn finish_fixture(fixture: CompletedSourceFixture) {
+        clean(&fixture.resolved.path);
+        clean(&fixture.repo);
+    }
+
+    #[test]
+    fn completed_source_pin_holds_entry_lock_until_drop() {
+        let fixture = completed_entry_fixture("completed-source-pin");
+        let pins = fixture
+            .cache
+            .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+            .expect("pin completed source");
+        assert_eq!(pins.len(), 1);
+        assert!(matches!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path)),
+            Err(CacheError::LockBusy(_))
+        ));
+        drop(pins);
+        assert_eq!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .expect("re-pin")
+                .len(),
+            1
+        );
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn completed_source_pin_rejects_missing_entry_lock_without_recreating_it() {
+        let fixture = completed_entry_fixture("completed-source-pin-missing-lock");
+        let lock = fixture.entry_path.join(ENTRY_LOCK_FILE);
+        fs::remove_file(&lock).expect("remove entry lock");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_err()
+        );
+        assert!(!lock.exists(), "pin must not recreate missing lock");
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn completed_source_pin_rejects_missing_workspaces_directory() {
+        let fixture = completed_entry_fixture("completed-source-pin-missing-workspaces");
+        let workspaces = fixture.resolved.path.join(WORKSPACES_DIR);
+        fs::remove_dir(&workspaces).expect("remove empty workspaces directory");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_err()
+        );
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn completed_source_pin_deduplicates_and_orders_sources() {
+        let first = completed_entry_fixture("completed-source-pin-order");
+        let second_key = CacheKey {
+            digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .to_owned(),
+        };
+        let plan = envelope();
+        let prepared = first
+            .cache
+            .prepare_entry(&second_key, &plan.plan_digest, 1)
+            .expect("second prepare");
+        fs::write(prepared.data_path.join("payload"), b"second fixture").expect("payload");
+        first
+            .cache
+            .promote_entry(&prepared)
+            .expect("second promote");
+        drop(prepared);
+        let second_data_path = first.cache.entry_data_path(&second_key);
+        let sources = [
+            second_data_path.clone(),
+            first.data_path.clone(),
+            second_data_path,
+        ];
+        let pins = first.cache.pin_completed_sources(&sources).expect("pins");
+        assert_eq!(pins.len(), 2);
+        assert!(pins[0].entry_path < pins[1].entry_path);
+        drop(pins);
+        finish_fixture(first);
+    }
+
+    #[test]
+    fn completed_source_pin_rejects_invalid_source_shapes() {
+        let fixture = completed_entry_fixture("completed-source-pin-invalid");
+        let root = fixture.resolved.path.clone();
+        let cases = [
+            root.join("other/entries/sha256-").join("data"),
+            fixture.entry_path.join("data/extra"),
+            fixture.entry_path.join("not-data"),
+            root.join("entries/invalid-key/data"),
+            root.join("entries/sha256-").join("data"),
+            root.join("entries/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/staging/data"),
+        ];
+        for source in cases {
+            assert!(
+                fixture
+                    .cache
+                    .pin_completed_sources(std::slice::from_ref(&source))
+                    .is_err(),
+                "accepted {source:?}"
+            );
+        }
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn completed_source_pin_rejects_non_absolute_and_other_root_sources() {
+        let fixture = completed_entry_fixture("completed-source-pin-roots");
+        let relative = PathBuf::from("relative/data");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&relative))
+                .is_err()
+        );
+        let other = completed_entry_fixture("completed-source-pin-other-root");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&other.data_path))
+                .is_err()
+        );
+        finish_fixture(other);
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn completed_source_pin_rejects_valid_missing_key_source() {
+        let fixture = completed_entry_fixture("completed-source-pin-missing-key");
+        let missing = fixture.resolved.path.join(
+            "entries/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/data",
+        );
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&missing))
+                .is_err()
+        );
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn completed_source_pin_rejects_missing_or_mismatched_generation_manifest() {
+        let fixture = completed_entry_fixture("completed-source-pin-manifest-missing");
+        fs::remove_file(fixture.entry_path.join(GENERATION_MANIFEST_FILE)).expect("manifest");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_err()
+        );
+        finish_fixture(fixture);
+
+        let fixture = completed_entry_fixture("completed-source-pin-manifest-mismatch");
+        let manifest = fixture.entry_path.join(GENERATION_MANIFEST_FILE);
+        let mut parsed = read_generation_manifest(&manifest).expect("manifest");
+        parsed.key_digest =
+            "sha256-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_owned();
+        fs::write(&manifest, serde_json::to_vec(&parsed).expect("encode")).expect("write");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_err()
+        );
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn completed_source_pin_rejects_invalid_plan_digest_and_non_complete_state() {
+        let fixture = completed_entry_fixture("completed-source-pin-plan-invalid");
+        let manifest = fixture.entry_path.join(GENERATION_MANIFEST_FILE);
+        let mut parsed = read_generation_manifest(&manifest).expect("manifest");
+        parsed.plan_digest = "not-a-digest".to_owned();
+        fs::write(&manifest, serde_json::to_vec(&parsed).expect("encode")).expect("write");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_err()
+        );
+        finish_fixture(fixture);
+
+        let fixture = completed_entry_fixture("completed-source-pin-state");
+        let manifest = fixture.entry_path.join(GENERATION_MANIFEST_FILE);
+        let mut parsed = read_generation_manifest(&manifest).expect("manifest");
+        parsed.state = "staging".to_owned();
+        fs::write(&manifest, serde_json::to_vec(&parsed).expect("encode")).expect("write");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_err()
+        );
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn completed_source_pin_rejects_missing_source_and_incomplete_entry() {
+        let fixture = completed_entry_fixture("completed-source-pin-incomplete");
+        let missing = fixture.resolved.path.join("entries/sha256-").join("data");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&missing))
+                .is_err()
+        );
+        fs::remove_file(fixture.entry_path.join(COMPLETE_FILE)).expect("marker");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_err()
+        );
+        finish_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_source_pin_rejects_symlink_component_and_wrong_type() {
+        use std::os::unix::fs::symlink;
+        let fixture = completed_entry_fixture("completed-source-pin-symlink");
+        let link = fixture.repo.join("link");
+        symlink(&fixture.resolved.path, &link).expect("symlink");
+        let escaped = link
+            .join("entries")
+            .join(fixture.entry_path.file_name().unwrap())
+            .join("data");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&escaped))
+                .is_err()
+        );
+        fs::remove_dir_all(&fixture.data_path).expect("data dir");
+        fs::write(&fixture.data_path, b"wrong type").expect("wrong type");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_err()
+        );
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn active_prepared_generation_makes_completed_source_pin_busy_and_failure_releases_prior_pins()
+    {
+        let fixture = completed_entry_fixture("completed-source-pin-busy");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let prepared = fixture
+            .cache
+            .prepare_entry(&key, &plan.plan_digest, 2)
+            .expect("prepare");
+        assert!(matches!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path)),
+            Err(CacheError::LockBusy(_))
+        ));
+        drop(prepared);
+        let bad = fixture.resolved.path.join("missing");
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(&[fixture.data_path.clone(), bad])
+                .is_err()
+        );
+        assert!(
+            fixture
+                .cache
+                .pin_completed_sources(std::slice::from_ref(&fixture.data_path))
+                .is_ok()
+        );
+        finish_fixture(fixture);
     }
 }

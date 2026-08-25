@@ -29,7 +29,9 @@ use commit_ci_preflight::admission::{
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
 };
-use commit_ci_preflight::cache::{CacheError, CacheRootOptions, ManagedCache, ResolvedCacheRoot};
+use commit_ci_preflight::cache::{
+    CacheError, CacheRootOptions, CacheUsePin, ManagedCache, ResolvedCacheRoot,
+};
 use commit_ci_preflight::config::{ConfigError, ConfigV1, ExecutionPlanEnvelopeV1};
 use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
@@ -287,6 +289,12 @@ struct GuardExecArgs {
     /// Disable local observation history without changing admission or watchdog behavior.
     #[arg(long)]
     no_resource_history: bool,
+    /// Managed cache root paired with one or more completed cache sources.
+    #[arg(long)]
+    managed_cache_root: Vec<PathBuf>,
+    /// Completed managed-cache source to pin for the guarded child; repeatable.
+    #[arg(long)]
+    managed_cache_source: Vec<PathBuf>,
     /// Program and arguments. The `--` separator is required.
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     argv: Vec<OsString>,
@@ -572,6 +580,7 @@ fn run_guard_command(action: GuardCommand) -> Result<(), CliError> {
 }
 
 fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
+    validate_guard_cache_args(&args).map_err(CliError::Guard)?;
     let admission_timeout = Duration::from_secs(args.admission_timeout_seconds);
     if admission_timeout.is_zero() || admission_timeout > GUARD_EXEC_MAX_TIMEOUT {
         return Err(CliError::Guard(GuardExecError::InvalidAdmissionTimeout));
@@ -607,10 +616,34 @@ fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
         return Err(CliError::Guard(GuardExecError::InvalidCurrentDirectory));
     }
 
+    let managed_cache_root = if args.managed_cache_root.is_empty() {
+        None
+    } else {
+        Some(
+            ResolvedCacheRoot::resolve(
+                &current_dir,
+                &CacheRootOptions::from_process(Some(args.managed_cache_root[0].clone())),
+            )
+            .map_err(GuardExecError::from_cache)
+            .map_err(CliError::Guard)?,
+        )
+    };
+
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
     let supervisor = Arc::new(ProcessSupervisor::standard());
     let mut session = GuardExecSession::acquire(&cancellation, admission_timeout)?;
+
+    let managed_cache = match managed_cache_root {
+        None => None,
+        Some(root) => match ManagedCache::open(root).map_err(GuardExecError::from_cache) {
+            Ok(cache) => Some(cache),
+            Err(error) => {
+                let result = session.finish(Err(error), &cancellation);
+                return result.map(|_| ()).map_err(CliError::Guard);
+            }
+        },
+    };
 
     let baseline = match resource_pre_start(supervisor.clone(), &cancellation) {
         Ok(baseline) => baseline,
@@ -645,18 +678,92 @@ fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
         timeout,
         max_capture_bytes: GUARD_EXEC_CAPTURE_BYTES,
     };
-    let process = supervisor
-        .execute_with_output(
-            &request,
-            &cancellation,
-            &GenerationGuard::new(request.identity.clone()),
-            OutputMode::Tee,
-        )
-        .map_err(GuardExecError::Process);
-    let result = session
-        .finish(process, &cancellation)
-        .map_err(CliError::Guard)?;
+    let pins = match managed_cache.as_ref() {
+        None => None,
+        Some(_) if args.managed_cache_source.is_empty() => {
+            let error = GuardExecError::InvalidManagedCache;
+            let result = session.finish(Err(error), &cancellation);
+            return result.map(|_| ()).map_err(CliError::Guard);
+        }
+        Some(cache) => match cache
+            .pin_completed_sources(&args.managed_cache_source)
+            .map_err(GuardExecError::from_cache)
+        {
+            Ok(pins) => Some(pins),
+            Err(error) => {
+                let result = session.finish(Err(error), &cancellation);
+                return result.map(|_| ()).map_err(CliError::Guard);
+            }
+        },
+    };
+    let mut session = Some(session);
+    let process_and_finish = || {
+        let session = session.take().ok_or(GuardExecError::InternalFailure)?;
+        let process = supervisor
+            .execute_with_output(
+                &request,
+                &cancellation,
+                &GenerationGuard::new(request.identity.clone()),
+                OutputMode::Tee,
+            )
+            .map_err(GuardExecError::Process);
+        session.finish(process, &cancellation)
+    };
+    let result = match pins.as_ref() {
+        Some(pins) => execute_with_guard_cache_pins(pins, process_and_finish),
+        None => with_guard_cache_pins(None, &[], process_and_finish),
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(session) = session {
+                let finished = session.finish(Err(error), &cancellation);
+                return finished.map(|_| ()).map_err(CliError::Guard);
+            }
+            return Err(CliError::Guard(error));
+        }
+    };
     classify_guard_result(result, &cancellation).map_err(CliError::Guard)
+}
+
+fn execute_with_guard_cache_pins<T>(
+    pins: &[CacheUsePin],
+    child: impl FnOnce() -> Result<T, GuardExecError>,
+) -> Result<T, GuardExecError> {
+    for pin in pins {
+        pin.revalidate().map_err(GuardExecError::from_cache)?;
+    }
+    child()
+}
+
+fn with_guard_cache_pins<T>(
+    cache: Option<&ManagedCache>,
+    sources: &[PathBuf],
+    child: impl FnOnce() -> Result<T, GuardExecError>,
+) -> Result<T, GuardExecError> {
+    match (cache, sources.is_empty()) {
+        (None, true) => child(),
+        (None, false) => Err(GuardExecError::InvalidManagedCache),
+        (Some(cache), false) => {
+            let pins = cache
+                .pin_completed_sources(sources)
+                .map_err(GuardExecError::from_cache)?;
+            execute_with_guard_cache_pins(&pins, child)
+        }
+        (Some(_), true) => Err(GuardExecError::InvalidManagedCache),
+    }
+}
+
+fn validate_guard_cache_args(args: &GuardExecArgs) -> Result<(), GuardExecError> {
+    let root_empty = args.managed_cache_root.is_empty();
+    let sources_empty = args.managed_cache_source.is_empty();
+    if root_empty && sources_empty {
+        return Ok(());
+    }
+    if args.managed_cache_root.len() != 1 || sources_empty {
+        return Err(GuardExecError::InvalidManagedCache);
+    }
+    Ok(())
 }
 
 fn detect_resource_executor(argv: &[OsString]) -> ResourceExecutorV2 {
@@ -2223,7 +2330,9 @@ enum GuardExecError {
     MissingProgram,
     InvalidResourceProfile,
     InvalidResourceContext,
+    InvalidManagedCache,
     InvalidCurrentDirectory,
+    CacheInternal,
     Admission(AdmissionError),
     Resource(ResourceGuardError),
     ResourcePressure,
@@ -2235,6 +2344,10 @@ enum GuardExecError {
 }
 
 impl GuardExecError {
+    fn from_cache(_: CacheError) -> Self {
+        Self::CacheInternal
+    }
+
     fn from_cli(error: CliError) -> Self {
         match error {
             CliError::Admission(error) => Self::Admission(error),
@@ -2250,10 +2363,11 @@ impl GuardExecError {
             | Self::MissingProgram
             | Self::InvalidResourceProfile
             | Self::InvalidResourceContext
+            | Self::InvalidManagedCache
             | Self::InvalidCurrentDirectory => 2,
             Self::Admission(error) => error.exit_code(),
             Self::Resource(_) | Self::ResourcePressure => 6,
-            Self::Process(_) | Self::InternalFailure => 70,
+            Self::Process(_) | Self::CacheInternal | Self::InternalFailure => 70,
             Self::ChildExit(code) if (1..=255).contains(code) => *code,
             Self::ChildExit(_) => 70,
             Self::TimedOut => 124,
@@ -2278,9 +2392,13 @@ impl fmt::Display for GuardExecError {
             Self::InvalidResourceContext => formatter.write_str(
                 "guard exec resource context labels must be bounded ASCII tokens and numeric limits must be positive",
             ),
+            Self::InvalidManagedCache => formatter.write_str(
+                "guard exec managed cache requires exactly one root and at least one source",
+            ),
             Self::InvalidCurrentDirectory => {
                 formatter.write_str("guard exec current directory could not be canonicalized")
             }
+            Self::CacheInternal => formatter.write_str("guard exec managed cache validation failed"),
             Self::Admission(error) => write!(formatter, "{error}"),
             Self::Resource(error) => write!(formatter, "{error}"),
             Self::ResourcePressure => {
@@ -2439,6 +2557,10 @@ mod tests {
         reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
+    use commit_ci_preflight::cache::{
+        CacheError, CacheKey, CacheRootSource, ManagedCache, ResolvedCacheRoot,
+    };
+    use commit_ci_preflight::config::ConfigV1;
     use commit_ci_preflight::process::CancellationToken;
     use commit_ci_preflight::process::{
         CleanupStatus, ExitOutcome, ProcessResult, ProcessTermination, RunIdentity,
@@ -2448,7 +2570,175 @@ mod tests {
     };
     use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
     use std::ffi::OsString;
+    use std::fs;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn guard_cache_fixture(name: &str) -> (ManagedCache, PathBuf, PathBuf) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let temp_root = fs::canonicalize(std::env::temp_dir()).expect("canonical temp root");
+        let base = temp_root.join(format!("ccp-guard-cache-pins-{name}-{stamp}"));
+        let repository = base.join("repository");
+        let root = base.join("cache");
+        fs::create_dir_all(&repository).expect("repository fixture");
+        let resolved = ResolvedCacheRoot {
+            path: root,
+            source: CacheRootSource::Explicit,
+        };
+        let cache = ManagedCache::initialize(resolved).expect("initialize cache");
+        let envelope = ConfigV1::parse(
+            r#"
+schema_version = "1.0"
+project = "guard/cache-pins"
+
+[runtime]
+kind = "docker_compatible"
+image = "example.invalid/ci@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+
+[[caches]]
+id = "cargo"
+mount_path = ".cache/cargo"
+
+[[checks]]
+id = "test"
+required = true
+argv = ["true"]
+working_directory = "."
+timeout_seconds = 60
+"#,
+        )
+        .expect("fixture config")
+        .into_plan()
+        .expect("fixture plan");
+        let key = CacheKey::for_plan_cache(&envelope, &envelope.plan.caches[0]).expect("key");
+        let prepared = cache
+            .prepare_entry(&key, &envelope.plan_digest, 1)
+            .expect("prepare");
+        fs::write(prepared.data_path.join("payload"), b"fixture").expect("payload");
+        cache.promote_entry(&prepared).expect("promote");
+        let source = cache.entry_data_path(&key);
+        (cache, source, base)
+    }
+
+    fn cleanup_guard_cache_fixture(base: &Path) {
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn guard_cache_pins_revalidate_before_child_after_noncooperative_change() {
+        let (cache, source, base) = guard_cache_fixture("revalidate");
+        let pins = cache
+            .pin_completed_sources(std::slice::from_ref(&source))
+            .expect("pin");
+        fs::remove_dir_all(&source).expect("remove source");
+        let calls = AtomicUsize::new(0);
+        let result = super::execute_with_guard_cache_pins(&pins, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, GuardExecError>(())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(pins);
+        cleanup_guard_cache_fixture(&base);
+    }
+
+    #[test]
+    fn guard_cache_pins_hold_lock_through_success_and_release_after_return() {
+        let (cache, source, base) = guard_cache_fixture("success");
+        let result =
+            super::with_guard_cache_pins(Some(&cache), std::slice::from_ref(&source), || {
+                assert!(matches!(
+                    cache.pin_completed_sources(std::slice::from_ref(&source)),
+                    Err(CacheError::LockBusy(_))
+                ));
+                Ok::<_, GuardExecError>(())
+            });
+        assert!(result.is_ok());
+        assert!(
+            cache
+                .pin_completed_sources(std::slice::from_ref(&source))
+                .is_ok()
+        );
+        cleanup_guard_cache_fixture(&base);
+    }
+
+    #[test]
+    fn guard_cache_pins_hold_lock_through_child_error_and_release_after_return() {
+        let (cache, source, base) = guard_cache_fixture("error");
+        let result =
+            super::with_guard_cache_pins(Some(&cache), std::slice::from_ref(&source), || {
+                assert!(matches!(
+                    cache.pin_completed_sources(std::slice::from_ref(&source)),
+                    Err(CacheError::LockBusy(_))
+                ));
+                Err::<(), _>(GuardExecError::InternalFailure)
+            });
+        assert!(matches!(result, Err(GuardExecError::InternalFailure)));
+        assert!(
+            cache
+                .pin_completed_sources(std::slice::from_ref(&source))
+                .is_ok()
+        );
+        cleanup_guard_cache_fixture(&base);
+    }
+
+    #[test]
+    fn guard_cache_pins_deduplicate_sources_and_call_child_once() {
+        let (cache, source, base) = guard_cache_fixture("duplicate");
+        let calls = AtomicUsize::new(0);
+        let result =
+            super::with_guard_cache_pins(Some(&cache), &[source.clone(), source.clone()], || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, GuardExecError>(())
+            });
+        assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        cleanup_guard_cache_fixture(&base);
+    }
+
+    #[test]
+    fn guard_cache_pins_legacy_none_empty_calls_child_once() {
+        let calls = AtomicUsize::new(0);
+        let result = super::with_guard_cache_pins(None, &[], || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, GuardExecError>(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn guard_cache_pins_none_with_source_fails_closed_without_child() {
+        let (_cache, source, base) = guard_cache_fixture("none-source");
+        let calls = AtomicUsize::new(0);
+        let result = super::with_guard_cache_pins(None, std::slice::from_ref(&source), || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, GuardExecError>(())
+        });
+        assert!(matches!(result, Err(GuardExecError::InvalidManagedCache)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        cleanup_guard_cache_fixture(&base);
+    }
+
+    #[test]
+    fn guard_cache_pins_some_with_empty_sources_fails_closed_without_child() {
+        let (cache, _source, base) = guard_cache_fixture("some-empty");
+        let calls = AtomicUsize::new(0);
+        let result = super::with_guard_cache_pins(Some(&cache), &[], || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<_, GuardExecError>(())
+        });
+        assert!(matches!(result, Err(GuardExecError::InvalidManagedCache)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        cleanup_guard_cache_fixture(&base);
+    }
 
     #[test]
     fn cli_definition_is_valid() {
@@ -2541,6 +2831,94 @@ mod tests {
         }
 
         assert!(Cli::try_parse_from(["commit-ci-preflight", "guard", "exec", "echo"]).is_err());
+    }
+
+    #[test]
+    fn guard_exec_parses_managed_cache_pins() {
+        let root = PathBuf::from("/owned/cache");
+        let source = PathBuf::from(
+            "/owned/cache/entries/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/data",
+        );
+        let second_source = PathBuf::from(
+            "/owned/cache/entries/sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/data",
+        );
+        let cli = Cli::try_parse_from([
+            "commit-ci-preflight",
+            "guard",
+            "exec",
+            "--managed-cache-root",
+            "/owned/cache",
+            "--managed-cache-source",
+            source.to_str().expect("source is utf-8"),
+            "--managed-cache-source",
+            second_source.to_str().expect("second source is utf-8"),
+            "--",
+            "fixture",
+        ])
+        .expect("managed cache pin parses");
+
+        let super::Command::Guard {
+            action: GuardCommand::Exec(args),
+        } = cli.command.expect("command is present")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.managed_cache_root, vec![root.clone()]);
+        assert_eq!(
+            args.managed_cache_source,
+            vec![source.clone(), second_source.clone()]
+        );
+        super::validate_guard_cache_args(&args).expect("managed cache arguments are valid");
+
+        let legacy = Cli::try_parse_from(["commit-ci-preflight", "guard", "exec", "--", "fixture"])
+            .expect("legacy guard exec parses");
+        let super::Command::Guard {
+            action: GuardCommand::Exec(legacy_args),
+        } = legacy.command.expect("legacy command is present")
+        else {
+            panic!("unexpected legacy command");
+        };
+        assert!(legacy_args.managed_cache_root.is_empty());
+        assert!(legacy_args.managed_cache_source.is_empty());
+        super::validate_guard_cache_args(&legacy_args).expect("legacy arguments are valid");
+
+        for argv in [
+            vec!["--managed-cache-root", "/owned/cache", "--", "fixture"],
+            vec![
+                "--managed-cache-source",
+                "/owned/cache/source",
+                "--",
+                "fixture",
+            ],
+            vec![
+                "--managed-cache-root",
+                "/owned/cache-a",
+                "--managed-cache-root",
+                "/owned/cache-b",
+                "--managed-cache-source",
+                "/owned/cache-a/source",
+                "--",
+                "fixture",
+            ],
+        ] {
+            let mut command = vec!["commit-ci-preflight", "guard", "exec"];
+            command.extend(argv);
+            let parsed = Cli::try_parse_from(command).expect("raw combinations parse");
+            let super::Command::Guard {
+                action: GuardCommand::Exec(invalid_args),
+            } = parsed.command.expect("invalid command is present")
+            else {
+                panic!("unexpected invalid command");
+            };
+            let error = super::validate_guard_cache_args(&invalid_args)
+                .expect_err("invalid managed cache arguments are rejected");
+            assert_eq!(error.exit_code(), 2);
+            assert_eq!(
+                error.to_string(),
+                "guard exec managed cache requires exactly one root and at least one source"
+            );
+            assert!(!error.to_string().contains("/owned"));
+        }
     }
 
     #[test]
@@ -2670,6 +3048,8 @@ mod tests {
             resource_cpu_limit_millis: None,
             resource_memory_limit_bytes: None,
             no_resource_history: false,
+            managed_cache_root: Vec::new(),
+            managed_cache_source: Vec::new(),
             argv: vec![OsString::from("fixture")],
         }
     }
