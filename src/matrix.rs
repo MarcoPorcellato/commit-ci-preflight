@@ -33,6 +33,7 @@ use crate::config::{
     ExecutionPlanV1, NormalizedCache, NormalizedEnvironment, NormalizedReceipt, NormalizedRuntime,
     ReceiptConfig, RuntimeConfig, RuntimeKind, validate_identifier,
 };
+use crate::matrix_legacy::{LegacyMatrixDigestBasisV1, project_legacy_basis};
 use crate::process::{CancellationToken, SupervisorPort};
 use crate::receipt::{
     EvidenceStatus, ProducerEvidence, ReceiptEnvelopeV1, ReceiptError, ReceiptV1,
@@ -148,6 +149,17 @@ impl MatrixCheckConfigV2 {
 pub struct MatrixPlanEnvelopeV2 {
     pub plan_digest: String,
     pub plan: MatrixPlanV2,
+    #[serde(skip)]
+    profile: MatrixPlanProfile,
+    #[serde(skip)]
+    legacy_basis: Option<LegacyMatrixDigestBasisV1>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MatrixPlanProfile {
+    #[default]
+    CurrentV2,
+    LegacyV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -186,6 +198,22 @@ impl MatrixConfigV2 {
     }
 
     pub fn into_plan(self) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
+        build_matrix_plan(self, MatrixPlanProfile::default())
+    }
+}
+
+pub fn build_matrix_plan(
+    config: MatrixConfigV2,
+    profile: MatrixPlanProfile,
+) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
+    config.build_plan_with_profile(profile)
+}
+
+impl MatrixConfigV2 {
+    fn build_plan_with_profile(
+        self,
+        profile: MatrixPlanProfile,
+    ) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
         if self.schema_version != MATRIX_CONFIG_SCHEMA_VERSION {
             return Err(MatrixError::UnsupportedSchemaVersion(self.schema_version));
         }
@@ -264,7 +292,7 @@ impl MatrixConfigV2 {
                 checks: group.plan.checks,
             });
         }
-        let plan = MatrixPlanV2 {
+        let mut plan = MatrixPlanV2 {
             schema_version: MATRIX_CONFIG_SCHEMA_VERSION.to_owned(),
             project: self.project,
             receipt: shared_receipt.expect("at least two runtimes"),
@@ -272,12 +300,56 @@ impl MatrixConfigV2 {
             caches: shared_caches.expect("at least two runtimes"),
             runtimes: runtime_plans,
         };
-        let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
-        Ok(MatrixPlanEnvelopeV2 { plan_digest, plan })
+        match profile {
+            MatrixPlanProfile::CurrentV2 => {
+                let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
+                Ok(MatrixPlanEnvelopeV2 {
+                    plan_digest,
+                    plan,
+                    profile,
+                    legacy_basis: None,
+                })
+            }
+            MatrixPlanProfile::LegacyV1 => {
+                let legacy_basis = project_legacy_basis(&plan)?;
+                for runtime in &mut plan.runtimes {
+                    runtime.configuration_digest =
+                        legacy_basis.runtime_digest(&runtime.id)?.to_owned();
+                }
+                let plan_digest = legacy_basis.outer_digest()?;
+                Ok(MatrixPlanEnvelopeV2 {
+                    plan_digest,
+                    plan,
+                    profile,
+                    legacy_basis: Some(legacy_basis),
+                })
+            }
+        }
     }
 }
 
 impl MatrixPlanEnvelopeV2 {
+    pub fn profile(&self) -> MatrixPlanProfile {
+        self.profile
+    }
+
+    pub fn plan_digest(&self) -> &str {
+        &self.plan_digest
+    }
+
+    pub fn runtime_configuration_digest(&self, id: &str) -> Result<&str, MatrixError> {
+        match &self.legacy_basis {
+            Some(basis) => basis.runtime_digest(id),
+            None => self
+                .plan
+                .runtimes
+                .iter()
+                .find(|runtime| runtime.id == id)
+                .map(|runtime| runtime.configuration_digest.as_str())
+                .ok_or_else(|| MatrixError::UnknownRuntime(id.to_owned())),
+        }
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixError> {
         let expected = canonical_digest(&self.plan).map_err(MatrixError::Receipt)?;
         if expected != self.plan_digest {
@@ -914,6 +986,7 @@ pub enum MatrixError {
     UnknownRuntime(String),
     RuntimeWithoutRequiredCheck(String),
     CrossRuntimeDependency { check: String, dependency: String },
+    LegacyPlanNotRepresentable(&'static str),
     PlanDigestMismatch,
     ReceiptIdMismatch,
     InvalidReceipt,
@@ -951,6 +1024,9 @@ impl fmt::Display for MatrixError {
                 formatter,
                 "matrix cross-runtime dependency is unsupported: {check} -> {dependency}"
             ),
+            Self::LegacyPlanNotRepresentable(field) => {
+                write!(formatter, "matrix legacy plan cannot represent: {field}")
+            }
             Self::PlanDigestMismatch => write!(formatter, "matrix plan digest mismatch"),
             Self::ReceiptIdMismatch => write!(formatter, "matrix receipt identifier mismatch"),
             Self::InvalidReceipt => {

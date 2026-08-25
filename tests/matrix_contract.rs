@@ -5,10 +5,10 @@
 
 use commit_ci_preflight::matrix::{
     MATRIX_CONFIG_SCHEMA_VERSION, MATRIX_POLICY_SCHEMA_VERSION, MATRIX_RECEIPT_SCHEMA_VERSION,
-    MatrixConfigV2, MatrixReceiptEnvelopeV2, MatrixReceiptV2, MatrixRequiredCheckV2,
-    MatrixRuntimePolicyV2, MatrixRuntimeReceiptV2, MatrixVerificationPolicyV2,
-    matrix_config_schema_json, matrix_policy_schema_json, matrix_receipt_schema_json,
-    verify_matrix_receipt_document,
+    MatrixConfigV2, MatrixError, MatrixPlanProfile, MatrixReceiptEnvelopeV2, MatrixReceiptV2,
+    MatrixRequiredCheckV2, MatrixRuntimePolicyV2, MatrixRuntimeReceiptV2,
+    MatrixVerificationPolicyV2, build_matrix_plan, matrix_config_schema_json,
+    matrix_policy_schema_json, matrix_receipt_schema_json, verify_matrix_receipt_document,
 };
 use commit_ci_preflight::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, ReceiptEnvelopeV1,
@@ -269,6 +269,81 @@ timeout_seconds = 30
         first.canonical_bytes().expect("bytes"),
         second.canonical_bytes().expect("bytes")
     );
+}
+
+#[test]
+fn legacy_profile_reproduces_historical_plan() {
+    let provenance: Value = serde_json::from_str(include_str!(
+        "fixtures/matrix-v2-legacy-plan-044697.provenance.json"
+    ))
+    .expect("provenance JSON");
+    let config = MatrixConfigV2::parse(legacy_compatible_config()).expect("parse fixture");
+    let envelope = build_matrix_plan(config, MatrixPlanProfile::LegacyV1).expect("legacy plan");
+
+    assert_eq!(MatrixPlanProfile::default(), MatrixPlanProfile::CurrentV2);
+    assert_eq!(envelope.profile(), MatrixPlanProfile::LegacyV1);
+    assert_eq!(
+        envelope.plan_digest(),
+        provenance["outer_digest"].as_str().expect("outer digest")
+    );
+    for runtime in ["python311", "python312"] {
+        assert_eq!(
+            envelope
+                .runtime_configuration_digest(runtime)
+                .expect("known runtime"),
+            provenance["runtime_digests"][runtime]
+                .as_str()
+                .expect("runtime digest")
+        );
+    }
+    assert!(matches!(
+        envelope.runtime_configuration_digest("unknown"),
+        Err(MatrixError::UnknownRuntime(id)) if id == "unknown"
+    ));
+}
+
+#[test]
+fn legacy_profile_is_canonical_across_runtime_and_check_declaration_order() {
+    let first = MatrixConfigV2::parse(legacy_compatible_config()).expect("parse first");
+    let mut reordered = MatrixConfigV2::parse(legacy_compatible_config()).expect("parse second");
+    reordered.runtimes.reverse();
+    reordered.checks.reverse();
+
+    let first = build_matrix_plan(first, MatrixPlanProfile::LegacyV1).expect("first plan");
+    let second = build_matrix_plan(reordered, MatrixPlanProfile::LegacyV1).expect("second plan");
+    assert_eq!(first.plan_digest(), second.plan_digest());
+    for runtime in ["python311", "python312"] {
+        assert_eq!(
+            first
+                .runtime_configuration_digest(runtime)
+                .expect("first runtime"),
+            second
+                .runtime_configuration_digest(runtime)
+                .expect("second runtime")
+        );
+    }
+}
+
+#[test]
+fn production_sources_do_not_embed_adopter_expected_digests() {
+    let prohibited = [
+        "25b35b942a6ff9b6237ebed7cefbdbc96b968bbe8954a38b606942f36b8df4b2",
+        "b3d8beef1542566d9d925bfee77d2244995dc74adcd879128ef65e82ed1d354b",
+        "d446c4ca0602c09eee61c796ad2972f58ab0eebe84a39f928fd90aac5bfb535c",
+        "13f4cb39b7e1a8ed31cae64502cc8e4d80d040230d3fb410a6afc3bad3b76178",
+        "eff5b7d55bb0220890dbfb050bb68a1e0fbba8f9a30a69e2f66085354fcc8562",
+        "7afb3e6dd435d9d5a317e4d9d85e80527431044312bbe299e9a70b6ba9e994c8",
+    ];
+    for path in ["src/matrix.rs", "src/matrix_legacy.rs"] {
+        let source = std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path))
+            .expect("production source");
+        for digest in prohibited {
+            assert!(
+                !source.contains(digest),
+                "production source {path} embeds adopter digest {digest}"
+            );
+        }
+    }
 }
 
 #[test]
