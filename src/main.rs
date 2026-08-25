@@ -287,6 +287,12 @@ struct GuardExecArgs {
     /// Disable local observation history without changing admission or watchdog behavior.
     #[arg(long)]
     no_resource_history: bool,
+    /// Managed cache root paired with one or more completed cache sources.
+    #[arg(long)]
+    managed_cache_root: Vec<PathBuf>,
+    /// Completed managed-cache source to pin for the guarded child; repeatable.
+    #[arg(long)]
+    managed_cache_source: Vec<PathBuf>,
     /// Program and arguments. The `--` separator is required.
     #[arg(last = true, required = true, allow_hyphen_values = true)]
     argv: Vec<OsString>,
@@ -572,6 +578,7 @@ fn run_guard_command(action: GuardCommand) -> Result<(), CliError> {
 }
 
 fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
+    validate_guard_cache_args(&args).map_err(CliError::Guard)?;
     let admission_timeout = Duration::from_secs(args.admission_timeout_seconds);
     if admission_timeout.is_zero() || admission_timeout > GUARD_EXEC_MAX_TIMEOUT {
         return Err(CliError::Guard(GuardExecError::InvalidAdmissionTimeout));
@@ -657,6 +664,18 @@ fn print_guard_exec(args: GuardExecArgs) -> Result<(), CliError> {
         .finish(process, &cancellation)
         .map_err(CliError::Guard)?;
     classify_guard_result(result, &cancellation).map_err(CliError::Guard)
+}
+
+fn validate_guard_cache_args(args: &GuardExecArgs) -> Result<(), GuardExecError> {
+    let root_empty = args.managed_cache_root.is_empty();
+    let sources_empty = args.managed_cache_source.is_empty();
+    if root_empty && sources_empty {
+        return Ok(());
+    }
+    if args.managed_cache_root.len() != 1 || sources_empty {
+        return Err(GuardExecError::InvalidManagedCache);
+    }
+    Ok(())
 }
 
 fn detect_resource_executor(argv: &[OsString]) -> ResourceExecutorV2 {
@@ -2223,6 +2242,7 @@ enum GuardExecError {
     MissingProgram,
     InvalidResourceProfile,
     InvalidResourceContext,
+    InvalidManagedCache,
     InvalidCurrentDirectory,
     Admission(AdmissionError),
     Resource(ResourceGuardError),
@@ -2250,6 +2270,7 @@ impl GuardExecError {
             | Self::MissingProgram
             | Self::InvalidResourceProfile
             | Self::InvalidResourceContext
+            | Self::InvalidManagedCache
             | Self::InvalidCurrentDirectory => 2,
             Self::Admission(error) => error.exit_code(),
             Self::Resource(_) | Self::ResourcePressure => 6,
@@ -2277,6 +2298,9 @@ impl fmt::Display for GuardExecError {
             ),
             Self::InvalidResourceContext => formatter.write_str(
                 "guard exec resource context labels must be bounded ASCII tokens and numeric limits must be positive",
+            ),
+            Self::InvalidManagedCache => formatter.write_str(
+                "guard exec managed cache requires exactly one root and at least one source",
             ),
             Self::InvalidCurrentDirectory => {
                 formatter.write_str("guard exec current directory could not be canonicalized")
@@ -2448,6 +2472,7 @@ mod tests {
     };
     use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
     use std::ffi::OsString;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -2541,6 +2566,94 @@ mod tests {
         }
 
         assert!(Cli::try_parse_from(["commit-ci-preflight", "guard", "exec", "echo"]).is_err());
+    }
+
+    #[test]
+    fn guard_exec_parses_managed_cache_pins() {
+        let root = PathBuf::from("/owned/cache");
+        let source = PathBuf::from(
+            "/owned/cache/entries/sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/data",
+        );
+        let second_source = PathBuf::from(
+            "/owned/cache/entries/sha256-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/data",
+        );
+        let cli = Cli::try_parse_from([
+            "commit-ci-preflight",
+            "guard",
+            "exec",
+            "--managed-cache-root",
+            "/owned/cache",
+            "--managed-cache-source",
+            source.to_str().expect("source is utf-8"),
+            "--managed-cache-source",
+            second_source.to_str().expect("second source is utf-8"),
+            "--",
+            "fixture",
+        ])
+        .expect("managed cache pin parses");
+
+        let super::Command::Guard {
+            action: GuardCommand::Exec(args),
+        } = cli.command.expect("command is present")
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(args.managed_cache_root, vec![root.clone()]);
+        assert_eq!(
+            args.managed_cache_source,
+            vec![source.clone(), second_source.clone()]
+        );
+        super::validate_guard_cache_args(&args).expect("managed cache arguments are valid");
+
+        let legacy = Cli::try_parse_from(["commit-ci-preflight", "guard", "exec", "--", "fixture"])
+            .expect("legacy guard exec parses");
+        let super::Command::Guard {
+            action: GuardCommand::Exec(legacy_args),
+        } = legacy.command.expect("legacy command is present")
+        else {
+            panic!("unexpected legacy command");
+        };
+        assert!(legacy_args.managed_cache_root.is_empty());
+        assert!(legacy_args.managed_cache_source.is_empty());
+        super::validate_guard_cache_args(&legacy_args).expect("legacy arguments are valid");
+
+        for argv in [
+            vec!["--managed-cache-root", "/owned/cache", "--", "fixture"],
+            vec![
+                "--managed-cache-source",
+                "/owned/cache/source",
+                "--",
+                "fixture",
+            ],
+            vec![
+                "--managed-cache-root",
+                "/owned/cache-a",
+                "--managed-cache-root",
+                "/owned/cache-b",
+                "--managed-cache-source",
+                "/owned/cache-a/source",
+                "--",
+                "fixture",
+            ],
+        ] {
+            let mut command = vec!["commit-ci-preflight", "guard", "exec"];
+            command.extend(argv);
+            let parsed = Cli::try_parse_from(command).expect("raw combinations parse");
+            let super::Command::Guard {
+                action: GuardCommand::Exec(invalid_args),
+            } = parsed.command.expect("invalid command is present")
+            else {
+                panic!("unexpected invalid command");
+            };
+            let error = super::validate_guard_cache_args(&invalid_args)
+                .expect_err("invalid managed cache arguments are rejected");
+            assert_eq!(error.exit_code(), 2);
+            assert_eq!(
+                error.to_string(),
+                "guard exec managed cache requires exactly one root and at least one source"
+            );
+            assert!(!error.to_string().contains("/owned"));
+        }
     }
 
     #[test]
@@ -2670,6 +2783,8 @@ mod tests {
             resource_cpu_limit_millis: None,
             resource_memory_limit_bytes: None,
             no_resource_history: false,
+            managed_cache_root: Vec::new(),
+            managed_cache_source: Vec::new(),
             argv: vec![OsString::from("fixture")],
         }
     }
