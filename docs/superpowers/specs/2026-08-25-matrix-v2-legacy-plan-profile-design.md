@@ -1,6 +1,6 @@
 # Matrix V2 legacy plan profile design
 
-Status: proposed for owner review  
+Status: approved for implementation after official-contract reconciliation  
 Date: 2026-08-25  
 Baseline: `2b4b55ce1a4be0a2b610656ae4a56a7641b29f26`  
 Historical plan authority: `044697dee9a0d678d30a4847d62ddf9b4970505b`  
@@ -26,6 +26,34 @@ The implementation must not contain the three Latent-TRIZ expected digest
 values or any lookup table that maps a repository/configuration to a digest.
 Golden tests may record expected outputs, but production code must derive every
 digest from canonical serialized values.
+
+## Official current-contract reconciliation
+
+The design was rechecked on 2026-08-25 against live `origin/main`
+`2b4b55ce1a4be0a2b610656ae4a56a7641b29f26`, the generated CLI help, and the
+current coordination, local-run, runtime, configuration, Matrix receipt,
+verification-policy, GitHub-gate, cache, and troubleshooting documentation.
+That review fixes the following boundaries:
+
+- `plan` remains runtime-free; `doctor` may probe configured runtimes but runs
+  no project checks; `dry-run` renders execution without spawning project
+  processes; only `run` acquires the heavy-command slot and executes checks;
+- Matrix V2 continues to publish one outer schema `2.0` receipt containing
+  sealed inner schema `1.0` receipts. The profile does not add the embedded
+  execution-plan/source-snapshot contract used by single-runtime policy `1.1`;
+- no configuration, policy, receipt, admission, or cache schema version changes
+  are introduced. The profile is an explicit CLI/build-time plan selection;
+- the legacy outer and per-runtime plan digests intentionally select a distinct
+  managed-cache namespace. Current-profile cache entries must not be promoted,
+  relabelled, or silently reused under a legacy digest;
+- policy values still come from a separately reviewed `plan` result. Neither a
+  policy nor a completed receipt may cause CCP to infer the compatibility
+  profile;
+- the GitHub gate remains a trusted verifier that executes no pull-request
+  code. Compatibility succeeds only if the historical trusted verifier accepts
+  the exact published Matrix receipt against the externally selected policy.
+
+These constraints refine the selected design without changing its direction.
 
 ## Problem and exact evidence
 

@@ -1,6 +1,6 @@
 # ADR 0005: Explicit Matrix V2 legacy plan profile
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-25
 - Decision owner: Marco Porcellato
 - Design:
@@ -75,6 +75,13 @@ Costs:
 - producer-constrained policy `1.1` cannot use this Matrix-only profile;
 - every future normalized plan field needs an explicit representability rule or
   a fail-closed rejection.
+- the legacy plan digests deliberately create a separate managed-cache
+  namespace; current-profile cache entries are not relabelled or promoted.
+
+The change does not introduce a new configuration, policy, receipt, admission,
+or cache schema. Matrix receipts remain an outer schema `2.0` envelope with
+inner schema `1.0` receipts; the single-runtime policy `1.1` embedded-plan
+contract remains out of scope.
 
 ## Rejected alternatives
 
