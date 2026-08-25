@@ -162,6 +162,15 @@ pub enum MatrixPlanProfile {
     LegacyV1,
 }
 
+impl MatrixPlanProfile {
+    pub const fn producer_version(self) -> &'static str {
+        match self {
+            Self::CurrentV2 => env!("CARGO_PKG_VERSION"),
+            Self::LegacyV1 => concat!(env!("CARGO_PKG_VERSION"), "+matrix-v2-legacy-v1"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixPlanV2 {
     pub schema_version: String,
@@ -469,10 +478,23 @@ pub fn execute_matrix_run_v2(
     clock: &dyn Clock,
     barrier: &mut dyn CompletionBarrier,
 ) -> Result<MatrixRunOutcomeV2, MatrixError> {
+    request.envelope.validate_profile_binding()?;
+    let expected_producer = ProducerEvidence {
+        name: env!("CARGO_PKG_NAME").to_owned(),
+        version: request.envelope.profile().producer_version().to_owned(),
+    };
     let started_at_utc = clock.now_utc().map_err(MatrixError::Run)?;
     let mut runtime_receipts = Vec::new();
     let mut checks = Vec::new();
     for (runtime_id, runtime_envelope) in request.envelope.runtime_envelopes()? {
+        request.envelope.validate_profile_binding()?;
+        let expected_configuration_digest = request
+            .envelope
+            .runtime_configuration_digest(&runtime_id)?
+            .to_owned();
+        if runtime_envelope.plan_digest != expected_configuration_digest {
+            return Err(MatrixError::PlanDigestMismatch);
+        }
         let runtime =
             runtime_for(runtime_envelope.plan.runtime.kind).map_err(MatrixError::Runtime)?;
         let mut inner_barrier = NoopCompletionBarrier;
@@ -482,6 +504,7 @@ pub fn execute_matrix_run_v2(
                 envelope: &runtime_envelope,
                 repository: request.repository,
                 cache: request.cache,
+                producer_version: request.envelope.profile().producer_version(),
                 generation: request.generation,
                 source_snapshot: None,
             },
@@ -493,6 +516,11 @@ pub fn execute_matrix_run_v2(
             &mut lifecycle,
         )
         .map_err(MatrixError::Run)?;
+        if receipt.receipt.producer != expected_producer
+            || receipt.receipt.configuration_digest != expected_configuration_digest
+        {
+            return Err(MatrixError::InvalidReceipt);
+        }
         checks.extend(receipt.receipt.checks.iter().cloned());
         runtime_receipts.push(MatrixRuntimeReceiptV2 {
             runtime_id,
@@ -503,7 +531,22 @@ pub fn execute_matrix_run_v2(
     let first = runtime_receipts
         .first()
         .ok_or(MatrixError::InvalidReceipt)?;
-    let producer = first.receipt.receipt.producer.clone();
+    request.envelope.validate_profile_binding()?;
+    let configuration_digest = request.envelope.plan_digest()?.to_owned();
+    if first.receipt.receipt.producer != expected_producer {
+        return Err(MatrixError::InvalidReceipt);
+    }
+    for runtime in &runtime_receipts {
+        let expected_configuration_digest = request
+            .envelope
+            .runtime_configuration_digest(&runtime.runtime_id)?;
+        if runtime.receipt.receipt.producer != first.receipt.receipt.producer
+            || runtime.receipt.receipt.producer != expected_producer
+            || runtime.receipt.receipt.configuration_digest != expected_configuration_digest
+        {
+            return Err(MatrixError::InvalidReceipt);
+        }
+    }
     let repository_evidence = first.receipt.receipt.repository.clone();
     let redaction_policy_version = first.receipt.receipt.redaction_policy_version.clone();
     let statuses: Vec<_> = checks
@@ -517,14 +560,14 @@ pub fn execute_matrix_run_v2(
         schema_version: MATRIX_RECEIPT_SCHEMA_VERSION,
         project: &request.envelope.plan.project,
         commit: &repository_evidence.commit_sha,
-        configuration_digest: &request.envelope.plan_digest,
+        configuration_digest: &configuration_digest,
         generation: request.generation,
         started_at_utc: &started_at_utc,
     })
     .map_err(MatrixError::Receipt)?;
     let receipt = MatrixReceiptEnvelopeV2::seal(MatrixReceiptV2 {
         schema_version: MATRIX_RECEIPT_SCHEMA_VERSION.to_owned(),
-        producer,
+        producer: expected_producer,
         repository: repository_evidence,
         run: RunEvidence {
             run_id,
@@ -532,7 +575,7 @@ pub fn execute_matrix_run_v2(
             started_at_utc,
             finished_at_utc,
         },
-        configuration_digest: request.envelope.plan_digest.clone(),
+        configuration_digest,
         runtime_receipts,
         overall_status,
         incomplete_reason: (overall_status == EvidenceStatus::Pending)

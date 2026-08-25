@@ -1180,6 +1180,7 @@ fn print_run(
             envelope: &envelope,
             repository: &location.repository,
             cache: &cache,
+            producer_version: env!("CARGO_PKG_VERSION"),
             generation,
             source_snapshot: Some(&source_snapshot),
         },

@@ -307,6 +307,40 @@ fn legacy_profile_reproduces_historical_plan() {
 }
 
 #[test]
+fn legacy_receipt_provenance_is_uniform() {
+    let legacy_version = MatrixPlanProfile::LegacyV1.producer_version();
+    assert_eq!(legacy_version, "0.1.0+matrix-v2-legacy-v1");
+
+    let mut legacy = receipt().receipt;
+    legacy.producer.version = legacy_version.to_owned();
+    for runtime in &mut legacy.runtime_receipts {
+        runtime.receipt.receipt.producer.version = legacy_version.to_owned();
+        let inner = runtime.receipt.receipt.clone();
+        runtime.receipt = ReceiptEnvelopeV1::seal(inner).expect("reseal legacy inner receipt");
+    }
+    let legacy = MatrixReceiptEnvelopeV2::seal(legacy).expect("seal legacy matrix receipt");
+
+    assert_eq!(legacy.receipt.producer.version, legacy_version);
+    assert!(
+        legacy.receipt.runtime_receipts.iter().all(|runtime| runtime
+            .receipt
+            .receipt
+            .producer
+            .version
+            == legacy_version)
+    );
+
+    let mut mixed = legacy.receipt;
+    mixed.runtime_receipts[1].receipt.receipt.producer.version = "0.1.0".to_owned();
+    let inner = mixed.runtime_receipts[1].receipt.receipt.clone();
+    mixed.runtime_receipts[1].receipt = ReceiptEnvelopeV1::seal(inner).expect("reseal mixed inner");
+    assert!(matches!(
+        MatrixReceiptEnvelopeV2::seal(mixed),
+        Err(MatrixError::InvalidReceipt)
+    ));
+}
+
+#[test]
 fn legacy_profile_is_canonical_across_runtime_and_check_declaration_order() {
     let first = MatrixConfigV2::parse(legacy_compatible_config()).expect("parse first");
     let mut reordered = MatrixConfigV2::parse(legacy_compatible_config()).expect("parse second");
