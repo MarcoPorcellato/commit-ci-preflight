@@ -807,7 +807,6 @@ pub fn validate_host_path(path: &Path) -> Result<(), WorkspaceError> {
     Ok(())
 }
 
-#[allow(dead_code)]
 pub(crate) fn revalidate_mount_sources(mounts: &[MountBinding]) -> Result<(), WorkspaceError> {
     for mount in mounts {
         let expectation = mount
