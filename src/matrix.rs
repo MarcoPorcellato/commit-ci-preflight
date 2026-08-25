@@ -386,14 +386,12 @@ impl MatrixPlanEnvelopeV2 {
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixError> {
-        let expected = canonical_digest(&self.plan).map_err(MatrixError::Receipt)?;
-        if expected != self.plan_digest {
-            return Err(MatrixError::PlanDigestMismatch);
-        }
+        self.validate_profile_binding()?;
         canonical_json(self).map_err(MatrixError::Receipt)
     }
 
     pub fn runtime_envelopes(&self) -> Result<Vec<(String, ExecutionPlanEnvelopeV1)>, MatrixError> {
+        self.validate_profile_binding()?;
         let mut result = Vec::with_capacity(self.plan.runtimes.len());
         for runtime in &self.plan.runtimes {
             let plan = ExecutionPlanV1 {
@@ -406,10 +404,18 @@ impl MatrixPlanEnvelopeV2 {
                 storage: None,
                 checks: runtime.checks.clone(),
             };
-            let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
-            if plan_digest != runtime.configuration_digest {
-                return Err(MatrixError::PlanDigestMismatch);
-            }
+            let plan_digest = match self.profile {
+                MatrixPlanProfile::CurrentV2 => {
+                    let digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
+                    if digest != runtime.configuration_digest {
+                        return Err(MatrixError::PlanDigestMismatch);
+                    }
+                    digest
+                }
+                MatrixPlanProfile::LegacyV1 => {
+                    self.runtime_configuration_digest(&runtime.id)?.to_owned()
+                }
+            };
             result.push((
                 runtime.id.clone(),
                 ExecutionPlanEnvelopeV1 {

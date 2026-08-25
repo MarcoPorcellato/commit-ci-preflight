@@ -16,6 +16,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use commit_ci_preflight::cache::{CacheKey, CacheRootSource, ResolvedCacheRoot};
+use commit_ci_preflight::matrix::{MatrixConfigV2, MatrixPlanProfile, build_matrix_plan};
 use serde_json::Value;
 
 fn binary() -> &'static str {
@@ -35,6 +37,56 @@ fn executable_fixture_root(prefix: &str) -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
         .join(format!("{prefix}-{}", std::process::id()))
+}
+
+#[test]
+fn legacy_profile_uses_distinct_plan_cache_identity() {
+    let legacy = build_matrix_plan(
+        MatrixConfigV2::parse(include_str!("fixtures/config-v2-legacy-compatible.toml"))
+            .expect("parse legacy fixture"),
+        MatrixPlanProfile::LegacyV1,
+    )
+    .expect("legacy plan");
+    let current = build_matrix_plan(
+        MatrixConfigV2::parse(include_str!("fixtures/config-v2-legacy-compatible.toml"))
+            .expect("parse current fixture"),
+        MatrixPlanProfile::CurrentV2,
+    )
+    .expect("current plan");
+    let legacy_runtime = legacy
+        .runtime_envelopes()
+        .expect("legacy envelopes")
+        .into_iter()
+        .find(|(id, _)| id == "python311")
+        .expect("legacy python311")
+        .1;
+    let current_runtime = current
+        .runtime_envelopes()
+        .expect("current envelopes")
+        .into_iter()
+        .find(|(id, _)| id == "python311")
+        .expect("current python311")
+        .1;
+
+    let cache = ResolvedCacheRoot {
+        path: PathBuf::from("/owned-test-cache-root"),
+        source: CacheRootSource::Explicit,
+    };
+
+    let legacy_key = CacheKey::for_plan_cache(&legacy_runtime, &legacy_runtime.plan.caches[0])
+        .expect("legacy cache key");
+    let current_key = CacheKey::for_plan_cache(&current_runtime, &current_runtime.plan.caches[0])
+        .expect("current cache key");
+    assert_ne!(legacy_runtime.plan_digest, current_runtime.plan_digest);
+    assert_ne!(
+        cache
+            .workspace_path(&legacy_runtime.plan_digest)
+            .expect("legacy workspace path"),
+        cache
+            .workspace_path(&current_runtime.plan_digest)
+            .expect("current workspace path")
+    );
+    assert_ne!(legacy_key.directory_name(), current_key.directory_name());
 }
 
 #[test]

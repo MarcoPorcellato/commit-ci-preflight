@@ -351,6 +351,64 @@ fn legacy_profile_accessors_reject_mutated_public_plan() {
 }
 
 #[test]
+fn legacy_runtime_envelopes_recheck_projection() {
+    let legacy = build_matrix_plan(
+        MatrixConfigV2::parse(legacy_compatible_config()).expect("parse fixture"),
+        MatrixPlanProfile::LegacyV1,
+    )
+    .expect("legacy plan");
+    let current = build_matrix_plan(
+        MatrixConfigV2::parse(legacy_compatible_config()).expect("parse fixture"),
+        MatrixPlanProfile::CurrentV2,
+    )
+    .expect("current plan");
+
+    let legacy_runtimes = legacy.runtime_envelopes().expect("legacy envelopes");
+    let current_runtimes = current.runtime_envelopes().expect("current envelopes");
+    for ((legacy_id, legacy_runtime), (current_id, current_runtime)) in
+        legacy_runtimes.iter().zip(current_runtimes.iter())
+    {
+        assert_eq!(legacy_id, current_id);
+        assert_eq!(
+            legacy_runtime.plan_digest,
+            legacy
+                .runtime_configuration_digest(legacy_id)
+                .expect("legacy runtime digest")
+        );
+        assert_ne!(legacy_runtime.plan_digest, current_runtime.plan_digest);
+    }
+
+    let cases: [(&str, fn(&mut MatrixPlanEnvelopeV2)); 4] = [
+        ("runtime", |envelope| {
+            envelope.plan.runtimes[0].runtime.image = "example.invalid/mutated@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+        }),
+        ("check", |envelope| {
+            envelope.plan.runtimes[0].checks[0]
+                .argv
+                .push("--mutated".to_owned());
+        }),
+        ("environment", |envelope| {
+            envelope.plan.environment.inherit.push("MUTATED".to_owned());
+        }),
+        ("non-representable runtime field", |envelope| {
+            envelope.plan.runtimes[0].runtime.pull_policy = Some(RuntimePullPolicy::Never);
+        }),
+    ];
+
+    for (field, mutate) in cases {
+        let mut envelope = legacy.clone();
+        mutate(&mut envelope);
+        assert!(
+            matches!(
+                envelope.runtime_envelopes(),
+                Err(MatrixError::PlanDigestMismatch | MatrixError::LegacyPlanNotRepresentable(_))
+            ),
+            "runtime conversion must reject mutated {field}"
+        );
+    }
+}
+
+#[test]
 fn legacy_profile_rejects_each_non_representable_current_field() {
     let cases: [(&str, fn(&mut MatrixPlanEnvelopeV2)); 6] =
         [
