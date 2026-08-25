@@ -72,6 +72,8 @@ Boundary rules:
 - project checks are trusted build/test code, not arbitrary hostile workloads;
 - the source checkout is read-only inside the container;
 - only declared cache and artifact mounts are writable;
+- managed-cache pins are opt-in, apply only to explicitly declared completed
+  entries, and are revalidated at the spawn boundary;
 - the evidence branch is untrusted data;
 - verifier code and policy come from the reviewed base branch;
 - GitHub event identity and permissions remain remote facts.
@@ -94,13 +96,13 @@ Boundary rules:
 | T12 | Workflow privilege escalation | Minimal permissions, pinned official actions, no secrets/cache/deployment credential | Compromise of GitHub or a pinned action commit remains upstream risk |
 | T13 | Marketplace action execution during migration | Migration assistant parses bounded YAML as data and emits inert classifications | Human reviewers can still make a bad manual translation |
 | T14 | GitHub expression or secret misinterpretation | Unsupported expressions, permissions, secrets, reusable workflows, and arbitrary actions fail closed or require review | Compatibility is deliberately incomplete |
-| T15 | Cache poisoning | Versioned ownership marker, content-addressed keys, completion marker, active-run lock | Caches accelerate execution but are not attestation evidence |
+| T15 | Cache poisoning or cache-use race | Versioned ownership marker, content-addressed keys, completion marker, active-run lock, opt-in managed-cache pin with spawn-boundary revalidation | Caches accelerate execution but are not attestation evidence; undeclared paths are not pinned |
 | T16 | Destructive cleanup | 0.1.0 exposes preview-only cleanup; resolved-root and containment checks | Operators retain responsibility for manual filesystem deletion |
 | T17 | Image drift | OCI digest is mandatory and included in plan, receipt, and policy | A multi-platform index can resolve to different platform manifests by design |
 | T18 | Dependency compromise | Committed lockfile, exact critical pins, SPDX SBOM, bundled notices, advisory review | Registry and compiler compromise cannot be eliminated locally |
 | T19 | Platform overclaim | Native receipts name OS/architecture; emulation and runtime probes are separate; PASS/PENDING/NOT_RUN are explicit | Benchmark qualification is narrower than full runtime qualification |
 | T20 | Identity overclaim | Structural, integrity, policy, and identity levels are separate; identity is not implemented | No cryptographic proof of operator or machine exists in 0.1.0 |
-| T21 | Symlink or filesystem race | Canonical path checks, managed roots, create-new/atomic writes, runtime revalidation | Host filesystem and privileged local actors remain trusted |
+| T21 | Symlink or filesystem race | Canonical path checks, managed roots, create-new/atomic writes, runtime revalidation, existing advisory-lock pin held through the guarded child lifecycle | Cooperative mutators must use the same lock and revalidate after acquisition; manual deletion remains unsupported; privileged local actors remain trusted |
 | T22 | Evidence parser denial of service | One MiB remote input cap, strict unknown-field rejection, bounded summaries | Base verifier compilation still consumes bounded remote time |
 | T23 | Release substitution | Local SHA-256 manifest, SBOM, notices, checksum verification instructions | Checksums are not signatures and must come through an independent channel |
 | T24 | Unsafe upgrade or rollback | Isolated install, version smoke test, preserved previous binary, versioned schemas and cache markers | Operator mistakes remain possible; no automatic updater exists |
@@ -151,6 +153,11 @@ before publication.
   deduplicated license/notice texts found in packaged crates.
 - The host admission coordinator does not infer liveness from PIDs or wall
   clocks; it reclaims only tickets whose advisory locks are demonstrably free.
+- The standard run lock coordinates the host-wide heavy slot. An opt-in
+  managed-cache pin is a separate advisory-lock pin for an explicitly
+  declared completed entry; it has no TTL and does not provide receipt or
+  qualification evidence. Spawn-boundary revalidation is required before the
+  child starts, and undeclared paths are not pinned.
 - The macOS resource guard uses only bounded, strict output from absolute system
   tools and fails closed on unavailable or contradictory samples. Its status
   surface is bounded and excludes identity, path, command, and process data.
