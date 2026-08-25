@@ -406,7 +406,7 @@ impl ManagedCache {
             key_digest: key.digest.clone(),
             plan_digest: plan_digest.to_owned(),
             generation,
-            entry_lock,
+            _entry_lock: entry_lock,
         });
         Ok(PreparedCacheEntry {
             path,
@@ -415,7 +415,7 @@ impl ManagedCache {
             key_digest: key.digest.clone(),
             plan_digest: plan_digest.to_owned(),
             generation,
-            owner,
+            _generation_owner: owner,
             was_complete: complete,
         })
     }
@@ -749,7 +749,7 @@ pub struct PreparedCacheEntry {
     key_digest: String,
     plan_digest: String,
     generation: u64,
-    owner: Arc<PreparedCacheGenerationOwner>,
+    _generation_owner: Arc<PreparedCacheGenerationOwner>,
     pub was_complete: bool,
 }
 
@@ -759,7 +759,7 @@ struct PreparedCacheGenerationOwner {
     key_digest: String,
     plan_digest: String,
     generation: u64,
-    entry_lock: Arc<File>,
+    _entry_lock: Arc<File>,
 }
 
 impl Drop for PreparedCacheGenerationOwner {
@@ -780,6 +780,8 @@ impl Drop for PreparedCacheGenerationOwner {
     }
 }
 
+/// Temporary Task 2 handoff API; remove this allowance when Task 2 consumes it.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CacheGenerationExpectation {
     pub key_digest: String,
@@ -789,6 +791,8 @@ pub(crate) struct CacheGenerationExpectation {
 }
 
 impl PreparedCacheEntry {
+    /// Temporary Task 2 handoff API; remove this allowance when Task 2 consumes it.
+    #[allow(dead_code)]
     pub(crate) fn generation_expectation(&self) -> CacheGenerationExpectation {
         CacheGenerationExpectation {
             key_digest: self.key_digest.clone(),
