@@ -1,0 +1,47 @@
+schema_version = "2.0"
+project = "example/legacy-matrix"
+
+[receipt]
+output = ".ccp/receipt.json"
+freshness_seconds = 300
+
+[environment]
+allow = ["SOURCE_DATE_EPOCH"]
+
+[[caches]]
+id = "cargo"
+mount_path = ".cache/cargo"
+
+[[runtimes]]
+id = "python311"
+kind = "docker_compatible"
+image = "example.invalid/python311@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+cpu_count = 1
+memory_mib = 256
+pids_limit = 64
+network = false
+
+[[runtimes]]
+id = "python312"
+kind = "docker_compatible"
+image = "example.invalid/python312@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+cpu_count = 1
+memory_mib = 256
+pids_limit = 64
+network = false
+
+[[checks]]
+id = "python311-version"
+runtime_id = "python311"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 30
+
+[[checks]]
+id = "python312-version"
+runtime_id = "python312"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 30

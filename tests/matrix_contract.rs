@@ -14,6 +14,7 @@ use commit_ci_preflight::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, ReceiptEnvelopeV1,
     ReceiptV1, RepositoryEvidence, RunEvidence,
 };
+use serde_json::Value;
 use commit_ci_preflight::verify::{
     AcceptedPlatformV1, VerificationDecision, VerificationPolicyDocument, VerificationStatus,
     verify_receipt_document_for_policy,
@@ -318,4 +319,38 @@ fn runtime(id: &str, image: &str) -> String {
     format!(
         "[[runtimes]]\nid = \"{id}\"\nkind = \"docker_compatible\"\nimage = \"{image}\"\ncpu_count = 1\nmemory_mib = 256\npids_limit = 64\nnetwork = false\n"
     )
+}
+
+fn legacy_compatible_config() -> &'static str {
+    include_str!("fixtures/config-v2-legacy-compatible.toml")
+}
+
+#[test]
+fn historical_legacy_fixture_is_self_consistent() {
+    let raw = include_str!("fixtures/matrix-v2-legacy-plan-044697.json");
+    let provenance: Value = serde_json::from_str(include_str!(
+        "fixtures/matrix-v2-legacy-plan-044697.provenance.json"
+    ))
+    .expect("provenance JSON");
+    let document: Value = serde_json::from_str(raw).expect("plan JSON");
+    let plan = document.get("plan").expect("plan");
+    let plan_digest = document
+        .get("plan_digest")
+        .and_then(Value::as_str)
+        .expect("plan_digest");
+    assert_eq!(
+        commit_ci_preflight::receipt::canonical_digest(plan).expect("canonical digest"),
+        plan_digest
+    );
+    assert_eq!(provenance["output_sha256"], sha256_hex(raw.as_bytes()));
+    assert_eq!(provenance["plan_digest"], plan_digest);
+    assert_eq!(provenance["config_sha256"], sha256_hex(legacy_compatible_config().as_bytes()));
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
