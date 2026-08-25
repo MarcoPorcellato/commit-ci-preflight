@@ -867,7 +867,7 @@ fn validate_pin_source_path(root: &Path, source: &Path) -> Result<PathBuf, Cache
         || !key_hex
             .as_bytes()
             .iter()
-            .all(|byte| (b'0'..=b'9').contains(byte) || (b'a'..=b'f').contains(byte))
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
     {
         return Err(CacheError::InvalidDigest);
     }
