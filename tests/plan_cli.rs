@@ -15,11 +15,14 @@
 use std::process::Command;
 
 use commit_ci_preflight::config::config_schema_json;
+use commit_ci_preflight::receipt::canonical_digest;
 
 const CONFIG: &str = "tests/fixtures/config-v1-read-only.toml";
 const MATRIX_CONFIG: &str = "tests/fixtures/config-v2-matrix.toml";
 const LEGACY_MATRIX_CONFIG: &str = "tests/fixtures/config-v2-legacy-compatible.toml";
 const PINNED_SCHEMA: &str = include_str!("../schema/config-v1.schema.json");
+const CURRENT_V2_PLAN_STDOUT: &[u8] =
+    include_bytes!("fixtures/plan-v2-current-default.stdout.json");
 
 #[test]
 fn generated_configuration_schema_matches_pinned_bytes() {
@@ -95,6 +98,57 @@ fn v2_plan_exposes_reviewable_per_runtime_digests_without_execution() {
 }
 
 #[test]
+fn matrix_current_profile_and_omission_preserve_pinned_default_plan_bytes() {
+    for profile in [None, Some("current-v2")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"));
+        command.args(["plan", "--config", MATRIX_CONFIG, "--json"]);
+        if let Some(profile) = profile {
+            command.args(["--matrix-plan-profile", profile]);
+        }
+        let output = command.output().expect("run current matrix plan command");
+
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, CURRENT_V2_PLAN_STDOUT);
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("plan JSON");
+        assert!(json.get("matrix_plan_profile").is_none());
+        assert!(json.get("legacy_digest_basis").is_none());
+    }
+}
+
+#[test]
+fn matrix_legacy_profile_discloses_a_reconstructible_digest_basis() {
+    let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "plan",
+            "--config",
+            LEGACY_MATRIX_CONFIG,
+            "--matrix-plan-profile",
+            "matrix-v2-legacy-v1",
+            "--json",
+        ])
+        .output()
+        .expect("run legacy matrix plan command");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("legacy plan JSON");
+    assert_eq!(json["matrix_plan_profile"], "matrix-v2-legacy-v1");
+    assert!(json["legacy_digest_basis"].is_object());
+    assert_eq!(
+        canonical_digest(&json["legacy_digest_basis"]).expect("canonical legacy digest basis"),
+        json["plan_digest"].as_str().expect("legacy plan digest")
+    );
+    assert_eq!(json["plan"]["schema_version"], "2.0");
+}
+
+#[test]
 fn legacy_matrix_profile_reproduces_the_pinned_historical_plan_digest() {
     let expected: serde_json::Value = serde_json::from_str(include_str!(
         "fixtures/matrix-v2-legacy-plan-044697.json"
@@ -119,6 +173,24 @@ fn legacy_matrix_profile_reproduces_the_pinned_historical_plan_digest() {
     );
     let actual: serde_json::Value = serde_json::from_slice(&output.stdout).expect("plan JSON");
     assert_eq!(actual["plan_digest"], expected["plan_digest"]);
+}
+
+#[test]
+fn matrix_plan_profile_rejects_unknown_values_with_usage_exit_code() {
+    let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "plan",
+            "--config",
+            MATRIX_CONFIG,
+            "--matrix-plan-profile",
+            "unknown-profile",
+        ])
+        .output()
+        .expect("run unknown matrix profile command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown-profile"));
 }
 
 #[test]

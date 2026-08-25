@@ -40,7 +40,8 @@ use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
 };
 use commit_ci_preflight::matrix::{
-    MatrixConfigV2, MatrixError, MatrixPlanEnvelopeV2, MatrixRunRequestV2, execute_matrix_run_v2,
+    MatrixConfigV2, MatrixError, MatrixPlanEnvelopeV2, MatrixPlanProfile, MatrixPlanV2,
+    MatrixRunRequestV2, build_matrix_plan, execute_matrix_run_v2,
 };
 use commit_ci_preflight::process::{
     CancellationReason, CancellationToken, GenerationGuard, OutputMode, ProcessRequest,
@@ -116,6 +117,8 @@ enum Command {
         /// Emit canonical machine-readable JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        matrix_plan_profile: MatrixPlanProfileArgs,
     },
     /// Probe the configured runtime without running project checks.
     Doctor {
@@ -125,6 +128,8 @@ enum Command {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        matrix_plan_profile: MatrixPlanProfileArgs,
     },
     /// Render runtime argv without spawning a process.
     DryRun {
@@ -136,6 +141,8 @@ enum Command {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        matrix_plan_profile: MatrixPlanProfileArgs,
     },
     /// Execute the validated checks locally and write a canonical receipt.
     Run {
@@ -153,6 +160,8 @@ enum Command {
         /// Maximum time to wait for the host-wide heavy-command slot.
         #[arg(long, default_value_t = DEFAULT_QUEUE_TIMEOUT.as_secs())]
         admission_timeout_seconds: u64,
+        #[command(flatten)]
+        matrix_plan_profile: MatrixPlanProfileArgs,
     },
     /// Independently verify receipt integrity and repository policy.
     Verify {
@@ -303,6 +312,27 @@ struct GuardExecArgs {
     argv: Vec<OsString>,
 }
 
+#[derive(Debug, Args)]
+struct MatrixPlanProfileArgs {
+    /// Compatibility digest profile for Matrix V2 configuration.
+    #[arg(
+        long,
+        default_value = "current-v2",
+        value_parser = parse_matrix_plan_profile
+    )]
+    matrix_plan_profile: MatrixPlanProfile,
+}
+
+fn parse_matrix_plan_profile(value: &str) -> Result<MatrixPlanProfile, String> {
+    match value {
+        "current-v2" => Ok(MatrixPlanProfile::CurrentV2),
+        "matrix-v2-legacy-v1" => Ok(MatrixPlanProfile::LegacyV1),
+        _ => Err(format!(
+            "unknown matrix plan profile {value:?}; expected current-v2 or matrix-v2-legacy-v1"
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ResourceExecutorArg {
     Native,
@@ -450,21 +480,37 @@ fn main() {
         Some(Command::Admission { action }) => run_admission_command(action),
         Some(Command::Resource { action }) => run_resource_command(action),
         Some(Command::Guard { action }) => run_guard_command(action),
-        Some(Command::Plan { config, json }) => print_plan(&config, json),
-        Some(Command::Doctor { config, json }) => print_doctor(&config, json),
+        Some(Command::Plan {
+            config,
+            json,
+            matrix_plan_profile,
+        }) => print_plan(&config, matrix_plan_profile.matrix_plan_profile, json),
+        Some(Command::Doctor {
+            config,
+            json,
+            matrix_plan_profile,
+        }) => print_doctor(&config, matrix_plan_profile.matrix_plan_profile, json),
         Some(Command::DryRun {
             config,
             location,
             json,
-        }) => print_dry_run(&config, &location, json),
+            matrix_plan_profile,
+        }) => print_dry_run(
+            &config,
+            matrix_plan_profile.matrix_plan_profile,
+            &location,
+            json,
+        ),
         Some(Command::Run {
             config,
             location,
             generation,
             json,
             admission_timeout_seconds,
+            matrix_plan_profile,
         }) => print_run(
             &config,
+            matrix_plan_profile.matrix_plan_profile,
             &location,
             generation,
             admission_timeout_seconds,
@@ -953,13 +999,23 @@ fn print_verify(
 
 fn print_run(
     path: &Path,
+    profile: MatrixPlanProfile,
     location: &CacheLocationArgs,
     generation: u64,
     admission_timeout_seconds: u64,
     json: bool,
 ) -> Result<(), CliError> {
-    if config_schema_version(path)?.as_deref() == Some("2.0") {
-        return print_matrix_run(path, location, generation, admission_timeout_seconds, json);
+    if profile == MatrixPlanProfile::LegacyV1
+        || config_schema_version(path)?.as_deref() == Some("2.0")
+    {
+        return print_matrix_run(
+            path,
+            profile,
+            location,
+            generation,
+            admission_timeout_seconds,
+            json,
+        );
     }
     let envelope = load_plan(path)?;
     if !envelope.plan.environment.remote_secret_only.is_empty() {
@@ -1193,15 +1249,13 @@ fn config_schema_version(path: &Path) -> Result<Option<String>, CliError> {
 
 fn print_matrix_run(
     path: &Path,
+    profile: MatrixPlanProfile,
     location: &CacheLocationArgs,
     generation: u64,
     admission_timeout_seconds: u64,
     json: bool,
 ) -> Result<(), CliError> {
-    let envelope = MatrixConfigV2::load(path)
-        .map_err(CliError::Matrix)?
-        .into_plan()
-        .map_err(CliError::Matrix)?;
+    let envelope = load_matrix_plan(path, profile)?;
     let root = resolve_cache_root(location)?;
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
     let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
@@ -1326,6 +1380,9 @@ fn print_matrix_run(
             .map_err(CliError::Matrix)?;
         println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
     } else {
+        if profile == MatrixPlanProfile::LegacyV1 {
+            println!("Matrix plan profile: matrix-v2-legacy-v1");
+        }
         println!("Matrix receipt: {}", outcome.receipt.receipt_id);
         println!(
             "Runtimes: {}",
@@ -1447,16 +1504,71 @@ fn load_plan(path: &Path) -> Result<ExecutionPlanEnvelopeV1, CliError> {
         .map_err(CliError::usage)
 }
 
-fn print_plan(path: &Path, json: bool) -> Result<(), CliError> {
-    if config_schema_version(path)?.as_deref() == Some("2.0") {
-        let envelope = MatrixConfigV2::load(path)
-            .map_err(CliError::Matrix)?
-            .into_plan()
-            .map_err(CliError::Matrix)?;
+fn load_matrix_plan(
+    path: &Path,
+    profile: MatrixPlanProfile,
+) -> Result<MatrixPlanEnvelopeV2, CliError> {
+    if config_schema_version(path)?.as_deref() != Some("2.0") {
+        return Err(CliError::usage(MatrixPlanProfileSchemaError));
+    }
+    let config = MatrixConfigV2::load(path).map_err(CliError::Matrix)?;
+    build_matrix_plan(config, profile).map_err(CliError::Matrix)
+}
+
+#[derive(Debug)]
+struct MatrixPlanProfileSchemaError;
+
+impl fmt::Display for MatrixPlanProfileSchemaError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("matrix plan profile requires schema version 2.0")
+    }
+}
+
+impl std::error::Error for MatrixPlanProfileSchemaError {}
+
+#[derive(Debug, Serialize)]
+struct LegacyMatrixPlanReportV1 {
+    matrix_plan_profile: &'static str,
+    plan_digest: String,
+    plan: MatrixPlanV2,
+    legacy_digest_basis: serde_json::Value,
+}
+
+fn legacy_matrix_plan_report(
+    envelope: &MatrixPlanEnvelopeV2,
+) -> Result<LegacyMatrixPlanReportV1, CliError> {
+    let legacy_digest_basis = envelope
+        .legacy_digest_basis_value()
+        .map_err(CliError::Matrix)?
+        .ok_or_else(|| CliError::internal(MatrixPlanProfileSchemaError))?;
+    Ok(LegacyMatrixPlanReportV1 {
+        matrix_plan_profile: "matrix-v2-legacy-v1",
+        plan_digest: envelope.plan_digest().map_err(CliError::Matrix)?.to_owned(),
+        plan: envelope.plan.clone(),
+        legacy_digest_basis,
+    })
+}
+
+fn print_plan(path: &Path, profile: MatrixPlanProfile, json: bool) -> Result<(), CliError> {
+    if profile == MatrixPlanProfile::LegacyV1
+        || config_schema_version(path)?.as_deref() == Some("2.0")
+    {
+        let envelope = load_matrix_plan(path, profile)?;
         if json {
-            let bytes = envelope.canonical_bytes().map_err(CliError::Matrix)?;
-            println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+            if profile == MatrixPlanProfile::LegacyV1 {
+                println!(
+                    "{}",
+                    serde_json::to_string(&legacy_matrix_plan_report(&envelope)?)
+                        .map_err(CliError::internal)?
+                );
+            } else {
+                let bytes = envelope.canonical_bytes().map_err(CliError::Matrix)?;
+                println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+            }
         } else {
+            if profile == MatrixPlanProfile::LegacyV1 {
+                println!("Matrix plan profile: matrix-v2-legacy-v1");
+            }
             println!("Matrix plan: {}", envelope.plan_digest);
             println!("Project: {}", envelope.plan.project);
             for runtime in &envelope.plan.runtimes {
@@ -1483,9 +1595,16 @@ fn print_plan(path: &Path, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-fn print_dry_run(path: &Path, location: &CacheLocationArgs, json: bool) -> Result<(), CliError> {
-    if config_schema_version(path)?.as_deref() == Some("2.0") {
-        return print_matrix_dry_run(path, location, json);
+fn print_dry_run(
+    path: &Path,
+    profile: MatrixPlanProfile,
+    location: &CacheLocationArgs,
+    json: bool,
+) -> Result<(), CliError> {
+    if profile == MatrixPlanProfile::LegacyV1
+        || config_schema_version(path)?.as_deref() == Some("2.0")
+    {
+        return print_matrix_dry_run(path, profile, location, json);
     }
     let envelope = load_plan(path)?;
     let cache = resolve_cache_root(location)?;
@@ -1522,13 +1641,11 @@ struct MatrixRuntimeDryRunV2 {
 
 fn print_matrix_dry_run(
     path: &Path,
+    profile: MatrixPlanProfile,
     location: &CacheLocationArgs,
     json: bool,
 ) -> Result<(), CliError> {
-    let envelope = MatrixConfigV2::load(path)
-        .map_err(CliError::Matrix)?
-        .into_plan()
-        .map_err(CliError::Matrix)?;
+    let envelope = load_matrix_plan(path, profile)?;
     let cache = resolve_cache_root(location)?;
     let mut runtimes = Vec::with_capacity(envelope.plan.runtimes.len());
     for (runtime_id, runtime_envelope) in envelope.runtime_envelopes().map_err(CliError::Matrix)? {
@@ -1555,6 +1672,9 @@ fn print_matrix_dry_run(
             serde_json::to_string(&report).map_err(CliError::internal)?
         );
     } else {
+        if profile == MatrixPlanProfile::LegacyV1 {
+            println!("Matrix plan profile: matrix-v2-legacy-v1");
+        }
         println!("Matrix plan: {}", report.plan_digest);
         for runtime in &report.runtimes {
             println!("Runtime ID: {}", runtime.runtime_id);
@@ -2256,9 +2376,11 @@ fn print_serializable_or_path(
     Ok(())
 }
 
-fn print_doctor(path: &Path, json: bool) -> Result<(), CliError> {
-    if config_schema_version(path)?.as_deref() == Some("2.0") {
-        return print_matrix_doctor(path, json);
+fn print_doctor(path: &Path, profile: MatrixPlanProfile, json: bool) -> Result<(), CliError> {
+    if profile == MatrixPlanProfile::LegacyV1
+        || config_schema_version(path)?.as_deref() == Some("2.0")
+    {
+        return print_matrix_doctor(path, profile, json);
     }
     let envelope = load_plan(path)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
@@ -2322,11 +2444,12 @@ fn collect_matrix_doctor_report(
     })
 }
 
-fn print_matrix_doctor(path: &Path, json: bool) -> Result<(), CliError> {
-    let envelope = MatrixConfigV2::load(path)
-        .map_err(CliError::Matrix)?
-        .into_plan()
-        .map_err(CliError::Matrix)?;
+fn print_matrix_doctor(
+    path: &Path,
+    profile: MatrixPlanProfile,
+    json: bool,
+) -> Result<(), CliError> {
+    let envelope = load_matrix_plan(path, profile)?;
     let supervisor = ProcessSupervisor::standard();
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
@@ -2350,6 +2473,9 @@ fn print_matrix_doctor(path: &Path, json: bool) -> Result<(), CliError> {
             serde_json::to_string(&report).map_err(CliError::internal)?
         );
     } else {
+        if profile == MatrixPlanProfile::LegacyV1 {
+            println!("Matrix plan profile: matrix-v2-legacy-v1");
+        }
         println!("Matrix plan: {}", report.plan_digest);
         for runtime in &report.runtimes {
             println!("Runtime ID: {}", runtime.runtime_id);

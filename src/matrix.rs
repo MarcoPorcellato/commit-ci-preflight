@@ -356,6 +356,19 @@ impl MatrixPlanEnvelopeV2 {
         }
     }
 
+    pub fn legacy_digest_basis_value(&self) -> Result<Option<serde_json::Value>, MatrixError> {
+        self.validate_profile_binding()?;
+        match self.profile {
+            MatrixPlanProfile::CurrentV2 => Ok(None),
+            MatrixPlanProfile::LegacyV1 => self
+                .legacy_basis
+                .as_ref()
+                .ok_or(MatrixError::PlanDigestMismatch)?
+                .report_value()
+                .map(Some),
+        }
+    }
+
     fn validate_profile_binding(&self) -> Result<(), MatrixError> {
         match self.profile {
             MatrixPlanProfile::CurrentV2 => {

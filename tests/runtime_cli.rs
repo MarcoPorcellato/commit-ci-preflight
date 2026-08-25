@@ -196,6 +196,61 @@ timeout_seconds = 1
 }
 
 #[test]
+fn matrix_legacy_profile_rejects_v1_schemas_before_runtime_cache_or_admission() {
+    let root = executable_fixture_root("ccp-legacy-profile-v1-schema");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("owned fixture root");
+    let v1_fixture = fs::read_to_string(fixture()).expect("v1 fixture");
+
+    for schema_version in ["1.0", "1.1", "1.2", "1.3"] {
+        let config_path = root.join(format!("config-{schema_version}.toml"));
+        fs::write(
+            &config_path,
+            v1_fixture.replace(
+                "schema_version = \"1.0\"",
+                &format!("schema_version = \"{schema_version}\""),
+            ),
+        )
+        .expect("legacy-incompatible fixture");
+
+        for command_name in ["plan", "doctor", "dry-run", "run"] {
+            let cache_dir = root.join(format!("cache-{command_name}-{schema_version}"));
+            let mut command = Command::new(binary());
+            command
+                .arg(command_name)
+                .arg("--config")
+                .arg(&config_path)
+                .args(["--matrix-plan-profile", "matrix-v2-legacy-v1"]);
+            if matches!(command_name, "dry-run" | "run") {
+                command
+                    .arg("--repository")
+                    .arg(&root)
+                    .arg("--cache-dir")
+                    .arg(&cache_dir);
+            }
+            let output = command.output().expect("legacy profile command");
+
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{command_name} with schema {schema_version}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stdout.is_empty());
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("matrix plan profile requires schema version 2.0")
+            );
+            assert!(
+                !cache_dir.exists(),
+                "{command_name} with schema {schema_version} initialized a cache"
+            );
+        }
+    }
+    fs::remove_dir_all(root).expect("remove owned fixture root");
+}
+
+#[test]
 fn dry_run_human_output_states_that_argv_is_not_a_shell_and_was_not_run() {
     let output = Command::new(binary())
         .args(["dry-run", "--config"])

@@ -37,6 +37,10 @@ impl LegacyMatrixDigestBasisV1 {
             .map(String::as_str)
             .ok_or_else(|| MatrixError::UnknownRuntime(id.to_owned()))
     }
+
+    pub(crate) fn report_value(&self) -> Result<serde_json::Value, MatrixError> {
+        serde_json::to_value(&self.plan).map_err(MatrixError::Json)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
