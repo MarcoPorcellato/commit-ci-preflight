@@ -26,6 +26,7 @@ const ROOT_MARKER: &str = ".ccp-run-journal-root-v1.json";
 const RUN_MARKER: &str = ".ccp-run-owner-v1.json";
 const RESOURCES_DIR: &str = "resources";
 const SOURCE_BINDING: &str = "source-snapshot-v1.json";
+const TERMINAL_DIAGNOSTIC: &str = "terminal-diagnostic-v1.json";
 const QUARANTINE_PREFIX: &str = "quarantined-";
 static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -97,6 +98,22 @@ pub enum RunFailureKindV1 {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunFailureDiagnosticCodeV1 {
+    InternalCommandFailure,
+    UnclassifiedTopLevel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RunFailureDiagnosticV1 {
+    pub schema_version: String,
+    pub run_id: String,
+    pub failure_kind: RunFailureKindV1,
+    pub diagnostic_code: RunFailureDiagnosticCodeV1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunJournalEntryV1 {
@@ -124,6 +141,8 @@ pub struct RecoveryRunStatusV1 {
     pub run_id: String,
     pub state: Option<RunJournalStateV1>,
     pub classification: RecoveryClassificationV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_diagnostic: Option<RunFailureDiagnosticV1>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
@@ -284,6 +303,27 @@ impl RunJournalStore {
         self.append_entry(run_id, previous.seq + 1, state, at_utc, failure_kind)
     }
 
+    pub fn fail(
+        &self,
+        run_id: &str,
+        at_utc: &str,
+        failure_kind: RunFailureKindV1,
+        diagnostic_code: Option<RunFailureDiagnosticCodeV1>,
+    ) -> Result<RunJournalEntryV1, RunJournalError> {
+        if failure_kind != RunFailureKindV1::Unknown && diagnostic_code.is_some() {
+            return Err(RunJournalError::InvalidTransition);
+        }
+        if let Some(diagnostic_code) = diagnostic_code {
+            self.write_terminal_diagnostic(run_id, failure_kind, diagnostic_code)?;
+        }
+        self.transition(
+            run_id,
+            RunJournalStateV1::Failed,
+            at_utc,
+            Some(failure_kind),
+        )
+    }
+
     /// Reserve one exact CCP-owned location for ephemeral run resources.
     /// The directory remains inside the owned run tree so `recover apply`
     /// quarantines it together with an interrupted journal.
@@ -365,6 +405,7 @@ impl RunJournalStore {
                     run_id: bounded_run_id(run_id),
                     state: None,
                     classification,
+                    failure_diagnostic: None,
                 });
                 continue;
             }
@@ -375,11 +416,25 @@ impl RunJournalStore {
             match self.read_entries(&name) {
                 Ok(journal) if !journal.is_empty() => {
                     let last = journal.last().expect("non-empty journal");
-                    runs.push(RecoveryRunStatusV1 {
-                        run_id: name,
-                        state: Some(last.state),
-                        classification: classify(last.state),
+                    let diagnostic = self.read_terminal_diagnostic(&name).and_then(|diagnostic| {
+                        if diagnostic.is_some()
+                            && (last.state != RunJournalStateV1::Failed
+                                || last.failure_kind != Some(RunFailureKindV1::Unknown))
+                        {
+                            Err(RunJournalError::Corrupt)
+                        } else {
+                            Ok(diagnostic)
+                        }
                     });
+                    match diagnostic {
+                        Ok(failure_diagnostic) => runs.push(RecoveryRunStatusV1 {
+                            run_id: name,
+                            state: Some(last.state),
+                            classification: classify(last.state),
+                            failure_diagnostic,
+                        }),
+                        Err(_) => runs.push(operator_required(&name)),
+                    }
                 }
                 Ok(_) | Err(_) => runs.push(operator_required(&name)),
             }
@@ -406,6 +461,12 @@ impl RunJournalStore {
         }
         let entries = self.read_entries(run_id)?;
         let last = entries.last().ok_or(RunJournalError::Corrupt)?;
+        if self.read_terminal_diagnostic(run_id)?.is_some()
+            && (last.state != RunJournalStateV1::Failed
+                || last.failure_kind != Some(RunFailureKindV1::Unknown))
+        {
+            return Err(RunJournalError::Corrupt);
+        }
         if classify(last.state) == RecoveryClassificationV1::Terminal {
             return Err(RunJournalError::NonActionable);
         }
@@ -439,6 +500,59 @@ impl RunJournalStore {
         Ok(entry)
     }
 
+    fn write_terminal_diagnostic(
+        &self,
+        run_id: &str,
+        failure_kind: RunFailureKindV1,
+        diagnostic_code: RunFailureDiagnosticCodeV1,
+    ) -> Result<(), RunJournalError> {
+        validate_run_id(run_id)?;
+        if failure_kind != RunFailureKindV1::Unknown {
+            return Err(RunJournalError::InvalidTransition);
+        }
+        let run = self.run_path(run_id);
+        self.validate_run_marker(&run, run_id)?;
+        let diagnostic = RunFailureDiagnosticV1 {
+            schema_version: RUN_JOURNAL_SCHEMA_VERSION.to_owned(),
+            run_id: run_id.to_owned(),
+            failure_kind,
+            diagnostic_code,
+        };
+        let mut bytes = serde_json::to_vec(&diagnostic).map_err(|_| RunJournalError::Corrupt)?;
+        bytes.push(b'\n');
+        self.durable
+            .create_new(&run.join(TERMINAL_DIAGNOSTIC), &bytes)?;
+        Ok(())
+    }
+
+    fn read_terminal_diagnostic(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<RunFailureDiagnosticV1>, RunJournalError> {
+        let path = self.run_path(run_id).join(TERMINAL_DIAGNOSTIC);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(RunJournalError::Io(error)),
+            Ok(metadata)
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_file()
+                    || metadata.len() > 4096 =>
+            {
+                return Err(RunJournalError::Corrupt);
+            }
+            Ok(_) => {}
+        }
+        let diagnostic: RunFailureDiagnosticV1 =
+            serde_json::from_slice(&fs::read(path)?).map_err(|_| RunJournalError::Corrupt)?;
+        if diagnostic.schema_version != RUN_JOURNAL_SCHEMA_VERSION
+            || diagnostic.run_id != run_id
+            || diagnostic.failure_kind != RunFailureKindV1::Unknown
+        {
+            return Err(RunJournalError::Corrupt);
+        }
+        Ok(Some(diagnostic))
+    }
+
     fn read_entries(&self, run_id: &str) -> Result<Vec<RunJournalEntryV1>, RunJournalError> {
         let run = self.run_path(run_id);
         validate_existing_plain_directory(&run)?;
@@ -450,6 +564,7 @@ impl RunJournalStore {
                 entry.file_name() != RUN_MARKER
                     && entry.file_name() != RESOURCES_DIR
                     && entry.file_name() != SOURCE_BINDING
+                    && entry.file_name() != TERMINAL_DIAGNOSTIC
             })
             .map(|entry| entry.path())
             .collect();
@@ -785,6 +900,7 @@ fn operator_required(run_id: &str) -> RecoveryRunStatusV1 {
         run_id: bounded_run_id(run_id),
         state: None,
         classification: RecoveryClassificationV1::OperatorRequired,
+        failure_diagnostic: None,
     }
 }
 
@@ -954,6 +1070,210 @@ mod tests {
             Err(RunJournalError::InvalidTransition)
         ));
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn terminal_unknown_diagnostic_is_projected() {
+        let root = cache_root("terminal-diagnostic");
+        let store = RunJournalStore::initialize(&root).expect("store");
+        store.create_run(RUN_ID, AT).expect("created");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+            .expect("admitted");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+            .expect("prepared");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+            .expect("executing");
+
+        store
+            .fail(
+                RUN_ID,
+                AT,
+                RunFailureKindV1::Unknown,
+                Some(RunFailureDiagnosticCodeV1::InternalCommandFailure),
+            )
+            .expect("terminal diagnostic");
+
+        let status = store.status().expect("status");
+        assert_eq!(
+            status.runs[0].classification,
+            RecoveryClassificationV1::Terminal
+        );
+        assert_eq!(
+            status.runs[0]
+                .failure_diagnostic
+                .as_ref()
+                .expect("diagnostic")
+                .diagnostic_code,
+            RunFailureDiagnosticCodeV1::InternalCommandFailure
+        );
+        assert!(matches!(
+            store.apply(RUN_ID),
+            Err(RunJournalError::NonActionable)
+        ));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn nonterminal_malformed_diagnostic_requires_operator_and_apply_is_corrupt() {
+        let root = cache_root("nonterminal-malformed-diagnostic");
+        let store = RunJournalStore::initialize(&root).expect("store");
+        store.create_run(RUN_ID, AT).expect("created");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+            .expect("admitted");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+            .expect("prepared");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+            .expect("executing");
+        fs::write(
+            store.run_path(RUN_ID).join(TERMINAL_DIAGNOSTIC),
+            br#"{"unexpected":true}"#,
+        )
+        .expect("tamper diagnostic");
+
+        assert_eq!(
+            store.status().expect("status").runs[0].classification,
+            RecoveryClassificationV1::OperatorRequired
+        );
+        assert!(matches!(store.apply(RUN_ID), Err(RunJournalError::Corrupt)));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn legacy_unknown_failure_without_diagnostic_remains_terminal() {
+        let root = cache_root("legacy-terminal-diagnostic");
+        let store = RunJournalStore::initialize(&root).expect("store");
+        store.create_run(RUN_ID, AT).expect("created");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+            .expect("admitted");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+            .expect("prepared");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+            .expect("executing");
+        store
+            .transition(
+                RUN_ID,
+                RunJournalStateV1::Failed,
+                AT,
+                Some(RunFailureKindV1::Unknown),
+            )
+            .expect("legacy terminal");
+
+        let status = store.status().expect("status");
+        assert_eq!(
+            status.runs[0].classification,
+            RecoveryClassificationV1::Terminal
+        );
+        assert_eq!(status.runs[0].failure_diagnostic, None);
+        assert!(matches!(
+            store.apply(RUN_ID),
+            Err(RunJournalError::NonActionable)
+        ));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn malformed_terminal_diagnostic_requires_operator() {
+        let root = cache_root("malformed-terminal-diagnostic");
+        let store = RunJournalStore::initialize(&root).expect("store");
+        store.create_run(RUN_ID, AT).expect("created");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+            .expect("admitted");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+            .expect("prepared");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+            .expect("executing");
+        store
+            .transition(
+                RUN_ID,
+                RunJournalStateV1::Failed,
+                AT,
+                Some(RunFailureKindV1::Unknown),
+            )
+            .expect("terminal");
+        fs::write(
+            store.run_path(RUN_ID).join(TERMINAL_DIAGNOSTIC),
+            br#"{\"schema_version\":\"1.0\",\"unexpected\":true}"#,
+        )
+        .expect("tamper diagnostic");
+
+        let status = store.status().expect("status");
+        assert_eq!(
+            status.runs[0].classification,
+            RecoveryClassificationV1::OperatorRequired
+        );
+        assert!(matches!(store.apply(RUN_ID), Err(RunJournalError::Corrupt)));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn unknown_diagnostic_requires_unknown_terminal_entry_binding() {
+        let root = cache_root("diagnostic-entry-binding");
+        let store = RunJournalStore::initialize(&root).expect("store");
+        store.create_run(RUN_ID, AT).expect("created");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+            .expect("admitted");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+            .expect("prepared");
+        store
+            .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+            .expect("executing");
+        store
+            .transition(
+                RUN_ID,
+                RunJournalStateV1::Failed,
+                AT,
+                Some(RunFailureKindV1::ExecutionFailed),
+            )
+            .expect("execution failed");
+        let diagnostic = RunFailureDiagnosticV1 {
+            schema_version: RUN_JOURNAL_SCHEMA_VERSION.to_owned(),
+            run_id: RUN_ID.to_owned(),
+            failure_kind: RunFailureKindV1::Unknown,
+            diagnostic_code: RunFailureDiagnosticCodeV1::InternalCommandFailure,
+        };
+        let mut bytes = serde_json::to_vec(&diagnostic).expect("diagnostic json");
+        bytes.push(b'\n');
+        fs::write(store.run_path(RUN_ID).join(TERMINAL_DIAGNOSTIC), bytes)
+            .expect("diagnostic sidecar");
+
+        assert_eq!(
+            store.status().expect("status").runs[0].classification,
+            RecoveryClassificationV1::OperatorRequired
+        );
+        assert!(matches!(store.apply(RUN_ID), Err(RunJournalError::Corrupt)));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn terminal_diagnostic_payload_is_path_and_secret_free() {
+        let diagnostic = RunFailureDiagnosticV1 {
+            schema_version: RUN_JOURNAL_SCHEMA_VERSION.to_owned(),
+            run_id: RUN_ID.to_owned(),
+            failure_kind: RunFailureKindV1::Unknown,
+            diagnostic_code: RunFailureDiagnosticCodeV1::InternalCommandFailure,
+        };
+        let json = serde_json::to_string(&diagnostic).expect("json");
+        for forbidden in ["/Users/", "C:\\\\\\", "..", "HOME", "TOKEN", "SECRET"] {
+            assert!(!json.contains(forbidden));
+        }
     }
 
     #[test]

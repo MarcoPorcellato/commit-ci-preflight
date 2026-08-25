@@ -126,6 +126,34 @@ files, lease files, counters, ownership markers, or the admission root. CCP may
 reclaim a ticket only when its ticket OS lock is demonstrably unlocked and its
 valid lease is definitely expired. Manual quarantine is unsupported.
 
+### Admission layout recovery
+
+When CCP reports the exact unsafe `.../agent-tickets` admission layout, use
+the two-step, separately authorized recovery contract below. First obtain a
+read-only status result and preserve its exact lowercase `plan_sha256`:
+
+```console
+commit-ci-preflight admission layout-recovery status --json --timeout-seconds 5
+# preserve the exact plan_sha256 and obtain one explicit apply authorization
+commit-ci-preflight admission layout-recovery apply \
+  --expected-plan <exact-status-plan-sha256> --json --timeout-seconds 5
+commit-ci-preflight admission status --json
+```
+
+Status is read-only and does not authorize apply, a heavy run, Docker,
+receipt/publication, or R5. Apply authorizes only one hash-bound recovery of
+the exact empty historical directory; it preserves the recovered directory
+beneath deterministic quarantine and makes no rollback or deletion. A
+successful apply does not authorize a later CCP run, which requires fresh
+exact-head, hash-bound authorization. Manual deletion, moving, or quarantine
+of filesystem entries remains unsupported.
+
+`recovered` is the successful outcome. `not_applied` means no recovery was
+performed. `recovery_uncertain` is a hard stop with exit code `70`: preserve
+both paths and the JSON, do not retry apply, move either directory manually,
+or start a heavy run. Any non-empty, foreign, malformed, active, lock-timeout,
+plan-mismatch, or unknown-child result remains operator-required.
+
 ### Planned agent continuation safety boundary
 
 The owner-approved agent continuation mode is opt-in. The opt-in agent

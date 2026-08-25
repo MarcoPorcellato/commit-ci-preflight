@@ -76,6 +76,27 @@ supported recovery procedure.
 Use the [cross-activity coordination runbook](COORDINATION_RUNBOOK.md) for the
 owner handoff and safe-recovery matrix.
 
+### Unsafe admission layout
+
+Route only the exact `UnsafeLayout(.../agent-tickets)` case to the read-only
+recovery status command:
+
+```console
+commit-ci-preflight admission layout-recovery status --json --timeout-seconds 5
+```
+
+If the result is eligible, preserve its lowercase `plan_sha256` and obtain
+separate authorization for one exact hash-bound apply. Apply preserves the
+deterministic quarantine entry; it does not authorize a later CCP run, Docker,
+receipt/publication, or R5. A later heavy run needs fresh exact-head,
+hash-bound authorization. Manual deletion, moving, or quarantine is not a
+supported cleanup recipe.
+
+`recovery_uncertain` is a hard stop and exit code `70`: preserve both paths and
+the JSON, do not retry apply, and do not start a heavy run. `not_applied` means
+no recovery occurred. Any non-empty, foreign, malformed, active, lock-timeout,
+plan-mismatch, or unknown-child result remains code `70` and operator-required.
+
 ## Run ended but no receipt exists
 
 A receipt is the final product of successful orchestration, not a start marker.

@@ -61,6 +61,36 @@ struct FaultPlan {
 }
 
 impl DurableFileSystem {
+    pub(crate) fn relocate_empty_directory(
+        &self,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), DurableFsError> {
+        let source_parent = checked_parent(source)?;
+        let destination_parent = checked_parent(destination)?;
+        validate_plain_directory(source_parent)?;
+        validate_plain_directory(destination_parent)?;
+        validate_plain_directory(source)?;
+        if fs::read_dir(source)?.next().transpose()?.is_some() {
+            return Err(DurableFsError::UnsafePath("source directory must be empty"));
+        }
+        match fs::symlink_metadata(destination) {
+            Ok(_) => {
+                return Err(DurableFsError::UnsafePath(
+                    "quarantine destination already exists",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(DurableFsError::Io(error)),
+        }
+        self.checkpoint()?;
+        fs::rename(source, destination)?;
+        self.checkpoint()?;
+        sync_directory(destination_parent)?;
+        self.checkpoint()?;
+        sync_directory(source_parent)?;
+        Ok(())
+    }
     pub fn create_new_directory(&self, path: &Path) -> Result<(), DurableFsError> {
         let parent = checked_parent(path)?;
         validate_plain_directory(parent)?;
@@ -323,6 +353,58 @@ mod tests {
                 .create_new_directory(&path)
                 .is_err()
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn relocate_empty_directory_preserves_source_as_append_only_destination() {
+        let root = temporary_directory("relocate-empty");
+        let source = root.join("agent-tickets");
+        let quarantine = root.join("quarantine");
+        let destination = quarantine.join("agent-tickets.recovered-v1-plan");
+        fs::create_dir(&source).expect("source");
+        fs::create_dir(&quarantine).expect("quarantine");
+        DurableFileSystem::default()
+            .relocate_empty_directory(&source, &destination)
+            .expect("relocate");
+        assert!(!source.exists());
+        assert!(destination.is_dir());
+        assert!(
+            DurableFileSystem::default()
+                .relocate_empty_directory(&destination, &destination)
+                .is_err()
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn relocate_empty_directory_rejects_contents_and_existing_destination() {
+        let root = temporary_directory("relocate-reject");
+        let source = root.join("agent-tickets");
+        let quarantine = root.join("quarantine");
+        let destination = quarantine.join("agent-tickets.recovered-v1-plan");
+        fs::create_dir(&source).expect("source");
+        fs::create_dir(&quarantine).expect("quarantine");
+        fs::write(source.join("entry"), b"blocked\n").expect("source entry");
+        assert!(
+            DurableFileSystem::default()
+                .relocate_empty_directory(&source, &destination)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(source.join("entry")).expect("entry remains"),
+            b"blocked\n"
+        );
+        assert!(!destination.exists());
+        fs::remove_file(source.join("entry")).expect("remove fixture entry");
+        fs::create_dir(&destination).expect("destination collision");
+        assert!(
+            DurableFileSystem::default()
+                .relocate_empty_directory(&source, &destination)
+                .is_err()
+        );
+        assert!(source.is_dir());
+        assert!(destination.is_dir());
         fs::remove_dir_all(root).expect("cleanup");
     }
 

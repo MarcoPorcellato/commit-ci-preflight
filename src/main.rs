@@ -24,7 +24,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
     ADMISSION_STATUS_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
-    DEFAULT_QUEUE_TIMEOUT, DEFAULT_STATUS_TIMEOUT,
+    AdmissionLayoutRecoveryOutcomeV1, DEFAULT_LAYOUT_RECOVERY_TIMEOUT, DEFAULT_QUEUE_TIMEOUT,
+    DEFAULT_STATUS_TIMEOUT, MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS,
 };
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
@@ -60,8 +61,8 @@ use commit_ci_preflight::run::{
     SystemClock, execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight,
 };
 use commit_ci_preflight::run_journal::{
-    RUN_JOURNAL_SCHEMA_VERSION, RecoveryStatusV1, RunFailureKindV1, RunJournalError,
-    RunJournalStateV1, RunJournalStore,
+    RUN_JOURNAL_SCHEMA_VERSION, RecoveryStatusV1, RunFailureDiagnosticCodeV1, RunFailureKindV1,
+    RunJournalError, RunJournalStateV1, RunJournalStore,
 };
 use commit_ci_preflight::runtime::{
     DockerRuntimeCapabilityProbe, DryRunPlan, RuntimeError, RuntimeProbe, doctor_guard,
@@ -439,6 +440,50 @@ enum AdmissionCommand {
         #[arg(long, default_value_t = DEFAULT_STATUS_TIMEOUT.as_secs())]
         timeout_seconds: u64,
     },
+    LayoutRecovery {
+        #[command(subcommand)]
+        action: AdmissionLayoutRecoveryCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AdmissionLayoutRecoveryCommand {
+    Status {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = DEFAULT_LAYOUT_RECOVERY_TIMEOUT.as_secs(), value_parser = parse_layout_recovery_timeout)]
+        timeout_seconds: u64,
+    },
+    Apply {
+        #[arg(long, value_parser = parse_plan_sha256)]
+        expected_plan: String,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value_t = DEFAULT_LAYOUT_RECOVERY_TIMEOUT.as_secs(), value_parser = parse_layout_recovery_timeout)]
+        timeout_seconds: u64,
+    },
+}
+
+fn parse_plan_sha256(value: &str) -> Result<String, String> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("expected plan must be exactly 64 lowercase hexadecimal characters".to_owned())
+    }
+}
+
+fn parse_layout_recovery_timeout(value: &str) -> Result<u64, String> {
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| "layout recovery timeout must be an integer from 1 through 60".to_owned())?;
+    if !(1..=MAX_LAYOUT_RECOVERY_TIMEOUT_SECONDS).contains(&seconds) {
+        return Err("layout recovery timeout must be an integer from 1 through 60".to_owned());
+    }
+    Ok(seconds)
 }
 
 fn main() {
@@ -524,7 +569,9 @@ fn main() {
         }
     };
     if let Err(error) = result {
-        eprintln!("error: {error}");
+        if !matches!(error, CliError::ReportedExit(_)) {
+            eprintln!("error: {error}");
+        }
         std::process::exit(error.exit_code());
     }
 }
@@ -1015,7 +1062,7 @@ fn print_run(
     ) {
         Ok(commit) => commit,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
             return Err(CliError::Run(RunError::SourceSnapshot(error)));
         }
     };
@@ -1029,7 +1076,7 @@ fn print_run(
     let source_resource = match journal.reserve_resource(&journal_id, "source-snapshot-v1") {
         Ok(path) => path,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
             return Err(CliError::RunJournal(error));
         }
     };
@@ -1044,12 +1091,12 @@ fn print_run(
     ) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
             return Err(CliError::Run(RunError::SourceSnapshot(error)));
         }
     };
     if let Err(error) = source_snapshot.prepare_mount_overlay(&envelope) {
-        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
         return Err(CliError::Run(RunError::SourceSnapshot(error)));
     }
     if let Err(error) = journal.bind_source(
@@ -1058,7 +1105,7 @@ fn print_run(
         &source_snapshot.evidence().manifest_digest,
         source_snapshot.evidence().entry_count,
     ) {
-        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        lifecycle.fail(RunFailureKindV1::PreparationFailed, None)?;
         return Err(CliError::RunJournal(error));
     }
     let admission =
@@ -1069,7 +1116,7 @@ fn print_run(
     ) {
         Ok(guard) => guard,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
+            lifecycle.fail(RunFailureKindV1::AdmissionRejected, None)?;
             return Err(CliError::Admission(error));
         }
     };
@@ -1077,7 +1124,7 @@ fn print_run(
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
         return match guard.release() {
             Ok(()) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
+                lifecycle.fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))?;
                 Err(error)
             }
             Err(release_error) => {
@@ -1131,7 +1178,7 @@ fn print_run(
         Ok(()) => match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
+                lifecycle.fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))?;
                 return Err(error);
             }
         },
@@ -1220,7 +1267,7 @@ fn print_matrix_run(
     ) {
         Ok(guard) => guard,
         Err(error) => {
-            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
+            lifecycle.fail(RunFailureKindV1::AdmissionRejected, None)?;
             return Err(CliError::Admission(error));
         }
     };
@@ -1228,7 +1275,7 @@ fn print_matrix_run(
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
         return match guard.release() {
             Ok(()) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
+                lifecycle.fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))?;
                 Err(error)
             }
             Err(release_error) => {
@@ -1280,7 +1327,7 @@ fn print_matrix_run(
         Ok(()) => match result {
             Ok(outcome) => outcome,
             Err(error) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
+                lifecycle.fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))?;
                 return Err(error);
             }
         },
@@ -1370,8 +1417,16 @@ impl JournalLifecycleObserver<'_> {
         Ok(())
     }
 
-    fn fail(&mut self, kind: RunFailureKindV1) -> Result<(), CliError> {
-        self.transition_state(RunJournalStateV1::Failed, Some(kind))
+    fn fail(
+        &mut self,
+        kind: RunFailureKindV1,
+        diagnostic_code: Option<RunFailureDiagnosticCodeV1>,
+    ) -> Result<(), CliError> {
+        let at_utc = self.clock.now_utc().map_err(CliError::Run)?;
+        self.store
+            .fail(self.run_id, &at_utc, kind, diagnostic_code)
+            .map_err(CliError::RunJournal)?;
+        Ok(())
     }
 }
 
@@ -1413,6 +1468,16 @@ fn cli_failure_kind(error: &CliError) -> RunFailureKindV1 {
         CliError::Resource(_) => RunFailureKindV1::ResourcePressure,
         CliError::Admission(_) => RunFailureKindV1::CleanupFailed,
         _ => RunFailureKindV1::Unknown,
+    }
+}
+
+fn cli_failure_diagnostic(error: &CliError) -> Option<RunFailureDiagnosticCodeV1> {
+    match error {
+        CliError::Internal(_) => Some(RunFailureDiagnosticCodeV1::InternalCommandFailure),
+        _ if cli_failure_kind(error) == RunFailureKindV1::Unknown => {
+            Some(RunFailureDiagnosticCodeV1::UnclassifiedTopLevel)
+        }
+        _ => None,
     }
 }
 
@@ -1682,14 +1747,21 @@ fn run_recover_command(action: RecoverCommand) -> Result<(), CliError> {
 }
 
 fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
+    let coordinator = AdmissionCoordinator::platform().map_err(CliError::Admission)?;
+    run_admission_command_with(action, &coordinator)
+}
+
+fn run_admission_command_with(
+    action: AdmissionCommand,
+    coordinator: &AdmissionCoordinator,
+) -> Result<(), CliError> {
     match action {
         AdmissionCommand::Status {
             json,
             timeout_seconds,
         } => {
             let cancellation = CancellationToken::default();
-            let status = AdmissionCoordinator::platform()
-                .map_err(CliError::Admission)?
+            let status = coordinator
                 .status_with_timeout(Duration::from_secs(timeout_seconds), &cancellation)
                 .map_err(CliError::Admission)?;
             if json {
@@ -1712,6 +1784,68 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
             }
             Ok(())
         }
+        AdmissionCommand::LayoutRecovery {
+            action:
+                AdmissionLayoutRecoveryCommand::Status {
+                    json,
+                    timeout_seconds,
+                },
+        } => {
+            let report = coordinator.layout_recovery_status_with_timeout(
+                Duration::from_secs(timeout_seconds),
+                &CancellationToken::default(),
+            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).map_err(CliError::internal)?
+                );
+            } else {
+                println!("Layout recovery schema: {}", report.schema_version);
+                println!("Classification: {:?}", report.classification);
+                println!("Reason: {:?}", report.reason);
+                println!("Plan SHA-256: {:?}", report.plan_sha256);
+                println!("Read-only: no state was changed.");
+            }
+            Ok(())
+        }
+        AdmissionCommand::LayoutRecovery {
+            action:
+                AdmissionLayoutRecoveryCommand::Apply {
+                    expected_plan,
+                    json,
+                    timeout_seconds,
+                },
+        } => render_layout_recovery_apply(coordinator, &expected_plan, json, timeout_seconds),
+    }
+}
+
+fn render_layout_recovery_apply(
+    coordinator: &AdmissionCoordinator,
+    expected_plan: &str,
+    json: bool,
+    timeout_seconds: u64,
+) -> Result<(), CliError> {
+    let report = coordinator.apply_layout_recovery_with_timeout(
+        expected_plan,
+        Duration::from_secs(timeout_seconds),
+        &CancellationToken::default(),
+    );
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(CliError::internal)?
+        );
+    } else {
+        println!("Layout recovery schema: {}", report.schema_version);
+        println!("Outcome: {:?}", report.outcome);
+        println!("Reason: {:?}", report.reason);
+        println!("Quarantine entry: {:?}", report.quarantine_entry);
+    }
+    match report.outcome {
+        AdmissionLayoutRecoveryOutcomeV1::Recovered => Ok(()),
+        AdmissionLayoutRecoveryOutcomeV1::NotApplied
+        | AdmissionLayoutRecoveryOutcomeV1::RecoveryUncertain => Err(CliError::ReportedExit(70)),
     }
 }
 
@@ -1719,6 +1853,72 @@ fn run_resource_command(action: ResourceAction) -> Result<(), CliError> {
     match action {
         ResourceAction::Status { json } => print_resource_status(json),
         ResourceAction::History { json } => print_resource_history(json),
+    }
+}
+
+#[cfg(test)]
+mod task1_layout_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn admission_layout_recovery_status_parses_only_bounded_timeouts() {
+        let parsed = Cli::try_parse_from([
+            "commit-ci-preflight",
+            "admission",
+            "layout-recovery",
+            "status",
+            "--json",
+            "--timeout-seconds",
+            "5",
+        ]);
+        assert!(parsed.is_ok());
+        for invalid in ["0", "61", "not-a-number"] {
+            assert!(
+                Cli::try_parse_from([
+                    "commit-ci-preflight",
+                    "admission",
+                    "layout-recovery",
+                    "status",
+                    "--timeout-seconds",
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn admission_layout_recovery_apply_parses_plan_and_timeout() {
+        let parsed = Cli::try_parse_from([
+            "commit-ci-preflight",
+            "admission",
+            "layout-recovery",
+            "apply",
+            "--expected-plan",
+            &"a".repeat(64),
+            "--timeout-seconds",
+            "1",
+        ]);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn admission_layout_recovery_rejects_zero_and_sixty_one_before_dispatch() {
+        for value in ["0", "61"] {
+            assert!(
+                Cli::try_parse_from([
+                    "commit-ci-preflight",
+                    "admission",
+                    "layout-recovery",
+                    "apply",
+                    "--expected-plan",
+                    &"b".repeat(64),
+                    "--timeout-seconds",
+                    value
+                ])
+                .is_err()
+            );
+        }
     }
 }
 
@@ -2417,6 +2617,7 @@ impl std::error::Error for GuardExecError {}
 
 #[derive(Debug)]
 enum CliError {
+    ReportedExit(i32),
     Usage(Box<dyn std::error::Error>),
     Cache(CacheError),
     Workspace(WorkspaceError),
@@ -2448,6 +2649,7 @@ impl CliError {
 
     fn exit_code(&self) -> i32 {
         match self {
+            Self::ReportedExit(code) => *code,
             Self::Usage(_) => 2,
             Self::Cache(error) => error.exit_code(),
             Self::Workspace(_) => 2,
@@ -2486,6 +2688,7 @@ impl CliError {
 impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ReportedExit(_) => formatter.write_str("command outcome already reported"),
             Self::Usage(error) => write!(formatter, "{error}"),
             Self::Cache(error) => write!(formatter, "{error}"),
             Self::Workspace(error) => write!(formatter, "{error}"),
@@ -2517,6 +2720,7 @@ impl fmt::Display for CliError {
 impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::ReportedExit(_) => None,
             Self::Usage(error) | Self::Internal(error) => Some(error.as_ref()),
             Self::Cache(error) => Some(error),
             Self::Workspace(error) => Some(error),
@@ -2553,8 +2757,9 @@ mod tests {
     use super::{
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
         ResourceExecutionModeArg, ResourceExecutorArg, WatchdogCompletionBarrier,
-        detect_resource_executor, finalize_guard_exec_result, new_journal_id,
-        reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
+        cli_failure_diagnostic, cli_failure_kind, detect_resource_executor,
+        finalize_guard_exec_result, new_journal_id, reconcile_watchdog_outcome,
+        resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::cache::{
@@ -2569,6 +2774,10 @@ mod tests {
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
     use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
+    use commit_ci_preflight::run::Clock;
+    use commit_ci_preflight::run_journal::{
+        RunFailureDiagnosticCodeV1, RunJournalStateV1, RunJournalStore,
+    };
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -2779,6 +2988,57 @@ timeout_seconds = 60
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+    }
+
+    #[test]
+    fn synthetic_internal_failure_after_executing_is_redacted() {
+        let root = std::env::temp_dir().join(format!(
+            "ccp-task2-synthetic-{}-{}",
+            std::process::id(),
+            super::JOURNAL_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("root directory");
+        let store = RunJournalStore::initialize(&root).expect("journal initializes");
+        let run_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let clock = super::SystemClock;
+        store
+            .create_run(run_id, &clock.now_utc().expect("time"))
+            .expect("created");
+        let mut lifecycle = super::JournalLifecycleObserver {
+            store: &store,
+            run_id,
+            clock: &clock,
+        };
+        lifecycle
+            .transition_state(RunJournalStateV1::Admitted, None)
+            .expect("admitted");
+        lifecycle
+            .transition_state(RunJournalStateV1::Prepared, None)
+            .expect("prepared");
+        lifecycle
+            .transition_state(RunJournalStateV1::Executing, None)
+            .expect("executing");
+        let error = CliError::internal(std::io::Error::other("synthetic-top-level-secret"));
+        lifecycle
+            .fail(cli_failure_kind(&error), cli_failure_diagnostic(&error))
+            .expect("failed");
+        let status = store.status().expect("status");
+        let recovered = status
+            .runs
+            .iter()
+            .find(|run| run.run_id == run_id)
+            .expect("run");
+        assert_eq!(recovered.state, Some(RunJournalStateV1::Failed));
+        assert_eq!(
+            recovered
+                .failure_diagnostic
+                .as_ref()
+                .map(|d| d.diagnostic_code),
+            Some(RunFailureDiagnosticCodeV1::InternalCommandFailure)
+        );
+        let serialized = serde_json::to_string(&status).expect("serialize");
+        assert!(!serialized.contains("synthetic-top-level-secret"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

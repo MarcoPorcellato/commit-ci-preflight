@@ -15,7 +15,8 @@ use commit_ci_preflight::cache::{
     CacheRootOptions, ManagedCache, PlatformFamily, ResolvedCacheRoot,
 };
 use commit_ci_preflight::run_journal::{
-    RecoveryClassificationV1, RunFailureKindV1, RunJournalStateV1, RunJournalStore,
+    RecoveryClassificationV1, RunFailureDiagnosticCodeV1, RunFailureKindV1, RunJournalStateV1,
+    RunJournalStore,
 };
 use serde_json::Value;
 
@@ -146,6 +147,15 @@ fn malformed_and_terminal_run_ids_fail_closed_with_stable_codes() {
     let store = RunJournalStore::initialize(&fixture.cache).expect("journal");
     store.create_run(RUN_ID, AT).expect("run");
     store
+        .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+        .expect("admitted");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+        .expect("prepared");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+        .expect("executing");
+    store
         .transition(
             RUN_ID,
             RunJournalStateV1::Failed,
@@ -166,6 +176,39 @@ fn malformed_and_terminal_run_ids_fail_closed_with_stable_codes() {
     terminal.args(["recover", "apply", RUN_ID]);
     fixture.location(&mut terminal);
     assert_eq!(terminal.output().expect("terminal").status.code(), Some(5));
+}
+
+#[test]
+fn status_projects_bounded_terminal_diagnostic() {
+    let fixture = Fixture::new("terminal-diagnostic");
+    let store = RunJournalStore::initialize(&fixture.cache).expect("journal");
+    store.create_run(RUN_ID, AT).expect("run");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Admitted, AT, None)
+        .expect("admitted");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Prepared, AT, None)
+        .expect("prepared");
+    store
+        .transition(RUN_ID, RunJournalStateV1::Executing, AT, None)
+        .expect("executing");
+    store
+        .fail(
+            RUN_ID,
+            AT,
+            RunFailureKindV1::Unknown,
+            Some(RunFailureDiagnosticCodeV1::InternalCommandFailure),
+        )
+        .expect("terminal diagnostic");
+
+    let output = fixture.command().arg("--json").output().expect("status");
+
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(
+        value["runs"][0]["failure_diagnostic"]["diagnostic_code"],
+        "internal_command_failure"
+    );
 }
 
 fn tree_fingerprint(root: &std::path::Path) -> Vec<(PathBuf, u64)> {
