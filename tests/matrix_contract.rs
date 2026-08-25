@@ -14,11 +14,11 @@ use commit_ci_preflight::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, ReceiptEnvelopeV1,
     ReceiptV1, RepositoryEvidence, RunEvidence,
 };
-use serde_json::Value;
 use commit_ci_preflight::verify::{
     AcceptedPlatformV1, VerificationDecision, VerificationPolicyDocument, VerificationStatus,
     verify_receipt_document_for_policy,
 };
+use serde_json::Value;
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const IMAGE_311: &str = "example.invalid/python311@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -339,12 +339,47 @@ fn historical_legacy_fixture_is_self_consistent() {
         .and_then(Value::as_str)
         .expect("plan_digest");
     assert_eq!(
+        provenance["commit"],
+        "044697dee9a0d678d30a4847d62ddf9b4970505b"
+    );
+    assert_eq!(
+        provenance["tree"],
+        "5220164edf17831ce0c42dae1c14300ed1045015"
+    );
+    assert_eq!(
+        provenance["command_argv"],
+        serde_json::json!([
+            "commit-ci-preflight",
+            "plan",
+            "--config",
+            "tests/fixtures/config-v2-legacy-compatible.toml",
+            "--json"
+        ])
+    );
+    assert_eq!(provenance["plan_digest"], plan_digest);
+    assert_eq!(provenance["outer_digest"], plan_digest);
+    let runtimes = plan["runtimes"].as_array().expect("runtimes");
+    assert_eq!(
+        runtimes[0]["configuration_digest"],
+        provenance["runtime_digests"]["python311"]
+    );
+    assert_eq!(
+        runtimes[1]["configuration_digest"],
+        provenance["runtime_digests"]["python312"]
+    );
+    let binary_hash = provenance["binary_sha256"].as_str().expect("binary hash");
+    assert_eq!(binary_hash.len(), 64);
+    assert!(binary_hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(
         commit_ci_preflight::receipt::canonical_digest(plan).expect("canonical digest"),
         plan_digest
     );
     assert_eq!(provenance["output_sha256"], sha256_hex(raw.as_bytes()));
     assert_eq!(provenance["plan_digest"], plan_digest);
-    assert_eq!(provenance["config_sha256"], sha256_hex(legacy_compatible_config().as_bytes()));
+    assert_eq!(
+        provenance["config_sha256"],
+        sha256_hex(legacy_compatible_config().as_bytes())
+    );
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

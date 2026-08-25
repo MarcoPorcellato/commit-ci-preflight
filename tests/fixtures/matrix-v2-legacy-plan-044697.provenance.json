@@ -2,6 +2,7 @@
   "commit": "044697dee9a0d678d30a4847d62ddf9b4970505b",
   "tree": "5220164edf17831ce0c42dae1c14300ed1045015",
   "binary_sha256": "6372674cff4b7f8bef6272403f1493cbc88228f031759d588aa532589cde0106",
+  "binary_sha256_status": "observed_at_fixture_generation; temporary_binary_not_retained",
   "command_argv": ["commit-ci-preflight", "plan", "--config", "tests/fixtures/config-v2-legacy-compatible.toml", "--json"],
   "config_sha256": "cb8c3abf7231ff8b25cfab561ba0080f0cc70952f7e63f9ee2832ecbcf572a67",
   "output_sha256": "224cc7b31c1541d4270960980412058f23e4ed396d63c79a4454c3c1bd25653d",
