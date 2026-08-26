@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod terminal;
+use terminal::{TerminalFailure, finalize_owned_terminal};
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -553,7 +554,7 @@ fn print_benchmark(
         .map_err(CliError::Admission)?;
     let result = resource_pre_start(supervisor.clone(), &cancellation)
         .and_then(|_| run_benchmark(commit, runtime_probe.as_ref()).map_err(CliError::Benchmark));
-    let envelope = release_admission(guard, result)?;
+    let envelope = finalize_benchmark_terminal(result, || guard.release())?;
     if let Some(path) = output {
         write_new_receipt(path, &envelope).map_err(CliError::Benchmark)?;
     }
@@ -1803,11 +1804,14 @@ fn resource_pre_start(
     }
 }
 
-fn release_admission<T>(guard: AdmissionGuard, result: Result<T, CliError>) -> Result<T, CliError> {
-    let release = guard.release().map_err(CliError::Admission);
-    match release {
-        Ok(()) => result,
-        Err(error) => Err(error),
+fn finalize_benchmark_terminal<T>(
+    primary: Result<T, CliError>,
+    release: impl FnOnce() -> Result<(), AdmissionError>,
+) -> Result<T, CliError> {
+    match finalize_owned_terminal(primary, std::convert::identity, release) {
+        Ok(value) => Ok(value),
+        Err(TerminalFailure::Primary(error)) => Err(error),
+        Err(TerminalFailure::Release(error)) => Err(CliError::Admission(error)),
     }
 }
 
@@ -2051,24 +2055,27 @@ fn finalize_guard_exec_result(
     trip: Option<WatchdogTripReason>,
     release: impl FnOnce() -> Result<(), GuardExecError>,
 ) -> Result<ProcessResult, GuardExecError> {
-    let result = if let Some(error) = join_error {
-        Err(GuardExecError::Resource(ResourceGuardError::Watchdog(
-            error,
-        )))
-    } else if let Some(reason) = trip {
-        Err(GuardExecError::Resource(
-            ResourceGuardError::WatchdogTripped(reason),
-        ))
-    } else if cancellation.reason()
-        == Some(commit_ci_preflight::process::CancellationReason::ResourcePressure)
-    {
-        Err(GuardExecError::ResourcePressure)
-    } else {
-        result
-    };
-    match release() {
-        Ok(()) => result,
-        Err(error) => Err(error),
+    match finalize_owned_terminal(
+        result,
+        |result| {
+            if let Some(error) = join_error {
+                Err(GuardExecError::Resource(ResourceGuardError::Watchdog(
+                    error,
+                )))
+            } else if let Some(reason) = trip {
+                Err(GuardExecError::Resource(
+                    ResourceGuardError::WatchdogTripped(reason),
+                ))
+            } else if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+                Err(GuardExecError::ResourcePressure)
+            } else {
+                result
+            }
+        },
+        release,
+    ) {
+        Ok(value) => Ok(value),
+        Err(TerminalFailure::Primary(error) | TerminalFailure::Release(error)) => Err(error),
     }
 }
 
@@ -2555,10 +2562,11 @@ mod tests {
     use super::{
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
         ResourceExecutionModeArg, ResourceExecutorArg, WatchdogCompletionBarrier,
-        detect_resource_executor, finalize_guard_exec_result, new_journal_id,
-        reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
+        detect_resource_executor, finalize_benchmark_terminal, finalize_guard_exec_result,
+        new_journal_id, reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
+    use commit_ci_preflight::admission::AdmissionError;
     use commit_ci_preflight::cache::{
         CacheError, CacheKey, CacheRootSource, ManagedCache, ResolvedCacheRoot,
     };
@@ -3097,6 +3105,78 @@ timeout_seconds = 60
         );
         assert!(matches!(resource, Err(GuardExecError::ResourcePressure)));
         assert_eq!(release_count.load(Ordering::SeqCst), 3);
+
+        let release_failure = finalize_guard_exec_result(
+            Err(GuardExecError::InternalFailure),
+            &cancellation,
+            None,
+            None,
+            || {
+                release_count.fetch_add(1, Ordering::SeqCst);
+                Err(GuardExecError::Admission(AdmissionError::Clock))
+            },
+        );
+        assert!(matches!(
+            release_failure,
+            Err(GuardExecError::Admission(AdmissionError::Clock))
+        ));
+        assert_eq!(release_count.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn benchmark_terminal_preserves_primary_and_release_precedence() {
+        let releases = AtomicUsize::new(0);
+        let primary = finalize_benchmark_terminal(
+            Err::<(), _>(CliError::Benchmark(
+                commit_ci_preflight::benchmark::BenchmarkError::NoSamples,
+            )),
+            || {
+                releases.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(matches!(primary, Err(CliError::Benchmark(_))));
+
+        let release = finalize_benchmark_terminal(Ok(()), || {
+            releases.fetch_add(1, Ordering::SeqCst);
+            Err(AdmissionError::Clock)
+        });
+        assert!(matches!(
+            release,
+            Err(CliError::Admission(AdmissionError::Clock))
+        ));
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn guard_cache_pin_remains_live_through_terminal_release() {
+        let (cache, source, base) = guard_cache_fixture("terminal-release");
+        let cancellation = CancellationToken::default();
+
+        let result =
+            super::with_guard_cache_pins(Some(&cache), std::slice::from_ref(&source), || {
+                finalize_guard_exec_result(
+                    Ok(completed_process_result()),
+                    &cancellation,
+                    None,
+                    None,
+                    || {
+                        assert!(matches!(
+                            cache.pin_completed_sources(std::slice::from_ref(&source)),
+                            Err(CacheError::LockBusy(_))
+                        ));
+                        Ok(())
+                    },
+                )
+            });
+
+        assert!(result.is_ok());
+        assert!(
+            cache
+                .pin_completed_sources(std::slice::from_ref(&source))
+                .is_ok()
+        );
+        cleanup_guard_cache_fixture(&base);
     }
 
     #[test]
