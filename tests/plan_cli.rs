@@ -18,6 +18,7 @@ use commit_ci_preflight::config::config_schema_json;
 
 const CONFIG: &str = "tests/fixtures/config-v1-read-only.toml";
 const MATRIX_CONFIG: &str = "tests/fixtures/config-v2-matrix.toml";
+const LEGACY_MATRIX_CONFIG: &str = "tests/fixtures/config-v2-legacy-compatible.toml";
 const PINNED_SCHEMA: &str = include_str!("../schema/config-v1.schema.json");
 
 #[test]
@@ -91,6 +92,33 @@ fn v2_plan_exposes_reviewable_per_runtime_digests_without_execution() {
                 .starts_with("sha256:")
         );
     }
+}
+
+#[test]
+fn legacy_matrix_profile_reproduces_the_pinned_historical_plan_digest() {
+    let expected: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/matrix-v2-legacy-plan-044697.json"
+    ))
+    .expect("historical plan fixture");
+    let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "plan",
+            "--config",
+            LEGACY_MATRIX_CONFIG,
+            "--matrix-plan-profile",
+            "matrix-v2-legacy-v1",
+            "--json",
+        ])
+        .output()
+        .expect("run legacy matrix plan command");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: serde_json::Value = serde_json::from_slice(&output.stdout).expect("plan JSON");
+    assert_eq!(actual["plan_digest"], expected["plan_digest"]);
 }
 
 #[test]
