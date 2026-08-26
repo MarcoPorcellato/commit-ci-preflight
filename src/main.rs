@@ -2822,8 +2822,8 @@ mod tests {
         ResourceExecutionModeArg, ResourceExecutorArg, RunTerminalJournalEvent,
         WatchdogCompletionBarrier, after_validated_matrix_profile_binding,
         detect_resource_executor, finalize_benchmark_terminal, finalize_guard_exec_result,
-        finalize_run_terminal, new_journal_id, reconcile_watchdog_outcome,
-        resource_run_outcome, resource_terminal_detail,
+        finalize_run_terminal, new_journal_id, reconcile_watchdog_outcome, resource_run_outcome,
+        resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::admission::AdmissionError;
@@ -3081,6 +3081,61 @@ timeout_seconds = 60
             Err(CliError::Matrix(MatrixError::PlanDigestMismatch))
         ));
         assert_eq!(effects.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn matrix_profile_recheck_precedes_shared_terminal_finalization() {
+        use std::cell::RefCell;
+
+        let source = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/config-v2-legacy-compatible.toml"),
+        )
+        .expect("legacy fixture");
+        let envelope = build_matrix_plan(
+            MatrixConfigV2::parse(&source).expect("matrix config"),
+            MatrixPlanProfile::LegacyV1,
+        )
+        .expect("matrix plan");
+        let events = RefCell::new(Vec::new());
+
+        let valid = after_validated_matrix_profile_binding(&envelope, || {
+            finalize_run_terminal(
+                Ok(()),
+                |primary| {
+                    events.borrow_mut().push("complete");
+                    primary
+                },
+                || {
+                    events.borrow_mut().push("release");
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+        });
+        assert!(valid.is_ok());
+        assert_eq!(&*events.borrow(), &["complete", "release"]);
+
+        let mut mutated = envelope;
+        mutated.plan.project = "example/mutated-before-admission".to_owned();
+        let release_attempts = AtomicUsize::new(0);
+        let rejected = after_validated_matrix_profile_binding(&mutated, || {
+            finalize_run_terminal(
+                Ok(()),
+                std::convert::identity,
+                || {
+                    release_attempts.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+        });
+
+        assert!(matches!(
+            rejected,
+            Err(CliError::Matrix(MatrixError::PlanDigestMismatch))
+        ));
+        assert_eq!(release_attempts.load(Ordering::SeqCst), 0);
     }
 
     #[test]

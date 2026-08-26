@@ -167,10 +167,9 @@ fn matrix_legacy_profile_discloses_a_reconstructible_digest_basis() {
 
 #[test]
 fn legacy_matrix_profile_reproduces_the_pinned_historical_plan_digest() {
-    let expected: serde_json::Value = serde_json::from_str(include_str!(
-        "fixtures/matrix-v2-legacy-plan-044697.json"
-    ))
-    .expect("historical plan fixture");
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/matrix-v2-legacy-plan-044697.json"))
+            .expect("historical plan fixture");
     let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
         .args([
             "plan",
