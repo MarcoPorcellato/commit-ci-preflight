@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Component, Path},
+};
 
 use saphyr::{LoadableYamlNode, MappingOwned, YamlOwned};
 
@@ -55,6 +58,11 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
                 "inner-v1",
                 "producer suffix",
                 "historical verifier",
+                "tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations",
+                "#[ignore]",
+                "--ignored",
+                "CCP_HISTORICAL_VERIFIER_044697",
+                "provenance-pinned",
             ],
         ),
         (
@@ -66,50 +74,6 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
         for snippet in snippets {
             assert!(text.contains(snippet), "{path} missing {snippet}");
         }
-    }
-    for (path, name) in [
-        (
-            "tests/matrix_contract.rs",
-            "legacy_profile_reproduces_historical_plan",
-        ),
-        (
-            "tests/matrix_contract.rs",
-            "legacy_profile_rejects_each_non_representable_current_field",
-        ),
-        (
-            "tests/matrix_contract.rs",
-            "legacy_receipt_provenance_is_uniform",
-        ),
-        (
-            "tests/plan_cli.rs",
-            "matrix_plan_profile_flag_is_exposed_only_by_configuration_commands",
-        ),
-        (
-            "tests/runtime_cli.rs",
-            "legacy_profile_uses_distinct_plan_cache_identity",
-        ),
-        (
-            "tests/runtime_cli.rs",
-            "legacy_profile_rejection_precedes_shared_state",
-        ),
-        (
-            "tests/runtime_cli.rs",
-            "legacy_profile_rejects_current_only_matrix_syntax_before_shared_state",
-        ),
-        (
-            "tests/verification_contract.rs",
-            "current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations",
-        ),
-        (
-            "tests/verification_contract.rs",
-            "historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations",
-        ),
-    ] {
-        let source = fs::read_to_string(root.join(path)).expect("read referenced test");
-        assert!(
-            source.contains(&format!("fn {name}")),
-            "missing referenced test {path}::{name}"
-        );
     }
     for (path, snippets) in [
         (
@@ -127,7 +91,7 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
         (
             "docs/INVARIANT_EVIDENCE_MATRIX.md",
             &[
-            "tests/matrix_contract.rs::legacy_profile_reproduces_historical_plan",
+                "tests/matrix_contract.rs::legacy_profile_reproduces_historical_plan",
                 "current-v2",
             ],
         ),
@@ -136,6 +100,9 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
             &[
                 "CCP_HISTORICAL_VERIFIER_044697",
                 "ordinary suite does not prove",
+                "tests/plan_cli.rs::matrix_plan_profile_flag_is_exposed_only_by_configuration_commands",
+                "tests/runtime_cli.rs::legacy_profile_rejection_precedes_shared_state",
+                "tests/runtime_cli.rs::legacy_profile_rejects_current_only_matrix_syntax_before_shared_state",
             ],
         ),
     ] {
@@ -144,6 +111,13 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
             assert!(text.contains(snippet), "{path} missing {snippet}");
         }
     }
+    assert_documented_test_references_are_valid(
+        root,
+        [
+            "docs/INVARIANT_EVIDENCE_MATRIX.md",
+            "docs/TESTING_AND_FAULT_INJECTION.md",
+        ],
+    );
     let mut sources = Vec::new();
     collect_rust_sources(&root.join("src"), &mut sources);
     for path in sources {
@@ -162,6 +136,63 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
             );
         }
     }
+}
+
+fn assert_documented_test_references_are_valid<'a>(
+    root: &Path,
+    documents: impl IntoIterator<Item = &'a str>,
+) {
+    for document in documents {
+        let text = fs::read_to_string(root.join(document)).expect("read evidence document");
+        for reference in backticked_test_references(&text) {
+            assert_documented_test_reference_is_safe_and_defined(root, document, reference);
+        }
+    }
+}
+
+fn backticked_test_references(document: &str) -> impl Iterator<Item = &str> {
+    document
+        .split('`')
+        .enumerate()
+        .filter_map(|(index, reference)| {
+            (index % 2 == 1 && reference.starts_with("tests/") && reference.contains(".rs::"))
+                .then_some(reference)
+        })
+}
+
+fn assert_documented_test_reference_is_safe_and_defined(
+    root: &Path,
+    document: &str,
+    reference: &str,
+) {
+    let (relative_path, name) = reference
+        .split_once("::")
+        .unwrap_or_else(|| panic!("{document} has invalid test reference {reference}"));
+    assert!(
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric()),
+        "{document} has unsafe test function name {name}"
+    );
+
+    let path = Path::new(relative_path);
+    let components: Vec<_> = path.components().collect();
+    assert!(
+        matches!(
+            components.as_slice(),
+            [Component::Normal(directory), Component::Normal(file)]
+                if *directory == "tests" && file.to_string_lossy().ends_with(".rs")
+        ),
+        "{document} has unsafe or non-tests path {relative_path}"
+    );
+
+    let source = fs::read_to_string(root.join(path))
+        .unwrap_or_else(|_| panic!("{document} references missing test source {relative_path}"));
+    assert!(
+        source.contains(&format!("fn {name}(")),
+        "{document} references missing test {reference}"
+    );
 }
 
 fn collect_rust_sources(dir: &Path, output: &mut Vec<std::path::PathBuf>) {

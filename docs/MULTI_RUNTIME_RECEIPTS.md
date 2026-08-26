@@ -166,8 +166,10 @@ generate_contract`. The v1 schema/fixture tests require historical v1 output
 to remain byte-for-byte stable.
 ## Matrix-only legacy compatibility
 
-The historical verifier external test is `tests/verification_contract.rs::historical_matrix_verifier`
-and requires `CCP_HISTORICAL_VERIFIER_044697`, provenance-pinned to commit
+The historical verifier external test is
+`tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`
+and is marked `#[ignore]`; run it with `--ignored` only when
+`CCP_HISTORICAL_VERIFIER_044697` points to the provenance-pinned commit
 `044697dee9a0d678d30a4847d62ddf9b4970505b`.
 
 This is the outer-v2 / inner-v1 boundary: outer Matrix schema 2.0 and inner

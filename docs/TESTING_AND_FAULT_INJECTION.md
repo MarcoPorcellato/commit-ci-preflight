@@ -152,13 +152,14 @@ trusted configuration validation.
 Focused tests cover the Matrix-only `matrix-v2-legacy-v1` profile: projection
 `tests/matrix_contract.rs::legacy_profile_reproduces_historical_plan`,
 representability `tests/matrix_contract.rs::legacy_profile_rejects_each_non_representable_current_field`,
-command parity and cache identity
-`tests/runtime_cli.rs::legacy_profile_uses_distinct_plan_cache_identity`,
+command parity
+`tests/plan_cli.rs::matrix_plan_profile_flag_is_exposed_only_by_configuration_commands`,
 producer uniformity `tests/matrix_contract.rs::legacy_receipt_provenance_is_uniform`,
 mutation rejection
 `tests/verification_contract.rs::current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`,
 and zero pre-admission mutation
-`tests/runtime_cli.rs::remote_secret_only_run_fails_before_cache_or_admission_setup`.
+`tests/runtime_cli.rs::legacy_profile_rejection_precedes_shared_state` and
+`tests/runtime_cli.rs::legacy_profile_rejects_current_only_matrix_syntax_before_shared_state`.
 The historical verifier is
 `tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`,
 marked `#[ignore]` and run with `--ignored` only when
