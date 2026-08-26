@@ -313,15 +313,63 @@ fn legacy_compatible_policy_fixture_binds_historical_profile_digests() {
         "fixtures/matrix-v2-legacy-plan-044697.provenance.json"
     ))
     .expect("provenance JSON");
+    let historical_plan: Value =
+        serde_json::from_str(include_str!("fixtures/matrix-v2-legacy-plan-044697.json"))
+            .expect("historical plan JSON");
     let policy = MatrixVerificationPolicyV2::parse(LEGACY_COMPATIBLE_POLICY).expect("policy");
+    let planned_runtimes = historical_plan["plan"]["runtimes"]
+        .as_array()
+        .expect("historical runtimes");
 
     assert_eq!(policy.project, "example/legacy-matrix");
     assert_eq!(policy.configuration_digest, provenance["outer_digest"]);
-    for runtime in policy.runtimes {
+    let policy_check_bindings: Vec<_> = policy
+        .required_checks
+        .iter()
+        .map(|check| (check.id.as_str(), check.runtime_id.as_str()))
+        .collect();
+    let planned_check_bindings: Vec<_> = planned_runtimes
+        .iter()
+        .flat_map(|runtime| {
+            let runtime_id = runtime["id"].as_str().expect("historical runtime ID");
+            runtime["checks"]
+                .as_array()
+                .expect("historical runtime checks")
+                .iter()
+                .filter(|check| check["required"] == true)
+                .map(move |check| {
+                    (
+                        check["id"].as_str().expect("historical check ID"),
+                        runtime_id,
+                    )
+                })
+        })
+        .collect();
+    assert_eq!(policy_check_bindings, planned_check_bindings);
+
+    for runtime in &policy.runtimes {
         assert_eq!(
             runtime.configuration_digest,
             provenance["runtime_digests"][&runtime.id]
         );
+        let planned_runtime = planned_runtimes
+            .iter()
+            .find(|candidate| candidate["id"] == runtime.id)
+            .expect("planned runtime matching policy runtime");
+        assert_eq!(
+            runtime.image_reference,
+            planned_runtime["runtime"]["image"]
+                .as_str()
+                .expect("historical runtime image")
+        );
+        assert_eq!(
+            planned_runtime["runtime"]["kind"], "docker_compatible",
+            "historical runtime kind"
+        );
+        assert_eq!(runtime.platforms.len(), 1, "fixed host platform tuple");
+        assert_eq!(runtime.platforms[0].host_os, "macos");
+        assert_eq!(runtime.platforms[0].host_arch, "aarch64");
+        assert_eq!(runtime.platforms[0].runtime_kind, "docker_compatible");
     }
 }
 

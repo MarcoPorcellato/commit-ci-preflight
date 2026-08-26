@@ -1,0 +1,19 @@
+{
+  "commit": "044697dee9a0d678d30a4847d62ddf9b4970505b",
+  "tree": "5220164edf17831ce0c42dae1c14300ed1045015",
+  "build_argv": ["cargo", "build", "--locked", "--offline"],
+  "rustc_version": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "cargo_version": "cargo 1.96.0 (30a34c682 2026-05-25)",
+  "retained_binary_path": "/private/tmp/commit-ci-preflight-044697-5321ff4d291ec24db6a7a5919bc08fc00a9d63767b630a3469fc39318c400277",
+  "binary_sha256": "5321ff4d291ec24db6a7a5919bc08fc00a9d63767b630a3469fc39318c400277",
+  "binary_sha256_status": "retained_historical_verifier",
+  "config_sha256": "cb8c3abf7231ff8b25cfab561ba0080f0cc70952f7e63f9ee2832ecbcf572a67",
+  "plan_command_argv": ["/private/tmp/commit-ci-preflight-044697-5321ff4d291ec24db6a7a5919bc08fc00a9d63767b630a3469fc39318c400277", "plan", "--config", "tests/fixtures/config-v2-legacy-compatible.toml", "--json"],
+  "output_sha256": "224cc7b31c1541d4270960980412058f23e4ed396d63c79a4454c3c1bd25653d",
+  "plan_digest": "sha256:3248c763ccc37fecac1e29727007232d274f561e0943fc2e5a1996a38526fe13",
+  "outer_digest": "sha256:3248c763ccc37fecac1e29727007232d274f561e0943fc2e5a1996a38526fe13",
+  "runtime_digests": {
+    "python311": "sha256:755f77f6815b1ed7b4415b3312c48a6528e2d752270775916efa6c10f1ffe192",
+    "python312": "sha256:be2eb7d200946e9f1dc84cebd8c0cca8739e424163f91c86063bbe4caed936f9"
+  }
+}

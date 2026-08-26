@@ -50,6 +50,8 @@ const ROOT_POLICY: &str = ".commit-ci-policy.toml";
 const LEGACY_MATRIX_POLICY: &str = include_str!("fixtures/policy-v2-legacy-compatible.toml");
 const LEGACY_MATRIX_PROVENANCE: &str =
     include_str!("fixtures/matrix-v2-legacy-plan-044697.provenance.json");
+const HISTORICAL_VERIFIER_PROVENANCE: &str =
+    include_str!("fixtures/historical-verifier-044697.provenance.json");
 const LEGACY_MATRIX_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const LEGACY_MATRIX_EVALUATED_AT: &str = "2026-08-16T10:01:00Z";
 const LEGACY_MATRIX_PRODUCER: &str = "0.1.0+matrix-v2-legacy-v1";
@@ -107,6 +109,33 @@ fn collect_leaf_pointers(value: &serde_json::Value, path: &str, pointers: &mut V
 
 fn legacy_matrix_policy() -> MatrixVerificationPolicyV2 {
     MatrixVerificationPolicyV2::parse(LEGACY_MATRIX_POLICY).expect("legacy Matrix policy")
+}
+
+#[test]
+fn retained_historical_verifier_provenance_is_separate_from_generator_provenance() {
+    let generator: serde_json::Value =
+        serde_json::from_str(LEGACY_MATRIX_PROVENANCE).expect("generator provenance JSON");
+    let verifier: serde_json::Value =
+        serde_json::from_str(HISTORICAL_VERIFIER_PROVENANCE).expect("verifier provenance JSON");
+
+    assert_eq!(generator["commit"], verifier["commit"]);
+    assert_eq!(generator["tree"], verifier["tree"]);
+    assert_eq!(
+        generator["binary_sha256_status"],
+        "observed_at_fixture_generation; temporary_binary_not_retained"
+    );
+    assert_eq!(
+        verifier["binary_sha256_status"],
+        "retained_historical_verifier"
+    );
+    assert_eq!(
+        verifier["build_argv"],
+        serde_json::json!(["cargo", "build", "--locked", "--offline"])
+    );
+    assert_eq!(verifier["plan_command_argv"][1], "plan");
+    assert_eq!(verifier["output_sha256"], generator["output_sha256"]);
+    assert_eq!(verifier["outer_digest"], generator["outer_digest"]);
+    assert_eq!(verifier["runtime_digests"], generator["runtime_digests"]);
 }
 
 fn legacy_runtime_receipt(
@@ -240,7 +269,7 @@ fn historical_verifier() -> PathBuf {
     let path = env::var_os("CCP_HISTORICAL_VERIFIER_044697")
         .map(PathBuf::from)
         .expect("set CCP_HISTORICAL_VERIFIER_044697 to the reviewed 044697 verifier binary");
-    let expected = serde_json::from_str::<serde_json::Value>(LEGACY_MATRIX_PROVENANCE)
+    let expected = serde_json::from_str::<serde_json::Value>(HISTORICAL_VERIFIER_PROVENANCE)
         .expect("provenance JSON")["binary_sha256"]
         .as_str()
         .expect("provenance binary SHA-256")
