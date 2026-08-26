@@ -1,8 +1,8 @@
 # Terminal owned-resource release design
 
-Status: approved by owner on 2026-08-26  
-Date: 2026-08-26  
-Baseline: `2b4b55ce1a4be0a2b610656ae4a56a7641b29f26`  
+Status: approved by owner on 2026-08-26
+Date: 2026-08-26
+Baseline: `2b4b55ce1a4be0a2b610656ae4a56a7641b29f26`
 Scope: make terminal cleanup and admission release ordering explicit and
 uniform across `run`, `benchmark`, and `guard exec`
 
