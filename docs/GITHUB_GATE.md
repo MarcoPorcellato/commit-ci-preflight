@@ -170,7 +170,7 @@ The only cold remote compilation is the small trusted verifier. Project tests,
 Docker checks, and local dependency caches remain off GitHub. A future signed
 release can replace this bootstrap build with a pinned verifier download after
 release publication is separately authorized and qualified.
-# Matrix V2 compatibility gate
+## Matrix V2 compatibility gate
 
 The `matrix-v2-legacy-v1` profile is Matrix-only. Preserve command parity across
 `plan`, `doctor`, `dry-run`, and `run`; `verify` has no profile flag. Review
@@ -178,3 +178,4 @@ digests before copying them into Matrix policy v2, never from a completed
 receipt. Legacy/current cache namespaces are separate, and an old trusted
 historical verifier must accept the exact receipt before migration. This is not
 policy inference or a general trust claim.
+Rollback target is `current-v2`.

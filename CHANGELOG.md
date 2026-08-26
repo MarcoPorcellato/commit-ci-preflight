@@ -282,8 +282,3 @@ Semantic Versioning after its first public release.
 
 [Unreleased]: https://github.com/MarcoPorcellato/commit-ci-preflight/compare/v0.1.0-rc.1...HEAD
 [0.1.0-rc.1]: https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.1
-# Unreleased
-
-- Documented the Matrix-only `matrix-v2-legacy-v1` compatibility profile,
-  command parity, cache separation, historical-verifier boundary, evidence
-  matrix, and rollback target `current-v2`.

@@ -204,7 +204,7 @@ introduced. The declaration is cooperative and non-attesting: undeclared
 paths are not pinned, and manual or non-cooperative replacement is unsupported.
 Pinning does not initialize, repair, delete, quarantine, publish, or attest
 cache contents.
-# Compatibility cache boundary
+## Compatibility cache boundary
 
 The Matrix-only `matrix-v2-legacy-v1` profile has a separate legacy cache
 namespace from current-v2. Preserve command parity for `plan`, `doctor`,

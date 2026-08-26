@@ -27,44 +27,74 @@ const SOCIAL_PREVIEW: &str = include_str!("../docs/assets/social-preview.svg");
 #[test]
 fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let docs = [
-        "docs/CONFIGURATION.md",
-        "docs/LOCAL_RUN.md",
-        "docs/MULTI_RUNTIME_RECEIPTS.md",
-        "docs/RECEIPT_SPEC.md",
-        "docs/GITHUB_GATE.md",
-        "docs/ADOPTION_GUIDE.md",
-        "docs/CACHE_AND_WORKSPACE.md",
-        "docs/TROUBLESHOOTING.md",
-        "docs/INVARIANT_EVIDENCE_MATRIX.md",
-        "docs/TESTING_AND_FAULT_INJECTION.md",
-    ];
-    let corpus = docs
-        .iter()
-        .map(|path| fs::read_to_string(root.join(path)).expect("read public documentation"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    for required in [
-        "matrix-v2-legacy-v1",
-        "Matrix-only",
-        "producer suffix",
-        "command parity",
-        "cache namespace",
-        "policy inference",
-        "historical verifier",
-        "current-v2",
-    ] {
-        assert!(corpus.to_lowercase().contains(&required.to_lowercase()), "missing documentation contract: {required}");
+    for path in ["docs/CONFIGURATION.md", "docs/LOCAL_RUN.md"] {
+        let text = fs::read_to_string(root.join(path)).expect("read operator docs");
+        for command in [
+            "plan --matrix-plan-profile matrix-v2-legacy-v1 --json",
+            "doctor --matrix-plan-profile matrix-v2-legacy-v1 --json",
+            "dry-run --matrix-plan-profile matrix-v2-legacy-v1 --json",
+            "run --matrix-plan-profile matrix-v2-legacy-v1 --generation N --json",
+        ] {
+            assert!(text.contains(command), "{path} missing {command}");
+        }
     }
-    let source = fs::read_dir(root.join("src")).expect("read src");
-    let source_text = source
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().and_then(|v| v.to_str()) == Some("rs"))
-        .map(|entry| fs::read_to_string(entry.path()).expect("read source"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    for forbidden in ["latent-adopter", "golden digest", "golden_digest"] {
-        assert!(!source_text.to_lowercase().contains(forbidden), "forbidden production digest constant: {forbidden}");
+    for (path, snippets) in [
+        (
+            "docs/RECEIPT_SPEC.md",
+            &[
+                "0.1.0+matrix-v2-legacy-v1",
+                "outer Matrix schema 2.0",
+                "inner runtime schema 1.0",
+                "never from a completed receipt",
+            ] as &[&str],
+        ),
+        (
+            "docs/MULTI_RUNTIME_RECEIPTS.md",
+            &[
+                "outer-v2",
+                "inner-v1",
+                "producer suffix",
+                "historical verifier",
+            ],
+        ),
+        (
+            "docs/GITHUB_GATE.md",
+            &["append-once", "`verify` has no profile flag", "current-v2"],
+        ),
+    ] {
+        let text = fs::read_to_string(root.join(path)).expect("read contract docs");
+        for snippet in snippets {
+            assert!(text.contains(snippet), "{path} missing {snippet}");
+        }
+    }
+    let mut sources = Vec::new();
+    collect_rust_sources(&root.join("src"), &mut sources);
+    for path in sources {
+        let text = fs::read_to_string(path).expect("read source");
+        for digest in [
+            "25b35b942a6ff9b6237ebed7cefbdbc96b968bbe8954a38b606942f36b8df4b2",
+            "b3d8beef1542566d9d925bfee77d2244995dc74adcd879128ef65e82ed1d354b",
+            "d446c4ca0602c09eee61c796ad2972f58ab0eebe84a39f928fd90aac5bfb535c",
+            "13f4cb39b7e1a8ed31cae64502cc8e4d80d040230d3fb410a6afc3bad3b76178",
+            "eff5b7d55bb0220890dbfb050bb68a1e0fbba8f9a30a69e2f66085354fcc8562",
+            "7afb3e6dd435d9d5a317e4d9d85e80527431044312bbe299e9a70b6ba9e994c8",
+        ] {
+            assert!(
+                !text.contains(digest),
+                "production source embeds adopter digest {digest}"
+            );
+        }
+    }
+}
+
+fn collect_rust_sources(dir: &Path, output: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir).expect("read src").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, output);
+        } else if path.extension().and_then(|v| v.to_str()) == Some("rs") {
+            output.push(path);
+        }
     }
 }
 

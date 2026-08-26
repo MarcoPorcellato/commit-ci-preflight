@@ -228,7 +228,7 @@ Include:
 Keep private source, raw logs, credentials, tokens, environment values, and
 personal paths out of public issues. Security findings belong in the private
 channel described by [SECURITY.md](../SECURITY.md).
-# Matrix V2 legacy troubleshooting
+## Matrix V2 legacy troubleshooting
 
 For Matrix-only compatibility, confirm the exact `matrix-v2-legacy-v1` profile
 and the command parity sequence (`plan`, `doctor`, `dry-run`, `run`). Legacy and

@@ -213,7 +213,14 @@ release. This declaration is cooperative and non-attesting: undeclared paths
 are not pinned, and manual or non-cooperative replacement is unsupported. The
 flags do not initialize, repair, delete, quarantine, publish, or attest cache
 contents. Legacy `guard exec` without these flags remains unchanged.
-# Matrix V2 legacy operator sequence
+## Matrix V2 legacy operator sequence
+
+```console
+commit-ci-preflight plan --matrix-plan-profile matrix-v2-legacy-v1 --json
+commit-ci-preflight doctor --matrix-plan-profile matrix-v2-legacy-v1 --json
+commit-ci-preflight dry-run --matrix-plan-profile matrix-v2-legacy-v1 --json
+commit-ci-preflight run --matrix-plan-profile matrix-v2-legacy-v1 --generation N --json
+```
 
 For Matrix-only compatibility, use the exact `matrix-v2-legacy-v1` profile and
 preserve command parity: `plan`, `doctor`, `dry-run`, then `run` with generation

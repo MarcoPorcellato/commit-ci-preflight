@@ -39,7 +39,7 @@ The implemented source boundary is explicit:
 
 This closes T2 in deterministic source evidence. Native platform,
 crash/power-loss and release qualification remain separate gates.
-# Task 8 documentation evidence matrix
+## Task 8 documentation evidence matrix
 
 | Invariant | Focused evidence |
 |---|---|

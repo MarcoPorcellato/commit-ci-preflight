@@ -147,7 +147,7 @@ trusted configuration validation.
 6. Record platform-native evidence separately from deterministic tests.
 7. Keep fault fixtures free of secrets, personal data, network access, and the
    operator's real cache or repository state.
-# Matrix V2 compatibility test matrix
+## Matrix V2 compatibility test matrix
 
 Focused tests cover projection reproducibility, representability rejection,
 command parity, cache namespace separation, producer uniformity, historical

@@ -222,7 +222,7 @@ and artifact contracts. It uses the same CCP canonical JSON v1 profile
 described in `docs/RECEIPT_SPEC.md`.
 
 The digest is integrity evidence, not a signature or identity attestation.
-# Matrix V2 compatibility profile
+## Matrix V2 compatibility profile
 
 The `matrix-v2-legacy-v1` profile is Matrix-only compatibility for the legacy
 producer suffix. It does not widen the schema or infer policy. Review the plan

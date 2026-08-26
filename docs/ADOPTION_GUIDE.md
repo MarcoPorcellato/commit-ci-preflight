@@ -329,7 +329,7 @@ remote jobs. Preserve receipts and configurations for incident analysis. See
 - [ ] GitHub status is observed on the latest PR head.
 - [ ] Review, secrets, deployments, and uncovered native gates remain remote.
 - [ ] Rollback path is documented and tested.
-# Matrix V2 legacy adoption boundary
+## Matrix V2 legacy adoption boundary
 
 Adopters using the Matrix-only `matrix-v2-legacy-v1` profile must preserve the
 producer suffix and command parity (`plan`, `doctor`, `dry-run`, `run`). The
