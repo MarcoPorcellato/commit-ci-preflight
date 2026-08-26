@@ -65,10 +65,12 @@ fn plan_json_is_read_only_and_machine_readable() {
         json["plan"]["checks"][0]["argv"][0],
         "this-command-does-not-exist-and-must-not-run"
     );
-    assert!(json["plan_digest"]
-        .as_str()
-        .expect("plan digest")
-        .starts_with("sha256:"));
+    assert!(
+        json["plan_digest"]
+            .as_str()
+            .expect("plan digest")
+            .starts_with("sha256:")
+    );
 }
 
 #[test]
@@ -103,10 +105,12 @@ fn v2_plan_exposes_reviewable_per_runtime_digests_without_execution() {
         2
     );
     for runtime in json["plan"]["runtimes"].as_array().expect("runtimes") {
-        assert!(runtime["configuration_digest"]
-            .as_str()
-            .expect("configuration digest")
-            .starts_with("sha256:"));
+        assert!(
+            runtime["configuration_digest"]
+                .as_str()
+                .expect("configuration digest")
+                .starts_with("sha256:")
+        );
     }
 }
 
@@ -221,8 +225,10 @@ fn legacy_matrix_profile_rejects_single_runtime_configuration_with_usage_exit_co
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("matrix plan profile requires schema version 2.0"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("matrix plan profile requires schema version 2.0")
+    );
 }
 
 #[test]
