@@ -66,6 +66,152 @@ fn tree_bytes(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     output
 }
 
+const RUNTIME_SENTINEL: &str = "ccp-legacy-profile-runtime-sentinel";
+
+struct IsolatedLegacyRunFixture {
+    root: PathBuf,
+    source: PathBuf,
+    cache_dir: PathBuf,
+    home: PathBuf,
+    xdg_cache_home: PathBuf,
+    local_app_data: PathBuf,
+    bin: PathBuf,
+    marker: PathBuf,
+    source_before: Vec<(PathBuf, Vec<u8>)>,
+}
+
+impl IsolatedLegacyRunFixture {
+    fn new(prefix: &str, config: &str) -> Self {
+        let root = executable_fixture_root(prefix);
+        let _ = fs::remove_dir_all(&root);
+        let source = root.join("source");
+        let bin = root.join("bin");
+        fs::create_dir_all(&source).expect("source fixture root");
+        fs::create_dir_all(&bin).expect("fake runtime directory");
+        fs::write(source.join("config.toml"), config).expect("write config fixture");
+
+        let marker = root.join("runtime-marker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let docker = bin.join("docker");
+            fs::write(
+                &docker,
+                format!(
+                    "#!/bin/sh\nprintf runtime > '{}'\nprintf '%s\\n' '{}' >&2\nexit 97\n",
+                    marker.display(),
+                    RUNTIME_SENTINEL,
+                ),
+            )
+            .expect("fake docker");
+            let mut permissions = fs::metadata(&docker)
+                .expect("fake docker metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&docker, permissions).expect("fake docker executable");
+        }
+        #[cfg(windows)]
+        fs::write(
+            bin.join("docker.cmd"),
+            format!("@echo {RUNTIME_SENTINEL} 1>&2\r\n@exit /b 97\r\n"),
+        )
+        .expect("fake docker command");
+
+        let source_before = tree_bytes(&source);
+        Self {
+            cache_dir: root.join("cache"),
+            home: root.join("home"),
+            xdg_cache_home: root.join("xdg-cache"),
+            local_app_data: root.join("local-app-data"),
+            root,
+            source,
+            bin,
+            marker,
+            source_before,
+        }
+    }
+
+    fn run(&self) -> std::process::Output {
+        Command::new(binary())
+            .args(["run", "--config"])
+            .arg(self.source.join("config.toml"))
+            .args([
+                "--matrix-plan-profile",
+                "matrix-v2-legacy-v1",
+                "--repository",
+            ])
+            .arg(&self.source)
+            .args(["--cache-dir"])
+            .arg(&self.cache_dir)
+            .env("HOME", &self.home)
+            .env("XDG_CACHE_HOME", &self.xdg_cache_home)
+            .env("LOCALAPPDATA", &self.local_app_data)
+            .env("PATH", &self.bin)
+            .output()
+            .expect("legacy misuse run")
+    }
+
+    fn assert_rejected_before_shared_state(&self, output: std::process::Output, field: &str) {
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(field),
+            "stderr did not name {field}: {stderr}"
+        );
+        assert!(
+            !stderr.contains(RUNTIME_SENTINEL),
+            "runtime sentinel reached stderr: {stderr}"
+        );
+        assert!(!self.cache_dir.exists(), "run initialized the cache root");
+        assert!(
+            !self.cache_dir.join("run-journal-v1").exists(),
+            "run initialized the journal"
+        );
+        for admission_root in [
+            self.home
+                .join("Library")
+                .join("Caches")
+                .join("commit-ci-preflight-admission"),
+            self.xdg_cache_home.join("commit-ci-preflight-admission"),
+            self.local_app_data.join("commit-ci-preflight-admission"),
+        ] {
+            assert!(
+                !admission_root.exists(),
+                "run initialized admission state at {}",
+                admission_root.display()
+            );
+        }
+        assert!(!self.home.exists(), "run created HOME state");
+        assert!(!self.xdg_cache_home.exists(), "run created XDG cache state");
+        assert!(
+            !self.local_app_data.exists(),
+            "run created local app-data state"
+        );
+        assert!(
+            !self.source.join(".ccp/receipt.json").exists(),
+            "run wrote a receipt"
+        );
+        assert!(!self.marker.exists(), "run constructed the Docker runtime");
+        assert_eq!(
+            tree_bytes(&self.source),
+            self.source_before,
+            "run mutated the source tree"
+        );
+    }
+
+    fn cleanup(self) {
+        fs::remove_dir_all(self.root).expect("remove owned fixture root");
+    }
+}
+
+fn assert_legacy_run_rejected_before_shared_state(prefix: &str, config: &str, field: &str) {
+    let fixture = IsolatedLegacyRunFixture::new(prefix, config);
+    fixture.assert_rejected_before_shared_state(fixture.run(), field);
+    fixture.cleanup();
+}
+
 #[test]
 fn legacy_profile_uses_distinct_plan_cache_identity() {
     let legacy = build_matrix_plan(
@@ -223,128 +369,88 @@ timeout_seconds = 1
 }
 
 #[test]
-fn matrix_legacy_profile_rejects_v1_schemas_before_runtime_cache_or_admission() {
-    let root = executable_fixture_root("ccp-legacy-profile-v1-schema");
-    let _ = fs::remove_dir_all(&root);
-    fs::create_dir_all(&root).expect("owned fixture root");
-    let v1_fixture = fs::read_to_string(fixture()).expect("v1 fixture");
-
+fn legacy_profile_rejection_precedes_shared_state() {
+    let single_runtime = fs::read_to_string(fixture()).expect("v1 fixture");
     for schema_version in ["1.0", "1.1", "1.2", "1.3"] {
-        let config_path = root.join(format!("config-{schema_version}.toml"));
-        fs::write(
-            &config_path,
-            v1_fixture.replace(
-                "schema_version = \"1.0\"",
-                &format!("schema_version = \"{schema_version}\""),
-            ),
-        )
-        .expect("legacy-incompatible fixture");
-
-        for command_name in ["plan", "doctor", "dry-run", "run"] {
-            let cache_dir = root.join(format!("cache-{command_name}-{schema_version}"));
-            let mut command = Command::new(binary());
-            command
-                .arg(command_name)
-                .arg("--config")
-                .arg(&config_path)
-                .args(["--matrix-plan-profile", "matrix-v2-legacy-v1"]);
-            if matches!(command_name, "dry-run" | "run") {
-                command
-                    .arg("--repository")
-                    .arg(&root)
-                    .arg("--cache-dir")
-                    .arg(&cache_dir);
-            }
-            let output = command.output().expect("legacy profile command");
-
-            assert_eq!(
-                output.status.code(),
-                Some(2),
-                "{command_name} with schema {schema_version}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(output.stdout.is_empty());
-            assert!(
-                String::from_utf8_lossy(&output.stderr)
-                    .contains("matrix plan profile requires schema version 2.0")
-            );
-            assert!(
-                !cache_dir.exists(),
-                "{command_name} with schema {schema_version} initialized a cache"
-            );
-        }
+        let config = single_runtime.replace(
+            "schema_version = \"1.0\"",
+            &format!("schema_version = \"{schema_version}\""),
+        );
+        assert_legacy_run_rejected_before_shared_state(
+            &format!("ccp-legacy-profile-v1-{schema_version}"),
+            &config,
+            "matrix plan profile requires schema version 2.0",
+        );
     }
-    fs::remove_dir_all(root).expect("remove owned fixture root");
 }
 
-#[cfg(unix)]
 #[test]
-fn legacy_profile_rejection_precedes_shared_state() {
-    use std::os::unix::fs::PermissionsExt;
+fn legacy_profile_rejects_current_only_matrix_syntax_before_shared_state() {
+    let matrix = include_str!("fixtures/config-v2-legacy-compatible.toml");
+    let cases = [
+        (
+            "runtime-pull-policy",
+            matrix.replacen(
+                "network = false",
+                "network = false\npull_policy = \"never\"",
+                1,
+            ),
+            "pull_policy",
+        ),
+        (
+            "runtime-swap-mode",
+            matrix.replacen(
+                "network = false",
+                "network = false\nswap_mode = \"disabled\"",
+                1,
+            ),
+            "swap_mode",
+        ),
+        (
+            "environment-fixed",
+            matrix.replacen(
+                "allow = [\"SOURCE_DATE_EPOCH\"]",
+                "allow = [\"SOURCE_DATE_EPOCH\"]\nfixed = { FIXED = \"value\" }",
+                1,
+            ),
+            "fixed",
+        ),
+        (
+            "environment-runtime-internal",
+            matrix.replacen(
+                "allow = [\"SOURCE_DATE_EPOCH\"]",
+                "allow = [\"SOURCE_DATE_EPOCH\"]\nruntime_internal = []",
+                1,
+            ),
+            "runtime_internal",
+        ),
+        (
+            "environment-remote-secret-only",
+            matrix.replacen(
+                "allow = [\"SOURCE_DATE_EPOCH\"]",
+                "allow = [\"SOURCE_DATE_EPOCH\"]\nremote_secret_only = []",
+                1,
+            ),
+            "remote_secret_only",
+        ),
+        (
+            "check-artifact-contracts",
+            matrix.replacen(
+                "timeout_seconds = 30",
+                "timeout_seconds = 30\nartifact_contracts = []",
+                1,
+            ),
+            "artifact_contracts",
+        ),
+    ];
 
-    let root = executable_fixture_root("ccp-legacy-profile-pre-admission");
-    let _ = fs::remove_dir_all(&root);
-    let source = root.join("source");
-    let bin = root.join("bin");
-    fs::create_dir_all(&source).expect("source fixture root");
-    fs::create_dir_all(&bin).expect("fake runtime directory");
-
-    let config_path = source.join("single-runtime.toml");
-    fs::copy(fixture(), &config_path).expect("copy single-runtime fixture");
-    let source_before = tree_bytes(&source);
-    let cache_dir = root.join("cache");
-    let admission_home = root.join("admission-home");
-    let receipt = source.join(".ccp/receipt.json");
-    let marker = root.join("runtime-marker");
-    let docker = bin.join("docker");
-    fs::write(
-        &docker,
-        format!("#!/bin/sh\nprintf runtime > '{}'\n", marker.display()),
-    )
-    .expect("fake docker");
-    let mut permissions = fs::metadata(&docker)
-        .expect("fake docker metadata")
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&docker, permissions).expect("fake docker executable");
-
-    let output = Command::new(binary())
-        .args(["run", "--config"])
-        .arg(&config_path)
-        .args([
-            "--matrix-plan-profile",
-            "matrix-v2-legacy-v1",
-            "--repository",
-        ])
-        .arg(&source)
-        .args(["--cache-dir"])
-        .arg(&cache_dir)
-        .env("HOME", &admission_home)
-        .env("PATH", &bin)
-        .output()
-        .expect("legacy misuse run");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("matrix plan profile requires schema version 2.0")
-    );
-    assert!(!cache_dir.exists(), "run initialized the cache root");
-    assert!(
-        !cache_dir.join("run-journal-v1").exists(),
-        "run initialized the journal"
-    );
-    assert!(!admission_home.exists(), "run initialized admission state");
-    assert!(!receipt.exists(), "run wrote a receipt");
-    assert!(!marker.exists(), "run constructed the Docker runtime");
-    assert_eq!(
-        tree_bytes(&source),
-        source_before,
-        "run mutated the source tree"
-    );
-
-    fs::remove_dir_all(root).expect("remove owned fixture root");
+    for (name, config, field) in cases {
+        assert_legacy_run_rejected_before_shared_state(
+            &format!("ccp-legacy-profile-{name}"),
+            &config,
+            field,
+        );
+    }
 }
 
 #[test]
