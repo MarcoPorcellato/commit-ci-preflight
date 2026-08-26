@@ -43,14 +43,14 @@ crash/power-loss and release qualification remain separate gates.
 
 | Invariant | Focused evidence |
 |---|---|
-| Projection reproducibility | projection contract test |
-| Representability rejection | representability test |
-| Command parity | profile CLI contract test |
-| Cache separation | cache identity test |
-| Producer uniformity | producer suffix test |
-| Historical verifier acceptance | compatibility verifier test |
-| Mutation rejection | mutation-boundary test |
-| Zero pre-admission mutation | admission journal test |
+| Projection reproducibility | `tests/matrix_contract.rs::legacy_profile_projection_matches_historical_fixture` |
+| Representability rejection | `tests/matrix_contract.rs::legacy_profile_rejects_each_non_representable_current_field` |
+| Command parity | `tests/runtime_cli.rs::legacy_profile_uses_distinct_plan_cache_identity` |
+| Cache separation | `tests/runtime_cli.rs::legacy_profile_uses_distinct_plan_cache_identity` |
+| Producer uniformity | `tests/receipt_contract.rs::explicit_producer_version_is_sealed` |
+| Historical verifier acceptance | `tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations` (`#[ignore]`, `--ignored`, external verifier required) |
+| Mutation rejection | `tests/verification_contract.rs::current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations` |
+| Zero pre-admission mutation | `tests/runtime_cli.rs::remote_secret_only_run_fails_before_cache_or_admission_setup` |
 
 All entries are Matrix-only evidence for `matrix-v2-legacy-v1`; they do not infer
 policy or establish general trust. Rollback target is `current-v2`.

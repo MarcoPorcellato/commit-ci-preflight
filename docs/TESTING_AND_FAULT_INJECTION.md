@@ -149,8 +149,20 @@ trusted configuration validation.
    operator's real cache or repository state.
 ## Matrix V2 compatibility test matrix
 
-Focused tests cover projection reproducibility, representability rejection,
-command parity, cache namespace separation, producer uniformity, historical
-verifier acceptance, mutation rejection, and zero pre-admission mutation for
-the Matrix-only `matrix-v2-legacy-v1` profile. `verify` has no profile flag.
-Tests should not infer policy or general trust; rollback target is `current-v2`.
+Focused tests cover the Matrix-only `matrix-v2-legacy-v1` profile: projection
+`tests/matrix_contract.rs::legacy_profile_projection_matches_historical_fixture`,
+representability `tests/matrix_contract.rs::legacy_profile_rejects_each_non_representable_current_field`,
+command parity and cache identity
+`tests/runtime_cli.rs::legacy_profile_uses_distinct_plan_cache_identity`,
+producer uniformity `tests/receipt_contract.rs::explicit_producer_version_is_sealed`,
+mutation rejection
+`tests/verification_contract.rs::current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`,
+and zero pre-admission mutation
+`tests/runtime_cli.rs::remote_secret_only_run_fails_before_cache_or_admission_setup`.
+The historical verifier is
+`tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`,
+marked `#[ignore]` and run with `--ignored` only when
+`CCP_HISTORICAL_VERIFIER_044697` points to the provenance-pinned SHA
+`044697dee9a0d678d30a4847d62ddf9b4970505b`; the ordinary suite does not prove
+historical acceptance. `verify` has no profile flag. Tests do not infer policy
+or general trust; rollback target is `current-v2`.

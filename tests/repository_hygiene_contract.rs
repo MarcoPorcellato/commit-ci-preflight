@@ -67,6 +67,39 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
             assert!(text.contains(snippet), "{path} missing {snippet}");
         }
     }
+    for (path, snippets) in [
+        (
+            "docs/ADOPTION_GUIDE.md",
+            &["Matrix-only", "policy inference", "cache namespaces"] as &[&str],
+        ),
+        (
+            "docs/CACHE_AND_WORKSPACE.md",
+            &["Matrix-only", "separate legacy cache", "policy inference"],
+        ),
+        (
+            "docs/TROUBLESHOOTING.md",
+            &["Matrix-only", "policy migration", "policy inference"],
+        ),
+        (
+            "docs/INVARIANT_EVIDENCE_MATRIX.md",
+            &[
+                "tests/matrix_contract.rs::legacy_profile_projection_matches_historical_fixture",
+                "current-v2",
+            ],
+        ),
+        (
+            "docs/TESTING_AND_FAULT_INJECTION.md",
+            &[
+                "CCP_HISTORICAL_VERIFIER_044697",
+                "ordinary suite does not prove",
+            ],
+        ),
+    ] {
+        let text = fs::read_to_string(root.join(path)).expect("read boundary docs");
+        for snippet in snippets {
+            assert!(text.contains(snippet), "{path} missing {snippet}");
+        }
+    }
     let mut sources = Vec::new();
     collect_rust_sources(&root.join("src"), &mut sources);
     for path in sources {

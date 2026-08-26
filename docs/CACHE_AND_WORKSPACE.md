@@ -206,6 +206,8 @@ Pinning does not initialize, repair, delete, quarantine, publish, or attest
 cache contents.
 ## Compatibility cache boundary
 
+This Matrix-only boundary does not perform policy inference.
+
 The Matrix-only `matrix-v2-legacy-v1` profile has a separate legacy cache
 namespace from current-v2. Preserve command parity for `plan`, `doctor`,
 `dry-run`, and `run`; `verify` has no profile flag. Cache identity and the

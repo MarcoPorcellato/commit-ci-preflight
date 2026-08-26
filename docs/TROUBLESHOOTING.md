@@ -230,6 +230,8 @@ personal paths out of public issues. Security findings belong in the private
 channel described by [SECURITY.md](../SECURITY.md).
 ## Matrix V2 legacy troubleshooting
 
+Troubleshooting is Matrix-only and does not perform policy inference.
+
 For Matrix-only compatibility, confirm the exact `matrix-v2-legacy-v1` profile
 and the command parity sequence (`plan`, `doctor`, `dry-run`, `run`). Legacy and
 current cache namespaces must not be mixed. `verify` has no profile flag. Before
