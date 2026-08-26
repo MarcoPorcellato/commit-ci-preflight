@@ -11,6 +11,9 @@ OrbStack/Docker workloads or quarantining another activity's state.
 The local shell is not the ownership boundary. The CCP admission root and its
 OS locks are host-wide. A process list from one activity cannot prove that the
 host-wide slot is idle.
+A child exit is not a slot-release handoff. A terminal handoff requires the
+explicit terminal result plus fresh `admission status --json`, `docker ps -q`,
+and `resource status --json` results before another activity proceeds.
 
 ## What is coordinated
 

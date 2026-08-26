@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod terminal;
+use terminal::{TerminalFailure, finalize_owned_terminal};
+
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
@@ -551,7 +554,7 @@ fn print_benchmark(
         .map_err(CliError::Admission)?;
     let result = resource_pre_start(supervisor.clone(), &cancellation)
         .and_then(|_| run_benchmark(commit, runtime_probe.as_ref()).map_err(CliError::Benchmark));
-    let envelope = release_admission(guard, result)?;
+    let envelope = finalize_benchmark_terminal(result, || guard.release())?;
     if let Some(path) = output {
         write_new_receipt(path, &envelope).map_err(CliError::Benchmark)?;
     }
@@ -1075,25 +1078,33 @@ fn print_run(
     };
     lifecycle.transition_state(RunJournalStateV1::Admitted, None)?;
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
-        return match guard.release() {
-            Ok(()) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
-                Err(error)
-            }
-            Err(release_error) => {
-                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
-                Err(CliError::Admission(release_error))
-            }
-        };
+        return finalize_run_terminal(
+            Err::<(), _>(error),
+            std::convert::identity,
+            || guard.release(),
+            |event| match event {
+                RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
+                RunTerminalJournalEvent::ReleaseFailure => {
+                    lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+                }
+            },
+        );
     }
     let watchdog = if ResourcePlatform::current() == ResourcePlatform::MacOs {
         let current_dir = match std::env::current_dir() {
             Ok(path) => path,
             Err(error) => {
-                return match guard.release() {
-                    Ok(()) => Err(CliError::internal(error)),
-                    Err(release_error) => Err(CliError::Admission(release_error)),
-                };
+                return finalize_run_terminal(
+                    Err::<(), _>(CliError::internal(error)),
+                    std::convert::identity,
+                    || guard.release(),
+                    |event| match event {
+                        RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
+                        RunTerminalJournalEvent::ReleaseFailure => {
+                            lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+                        }
+                    },
+                );
             }
         };
         Some(ResourceWatchdog::start(
@@ -1124,22 +1135,20 @@ fn print_run(
         &mut lifecycle,
         runtime_preflight,
     );
-    let outcome = run_result.map_err(CliError::Run);
-    completion_barrier.ensure_joined();
-    let outcome = reconcile_watchdog_outcome(outcome, &mut completion_barrier);
-    let outcome = match guard.release() {
-        Ok(()) => match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
-                return Err(error);
+    let outcome = finalize_run_terminal(
+        run_result.map_err(CliError::Run),
+        |outcome| {
+            completion_barrier.ensure_joined();
+            reconcile_watchdog_outcome(outcome, &mut completion_barrier)
+        },
+        || guard.release(),
+        |event| match event {
+            RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
+            RunTerminalJournalEvent::ReleaseFailure => {
+                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
             }
         },
-        Err(error) => {
-            lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
-            return Err(CliError::Admission(error));
-        }
-    };
+    )?;
     if let Err(error) = source_snapshot.cleanup() {
         lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
         return Err(CliError::Run(RunError::SourceSnapshot(error)));
@@ -1226,19 +1235,35 @@ fn print_matrix_run(
     };
     lifecycle.transition_state(RunJournalStateV1::Admitted, None)?;
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
-        return match guard.release() {
-            Ok(()) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
-                Err(error)
-            }
-            Err(release_error) => {
-                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
-                Err(CliError::Admission(release_error))
-            }
-        };
+        return finalize_run_terminal(
+            Err::<(), _>(error),
+            std::convert::identity,
+            || guard.release(),
+            |event| match event {
+                RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
+                RunTerminalJournalEvent::ReleaseFailure => {
+                    lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+                }
+            },
+        );
     }
     let watchdog = if ResourcePlatform::current() == ResourcePlatform::MacOs {
-        let current_dir = std::env::current_dir().map_err(CliError::internal)?;
+        let current_dir = match std::env::current_dir() {
+            Ok(path) => path,
+            Err(error) => {
+                return finalize_run_terminal(
+                    Err::<(), _>(CliError::internal(error)),
+                    std::convert::identity,
+                    || guard.release(),
+                    |event| match event {
+                        RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
+                        RunTerminalJournalEvent::ReleaseFailure => {
+                            lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+                        }
+                    },
+                );
+            }
+        };
         Some(ResourceWatchdog::start(
             ResourceProbe::new(SupervisorResourceRunner::new(
                 supervisor.clone(),
@@ -1270,25 +1295,24 @@ fn print_matrix_run(
         &mut completion_barrier,
     )
     .map_err(CliError::Matrix);
-    completion_barrier.ensure_joined();
-    let result = if let Some(error) = completion_barrier.take_join_error() {
-        Err(CliError::Resource(ResourceGuardError::Watchdog(error)))
-    } else {
-        result
-    };
-    let outcome = match guard.release() {
-        Ok(()) => match result {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                lifecycle.fail(cli_failure_kind(&error))?;
-                return Err(error);
+    let outcome = finalize_run_terminal(
+        result,
+        |result| {
+            completion_barrier.ensure_joined();
+            if let Some(error) = completion_barrier.take_join_error() {
+                Err(CliError::Resource(ResourceGuardError::Watchdog(error)))
+            } else {
+                result
             }
         },
-        Err(error) => {
-            lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
-            return Err(CliError::Admission(error));
-        }
-    };
+        || guard.release(),
+        |event| match event {
+            RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
+            RunTerminalJournalEvent::ReleaseFailure => {
+                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+            }
+        },
+    )?;
     lifecycle
         .transition(RunLifecyclePhase::Finalizing)
         .map_err(CliError::Run)?;
@@ -1801,11 +1825,41 @@ fn resource_pre_start(
     }
 }
 
-fn release_admission<T>(guard: AdmissionGuard, result: Result<T, CliError>) -> Result<T, CliError> {
-    let release = guard.release().map_err(CliError::Admission);
-    match release {
-        Ok(()) => result,
-        Err(error) => Err(error),
+fn finalize_benchmark_terminal<T>(
+    primary: Result<T, CliError>,
+    release: impl FnOnce() -> Result<(), AdmissionError>,
+) -> Result<T, CliError> {
+    match finalize_owned_terminal(primary, std::convert::identity, release) {
+        Ok(value) => Ok(value),
+        Err(TerminalFailure::Primary(error)) => Err(error),
+        Err(TerminalFailure::Release(error)) => Err(CliError::Admission(error)),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunTerminalJournalEvent {
+    PrimaryFailure(RunFailureKindV1),
+    ReleaseFailure,
+}
+
+fn finalize_run_terminal<T>(
+    primary: Result<T, CliError>,
+    complete_owned: impl FnOnce(Result<T, CliError>) -> Result<T, CliError>,
+    release: impl FnOnce() -> Result<(), AdmissionError>,
+    mut journal: impl FnMut(RunTerminalJournalEvent) -> Result<(), CliError>,
+) -> Result<T, CliError> {
+    match finalize_owned_terminal(primary, complete_owned, release) {
+        Ok(value) => Ok(value),
+        Err(TerminalFailure::Primary(error)) => {
+            journal(RunTerminalJournalEvent::PrimaryFailure(cli_failure_kind(
+                &error,
+            )))?;
+            Err(error)
+        }
+        Err(TerminalFailure::Release(error)) => {
+            journal(RunTerminalJournalEvent::ReleaseFailure)?;
+            Err(CliError::Admission(error))
+        }
     }
 }
 
@@ -2049,24 +2103,27 @@ fn finalize_guard_exec_result(
     trip: Option<WatchdogTripReason>,
     release: impl FnOnce() -> Result<(), GuardExecError>,
 ) -> Result<ProcessResult, GuardExecError> {
-    let result = if let Some(error) = join_error {
-        Err(GuardExecError::Resource(ResourceGuardError::Watchdog(
-            error,
-        )))
-    } else if let Some(reason) = trip {
-        Err(GuardExecError::Resource(
-            ResourceGuardError::WatchdogTripped(reason),
-        ))
-    } else if cancellation.reason()
-        == Some(commit_ci_preflight::process::CancellationReason::ResourcePressure)
-    {
-        Err(GuardExecError::ResourcePressure)
-    } else {
-        result
-    };
-    match release() {
-        Ok(()) => result,
-        Err(error) => Err(error),
+    match finalize_owned_terminal(
+        result,
+        |result| {
+            if let Some(error) = join_error {
+                Err(GuardExecError::Resource(ResourceGuardError::Watchdog(
+                    error,
+                )))
+            } else if let Some(reason) = trip {
+                Err(GuardExecError::Resource(
+                    ResourceGuardError::WatchdogTripped(reason),
+                ))
+            } else if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
+                Err(GuardExecError::ResourcePressure)
+            } else {
+                result
+            }
+        },
+        release,
+    ) {
+        Ok(value) => Ok(value),
+        Err(TerminalFailure::Primary(error) | TerminalFailure::Release(error)) => Err(error),
     }
 }
 
@@ -2552,11 +2609,13 @@ impl std::error::Error for CliMessageError {}
 mod tests {
     use super::{
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
-        ResourceExecutionModeArg, ResourceExecutorArg, WatchdogCompletionBarrier,
-        detect_resource_executor, finalize_guard_exec_result, new_journal_id,
+        ResourceExecutionModeArg, ResourceExecutorArg, RunTerminalJournalEvent,
+        WatchdogCompletionBarrier, detect_resource_executor, finalize_benchmark_terminal,
+        finalize_guard_exec_result, finalize_run_terminal, new_journal_id,
         reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
+    use commit_ci_preflight::admission::AdmissionError;
     use commit_ci_preflight::cache::{
         CacheError, CacheKey, CacheRootSource, ManagedCache, ResolvedCacheRoot,
     };
@@ -2565,10 +2624,12 @@ mod tests {
     use commit_ci_preflight::process::{
         CleanupStatus, ExitOutcome, ProcessResult, ProcessTermination, RunIdentity,
     };
+    use commit_ci_preflight::resource::ResourceGuardError;
     use commit_ci_preflight::resource::{
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
     use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
+    use commit_ci_preflight::run_journal::{RunFailureKindV1, RunJournalError};
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -3095,6 +3156,215 @@ timeout_seconds = 60
         );
         assert!(matches!(resource, Err(GuardExecError::ResourcePressure)));
         assert_eq!(release_count.load(Ordering::SeqCst), 3);
+
+        let release_failure = finalize_guard_exec_result(
+            Err(GuardExecError::InternalFailure),
+            &cancellation,
+            None,
+            None,
+            || {
+                release_count.fetch_add(1, Ordering::SeqCst);
+                Err(GuardExecError::Admission(AdmissionError::Clock))
+            },
+        );
+        assert!(matches!(
+            release_failure,
+            Err(GuardExecError::Admission(AdmissionError::Clock))
+        ));
+        assert_eq!(release_count.load(Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn benchmark_terminal_preserves_primary_and_release_precedence() {
+        let releases = AtomicUsize::new(0);
+        let primary = finalize_benchmark_terminal(
+            Err::<(), _>(CliError::Benchmark(
+                commit_ci_preflight::benchmark::BenchmarkError::NoSamples,
+            )),
+            || {
+                releases.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        assert!(matches!(primary, Err(CliError::Benchmark(_))));
+
+        let release = finalize_benchmark_terminal(Ok(()), || {
+            releases.fetch_add(1, Ordering::SeqCst);
+            Err(AdmissionError::Clock)
+        });
+        assert!(matches!(
+            release,
+            Err(CliError::Admission(AdmissionError::Clock))
+        ));
+        assert_eq!(releases.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn run_terminal_orders_watchdog_release_and_primary_journal() {
+        use std::cell::RefCell;
+        let events = RefCell::new(Vec::new());
+        let result = finalize_run_terminal(
+            Err::<(), _>(CliError::Resource(ResourceGuardError::PreStartDenied)),
+            |primary| {
+                events.borrow_mut().push("complete");
+                primary
+            },
+            || {
+                events.borrow_mut().push("release");
+                Ok(())
+            },
+            |event| {
+                events.borrow_mut().push(match event {
+                    RunTerminalJournalEvent::PrimaryFailure(RunFailureKindV1::ResourcePressure) => {
+                        "journal-primary"
+                    }
+                    _ => "unexpected-journal",
+                });
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(CliError::Resource(_))));
+        assert_eq!(
+            &*events.borrow(),
+            &["complete", "release", "journal-primary"]
+        );
+    }
+
+    #[test]
+    fn run_terminal_release_failure_journals_cleanup_pending() {
+        use std::cell::RefCell;
+        let events = RefCell::new(Vec::new());
+        let result = finalize_run_terminal(
+            Ok(()),
+            |primary| primary,
+            || Err(AdmissionError::Clock),
+            |event| {
+                events.borrow_mut().push(event);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(CliError::Admission(AdmissionError::Clock))
+        ));
+        assert_eq!(
+            &*events.borrow(),
+            &[RunTerminalJournalEvent::ReleaseFailure]
+        );
+    }
+
+    #[test]
+    fn run_terminal_journal_failure_overrides_release_failure() {
+        let result = finalize_run_terminal(
+            Ok(()),
+            |primary| primary,
+            || Err(AdmissionError::Clock),
+            |_| Err(CliError::RunJournal(RunJournalError::InvalidTransition)),
+        );
+        assert!(matches!(
+            result,
+            Err(CliError::RunJournal(RunJournalError::InvalidTransition))
+        ));
+    }
+
+    #[test]
+    fn all_heavy_family_adapters_release_once_and_fail_closed() {
+        let releases = AtomicUsize::new(0);
+        let benchmark = finalize_benchmark_terminal(Ok(()), || {
+            releases.fetch_add(1, Ordering::SeqCst);
+            Err(AdmissionError::Clock)
+        });
+        assert!(matches!(
+            benchmark,
+            Err(CliError::Admission(AdmissionError::Clock))
+        ));
+        let run = finalize_run_terminal(
+            Ok(()),
+            std::convert::identity,
+            || {
+                releases.fetch_add(1, Ordering::SeqCst);
+                Err(AdmissionError::Clock)
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(
+            run,
+            Err(CliError::Admission(AdmissionError::Clock))
+        ));
+        let cancellation = CancellationToken::default();
+        let guard = finalize_guard_exec_result(
+            Ok(completed_process_result()),
+            &cancellation,
+            None,
+            None,
+            || {
+                releases.fetch_add(1, Ordering::SeqCst);
+                Err(GuardExecError::Admission(AdmissionError::Clock))
+            },
+        );
+        assert!(matches!(
+            guard,
+            Err(GuardExecError::Admission(AdmissionError::Clock))
+        ));
+        assert_eq!(releases.load(Ordering::SeqCst), 3);
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum OpaqueTerminalOutcome {
+        TimedOut,
+        UserCancelled,
+        ResourcePressure,
+    }
+
+    #[test]
+    fn benchmark_and_run_preserve_opaque_terminal_outcomes() {
+        for expected in [
+            OpaqueTerminalOutcome::TimedOut,
+            OpaqueTerminalOutcome::UserCancelled,
+            OpaqueTerminalOutcome::ResourcePressure,
+        ] {
+            assert_eq!(
+                finalize_benchmark_terminal(Ok(expected), || Ok(()))
+                    .expect("benchmark terminal outcome"),
+                expected
+            );
+            assert_eq!(
+                finalize_run_terminal(Ok(expected), std::convert::identity, || Ok(()), |_| Ok(()))
+                    .expect("run terminal outcome"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn guard_cache_pin_remains_live_through_terminal_release() {
+        let (cache, source, base) = guard_cache_fixture("terminal-release");
+        let cancellation = CancellationToken::default();
+
+        let result =
+            super::with_guard_cache_pins(Some(&cache), std::slice::from_ref(&source), || {
+                finalize_guard_exec_result(
+                    Ok(completed_process_result()),
+                    &cancellation,
+                    None,
+                    None,
+                    || {
+                        assert!(matches!(
+                            cache.pin_completed_sources(std::slice::from_ref(&source)),
+                            Err(CacheError::LockBusy(_))
+                        ));
+                        Ok(())
+                    },
+                )
+            });
+
+        assert!(result.is_ok());
+        assert!(
+            cache
+                .pin_completed_sources(std::slice::from_ref(&source))
+                .is_ok()
+        );
+        cleanup_guard_cache_fixture(&base);
     }
 
     #[test]

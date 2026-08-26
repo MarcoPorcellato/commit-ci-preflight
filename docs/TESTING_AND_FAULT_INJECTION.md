@@ -86,6 +86,13 @@ journal avoids the limitation by publishing immutable create-new events.
 Native crash/power-loss and Windows-host qualification remain separate gates.
 Deterministic source tests do not claim either result.
 
+Deterministic fake-closure tests prove terminal ordering and precedence: the
+completion step precedes exactly one release, and a release failure overrides
+the primary result. Process-tree and Docker lifecycle tests prove their own
+containment boundaries only; they do not prove a real admission root, host
+cleanup, a published receipt, or another platform. Process lists do not prove
+release.
+
 ## Managed-cache pin contract
 
 The managed-cache pin tests are deterministic contract tests over an owned
