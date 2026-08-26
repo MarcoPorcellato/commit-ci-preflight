@@ -114,7 +114,10 @@ impl IsolatedLegacyRunFixture {
         #[cfg(windows)]
         fs::write(
             bin.join("docker.cmd"),
-            format!("@echo {RUNTIME_SENTINEL} 1>&2\r\n@exit /b 97\r\n"),
+            format!(
+                "@echo runtime> \"{}\"\r\n@echo {RUNTIME_SENTINEL} 1>&2\r\n@exit /b 97\r\n",
+                marker.display()
+            ),
         )
         .expect("fake docker command");
 
