@@ -27,7 +27,6 @@
 
 - Create `src/terminal.rs`: private family-neutral `TerminalFailure` and `finalize_owned_terminal`, plus its deterministic unit tests.
 - Modify `src/main.rs`: declare the private module; add thin benchmark and run adapters; route guard, historical run, and matrix run through the shared primitive; add adapter and cache-pin lifetime tests.
-- Create `tests/terminal_release_contract.rs`: public documentation contract for terminal ordering, ownership limits, benchmark exception, and fail-closed release evidence.
 - Modify `docs/LOCAL_RUN.md`: operator-facing terminal order and benchmark exception.
 - Modify `docs/COORDINATION_RUNBOOK.md`: exact criteria for claiming slot release and cleanup uncertainty.
 - Modify `docs/ARCHITECTURE.md`: shared finalization architecture and ownership boundary.
@@ -897,10 +896,9 @@ their unit tests only.
 
 ---
 
-### Task 4: Operator documentation and contract test
+### Task 4: Operator documentation
 
 **Files:**
-- Create: `tests/terminal_release_contract.rs`
 - Modify: `docs/LOCAL_RUN.md:84-117`
 - Modify: `docs/COORDINATION_RUNBOOK.md:15-38,162-178`
 - Modify: `docs/ARCHITECTURE.md:65-95`
@@ -912,89 +910,7 @@ their unit tests only.
 - Produces: a discoverable operator contract that cannot silently claim a slot
   release from child exit, `ps`, or an uncertain release result.
 
-- [ ] **Step 1: Add the failing documentation contract**
-
-Create `tests/terminal_release_contract.rs`:
-
-```rust
-use std::fs;
-use std::path::Path;
-
-#[test]
-fn terminal_owned_resource_release_contract_is_explicit() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let docs = [
-        "docs/LOCAL_RUN.md",
-        "docs/COORDINATION_RUNBOOK.md",
-        "docs/ARCHITECTURE.md",
-        "docs/TESTING_AND_FAULT_INJECTION.md",
-    ]
-    .map(|path| {
-        (
-            path,
-            fs::read_to_string(root.join(path)).expect("read terminal contract doc"),
-        )
-    });
-    let combined = docs
-        .iter()
-        .map(|(_, text)| text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    for required in [
-        "watchdog joins before admission release",
-        "admission release is attempted exactly once",
-        "release failure overrides the primary result",
-        "benchmark has no mid-workload watchdog",
-        "child exit is not a slot-release handoff",
-        "process lists do not prove release",
-    ] {
-        assert!(combined.contains(required), "missing {required}");
-    }
-
-    for forbidden in [
-        "CCP manages macOS swap",
-        "CCP owns unrelated processes",
-        "guard exec emits a receipt",
-        "a missing process proves the lease is orphaned",
-    ] {
-        assert!(!combined.contains(forbidden), "forbidden claim: {forbidden}");
-    }
-
-    for (path, required) in [
-        ("docs/LOCAL_RUN.md", "admission release is attempted exactly once"),
-        (
-            "docs/COORDINATION_RUNBOOK.md",
-            "child exit is not a slot-release handoff",
-        ),
-        ("docs/ARCHITECTURE.md", "release failure overrides the primary result"),
-        (
-            "docs/TESTING_AND_FAULT_INJECTION.md",
-            "process lists do not prove release",
-        ),
-    ] {
-        let text = docs
-            .iter()
-            .find(|(candidate, _)| *candidate == path)
-            .map(|(_, text)| text)
-            .expect("named terminal contract document");
-        assert!(text.contains(required), "{path} missing {required}");
-    }
-}
-```
-
-- [ ] **Step 2: Run the documentation contract and confirm RED**
-
-Run:
-
-```bash
-rtk cargo test --offline --locked --test terminal_release_contract
-```
-
-Expected: FAIL on the first missing exact terminal-contract phrase. A compile,
-toolchain, or filesystem failure is inconclusive and does not count as RED.
-
-- [ ] **Step 3: Add bounded, consistent documentation**
+- [ ] **Step 1: Add bounded, consistent documentation**
 
 Add the following exact claims once in the named canonical documents, with
 surrounding prose that preserves existing command-family distinctions:
@@ -1016,31 +932,38 @@ surrounding prose that preserves existing command-family distinctions:
 Do not claim that unit tests prove a real admission root, Docker cleanup, a
 published receipt, or another platform.
 
-- [ ] **Step 4: Run documentation GREEN and related contracts**
+- [ ] **Step 2: Review the semantic documentation diff**
+
+Read the complete four-document diff and verify each claim against the exact
+implemented call-site ordering from Tasks 1-3. Confirm that the prose
+distinguishes facts, operator requirements, and non-claims; does not describe a
+unit test as host qualification; and does not broaden CCP ownership to swap,
+unrelated processes, foreign containers, or undeclared paths.
+
+- [ ] **Step 3: Run related existing contracts**
 
 Run:
 
 ```bash
-rtk cargo test --offline --locked --test terminal_release_contract
 rtk cargo test --offline --locked --test cache_pin_contract
 rtk cargo test --offline --locked --test repository_hygiene_contract
 rtk cargo test --offline --locked --test release_hardening_contract
 rtk git diff --check
 ```
 
-Expected: all four contract suites pass with no broken ownership or public
+Expected: all three existing contract suites pass with no broken ownership or public
 evidence claims.
 
-- [ ] **Step 5: Commit documentation and its contract**
+- [ ] **Step 4: Commit documentation**
 
 Run:
 
 ```bash
-rtk git add tests/terminal_release_contract.rs docs/LOCAL_RUN.md docs/COORDINATION_RUNBOOK.md docs/ARCHITECTURE.md docs/TESTING_AND_FAULT_INJECTION.md
+rtk git add docs/LOCAL_RUN.md docs/COORDINATION_RUNBOOK.md docs/ARCHITECTURE.md docs/TESTING_AND_FAULT_INJECTION.md
 rtk git commit -m "docs: define terminal resource release evidence"
 ```
 
-Expected: one local documentation/test commit.
+Expected: one local documentation commit.
 
 ---
 
@@ -1100,7 +1023,6 @@ rtk cargo test --offline --locked --test process_supervisor
 rtk cargo test --offline --locked --test recover_cli
 rtk cargo test --offline --locked --test runtime_cli
 rtk cargo test --offline --locked --test matrix_contract
-rtk cargo test --offline --locked --test terminal_release_contract
 rtk cargo test --offline --locked --test cache_pin_contract
 ```
 
