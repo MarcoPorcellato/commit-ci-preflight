@@ -19,6 +19,7 @@ const POLICY: &str = "tests/fixtures/policy-v1.toml";
 const RECEIPT_V2: &str = "tests/fixtures/receipt-v2-pass.json";
 const TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-trusted-plan.toml";
 const INVALID_TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-missing-config.toml";
+const LEGACY_MATRIX_POLICY: &str = "tests/fixtures/policy-v2-legacy-compatible.toml";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
 
@@ -155,4 +156,28 @@ fn missing_receipt_does_not_bypass_trusted_policy_configuration_validation() {
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read trusted configuration"));
+}
+
+#[test]
+fn verify_cli_accepts_the_legacy_matrix_policy_before_receipt_evaluation() {
+    let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "verify",
+            "--receipt",
+            "tests/fixtures/does-not-exist.json",
+            "--policy",
+            LEGACY_MATRIX_POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ])
+        .output()
+        .expect("legacy Matrix policy CLI");
+    assert_eq!(output.status.code(), Some(3));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report JSON");
+    assert_eq!(report["integrity_status"], "FAIL");
+    assert_eq!(report["policy_status"], "NOT_RUN");
+    assert_eq!(report["findings"][0]["code"], "receipt.read_failed");
 }

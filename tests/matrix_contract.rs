@@ -31,6 +31,7 @@ const DIGEST: &str = "sha256:ccccccccccccccccccccccccccccccccccccccccccccccccccc
 const CONFIG_SCHEMA: &str = include_str!("../schema/config-v2.schema.json");
 const RECEIPT_SCHEMA: &str = include_str!("../schema/receipt-v2.schema.json");
 const POLICY_SCHEMA: &str = include_str!("../schema/policy-v2.schema.json");
+const LEGACY_COMPATIBLE_POLICY: &str = include_str!("fixtures/policy-v2-legacy-compatible.toml");
 
 fn runtime_receipt(id: &str, image: &str, check_id: &str) -> ReceiptEnvelopeV1 {
     let digest = image.rsplit_once('@').expect("pinned image").1.to_owned();
@@ -304,6 +305,24 @@ fn legacy_profile_reproduces_historical_plan() {
         envelope.runtime_configuration_digest("unknown"),
         Err(MatrixError::UnknownRuntime(id)) if id == "unknown"
     ));
+}
+
+#[test]
+fn legacy_compatible_policy_fixture_binds_historical_profile_digests() {
+    let provenance: Value = serde_json::from_str(include_str!(
+        "fixtures/matrix-v2-legacy-plan-044697.provenance.json"
+    ))
+    .expect("provenance JSON");
+    let policy = MatrixVerificationPolicyV2::parse(LEGACY_COMPATIBLE_POLICY).expect("policy");
+
+    assert_eq!(policy.project, "example/legacy-matrix");
+    assert_eq!(policy.configuration_digest, provenance["outer_digest"]);
+    for runtime in policy.runtimes {
+        assert_eq!(
+            runtime.configuration_digest,
+            provenance["runtime_digests"][&runtime.id]
+        );
+    }
 }
 
 #[test]

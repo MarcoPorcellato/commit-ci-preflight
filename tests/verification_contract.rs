@@ -12,9 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use commit_ci_preflight::receipt::{EvidenceStatus, ReceiptEnvelopeV1, ReceiptEnvelopeV2};
+use commit_ci_preflight::matrix::{
+    MatrixReceiptEnvelopeV2, MatrixReceiptV2, MatrixRuntimeReceiptV2, MatrixVerificationPolicyV2,
+    verify_matrix_receipt_document,
+};
+use commit_ci_preflight::receipt::{
+    CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, ReceiptEnvelopeV1,
+    ReceiptEnvelopeV2, ReceiptV1, RepositoryEvidence, RunEvidence,
+};
 use commit_ci_preflight::verify::{
     PolicyError, VerificationDecision, VerificationError, VerificationPolicyDocument,
     VerificationPolicyV1, VerificationPolicyV1_1, VerificationStatus,
@@ -36,6 +47,21 @@ const VERIFY_SOURCE: &str = include_str!("../src/verify.rs");
 const TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-trusted-plan.toml";
 const ALTERED_TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-trusted-plan-altered.toml";
 const ROOT_POLICY: &str = ".commit-ci-policy.toml";
+const LEGACY_MATRIX_POLICY: &str = include_str!("fixtures/policy-v2-legacy-compatible.toml");
+const LEGACY_MATRIX_PROVENANCE: &str =
+    include_str!("fixtures/matrix-v2-legacy-plan-044697.provenance.json");
+const LEGACY_MATRIX_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+const LEGACY_MATRIX_EVALUATED_AT: &str = "2026-08-16T10:01:00Z";
+const LEGACY_MATRIX_PRODUCER: &str = "0.1.0+matrix-v2-legacy-v1";
+const LEGACY_MATRIX_OUTER_DIGEST: &str =
+    "sha256:3248c763ccc37fecac1e29727007232d274f561e0943fc2e5a1996a38526fe13";
+const LEGACY_MATRIX_PY311_DIGEST: &str =
+    "sha256:755f77f6815b1ed7b4415b3312c48a6528e2d752270775916efa6c10f1ffe192";
+const LEGACY_MATRIX_PY312_DIGEST: &str =
+    "sha256:be2eb7d200946e9f1dc84cebd8c0cca8739e424163f91c86063bbe4caed936f9";
+const LEGACY_MATRIX_PY311_IMAGE: &str = "example.invalid/python311@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const LEGACY_MATRIX_PY312_IMAGE: &str = "example.invalid/python312@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn policy() -> VerificationPolicyV1 {
     VerificationPolicyV1::parse(POLICY).expect("policy")
@@ -77,6 +103,202 @@ fn collect_leaf_pointers(value: &serde_json::Value, path: &str, pointers: &mut V
         }
         _ => pointers.push(path.to_owned()),
     }
+}
+
+fn legacy_matrix_policy() -> MatrixVerificationPolicyV2 {
+    MatrixVerificationPolicyV2::parse(LEGACY_MATRIX_POLICY).expect("legacy Matrix policy")
+}
+
+fn legacy_runtime_receipt(
+    runtime_id: &str,
+    image_reference: &str,
+    configuration_digest: &str,
+    check_id: &str,
+) -> ReceiptEnvelopeV1 {
+    let image_digest = image_reference
+        .rsplit_once('@')
+        .expect("pinned image")
+        .1
+        .to_owned();
+    ReceiptEnvelopeV1::seal(ReceiptV1 {
+        schema_version: "1.0".to_owned(),
+        producer: ProducerEvidence {
+            name: "commit-ci-preflight".to_owned(),
+            version: LEGACY_MATRIX_PRODUCER.to_owned(),
+        },
+        repository: RepositoryEvidence {
+            repository: "example/legacy-matrix".to_owned(),
+            commit_sha: LEGACY_MATRIX_COMMIT.to_owned(),
+            dirty: false,
+        },
+        run: RunEvidence {
+            run_id: format!("legacy-{runtime_id}"),
+            generation: 1,
+            started_at_utc: "2026-08-16T10:00:00Z".to_owned(),
+            finished_at_utc: "2026-08-16T10:00:01Z".to_owned(),
+        },
+        platform: PlatformEvidence {
+            host_os: "macos".to_owned(),
+            host_arch: "aarch64".to_owned(),
+            runtime_kind: "docker_compatible".to_owned(),
+            runtime_version: "test".to_owned(),
+            image_reference: image_reference.to_owned(),
+            image_digest,
+        },
+        configuration_digest: configuration_digest.to_owned(),
+        checks: vec![CheckEvidence {
+            id: check_id.to_owned(),
+            required: true,
+            argv: vec!["python".to_owned(), "-V".to_owned()],
+            working_directory: ".".to_owned(),
+            status: EvidenceStatus::Pass,
+            exit_code: Some(0),
+            duration_ms: 1,
+            timed_out: false,
+            cancelled: false,
+            output_digest: Some(configuration_digest.to_owned()),
+            incomplete_reason: None,
+        }],
+        overall_status: EvidenceStatus::Pass,
+        incomplete_reason: None,
+        redaction_policy_version: "1.0".to_owned(),
+    })
+    .expect("seal legacy runtime receipt")
+}
+
+fn legacy_matrix_receipt() -> MatrixReceiptEnvelopeV2 {
+    MatrixReceiptEnvelopeV2::seal(MatrixReceiptV2 {
+        schema_version: "2.0".to_owned(),
+        producer: ProducerEvidence {
+            name: "commit-ci-preflight".to_owned(),
+            version: LEGACY_MATRIX_PRODUCER.to_owned(),
+        },
+        repository: RepositoryEvidence {
+            repository: "example/legacy-matrix".to_owned(),
+            commit_sha: LEGACY_MATRIX_COMMIT.to_owned(),
+            dirty: false,
+        },
+        run: RunEvidence {
+            run_id: "legacy-matrix".to_owned(),
+            generation: 1,
+            started_at_utc: "2026-08-16T10:00:00Z".to_owned(),
+            finished_at_utc: "2026-08-16T10:00:02Z".to_owned(),
+        },
+        configuration_digest: LEGACY_MATRIX_OUTER_DIGEST.to_owned(),
+        runtime_receipts: vec![
+            MatrixRuntimeReceiptV2 {
+                runtime_id: "python311".to_owned(),
+                receipt: legacy_runtime_receipt(
+                    "python311",
+                    LEGACY_MATRIX_PY311_IMAGE,
+                    LEGACY_MATRIX_PY311_DIGEST,
+                    "python311-version",
+                ),
+            },
+            MatrixRuntimeReceiptV2 {
+                runtime_id: "python312".to_owned(),
+                receipt: legacy_runtime_receipt(
+                    "python312",
+                    LEGACY_MATRIX_PY312_IMAGE,
+                    LEGACY_MATRIX_PY312_DIGEST,
+                    "python312-version",
+                ),
+            },
+        ],
+        overall_status: EvidenceStatus::Pass,
+        incomplete_reason: None,
+        redaction_policy_version: "1.0".to_owned(),
+    })
+    .expect("seal legacy Matrix receipt")
+}
+
+fn matrix_report(
+    bytes: &[u8],
+    policy: &MatrixVerificationPolicyV2,
+    commit: &str,
+) -> commit_ci_preflight::verify::VerificationReportV1 {
+    verify_matrix_receipt_document(bytes, policy, commit, LEGACY_MATRIX_EVALUATED_AT)
+        .expect("verify Matrix receipt")
+}
+
+fn assert_matrix_failure(
+    report: &commit_ci_preflight::verify::VerificationReportV1,
+    finding_code: &str,
+) {
+    assert_eq!(report.decision, VerificationDecision::Fail);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.code == finding_code),
+        "missing {finding_code}: {:?}",
+        report.findings
+    );
+}
+
+fn historical_verifier() -> PathBuf {
+    let path = env::var_os("CCP_HISTORICAL_VERIFIER_044697")
+        .map(PathBuf::from)
+        .expect("set CCP_HISTORICAL_VERIFIER_044697 to the reviewed 044697 verifier binary");
+    let expected = serde_json::from_str::<serde_json::Value>(LEGACY_MATRIX_PROVENANCE)
+        .expect("provenance JSON")["binary_sha256"]
+        .as_str()
+        .expect("provenance binary SHA-256")
+        .to_owned();
+    let actual = {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(fs::read(&path).expect("read historical verifier"))
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    assert_eq!(
+        actual, expected,
+        "refusing to invoke CCP_HISTORICAL_VERIFIER_044697 because it is not the provenance-pinned historical verifier"
+    );
+    path
+}
+
+fn with_historical_fixture<T>(operation: impl FnOnce(&Path) -> T) -> T {
+    let mut directory = env::temp_dir();
+    directory.push(format!(
+        "commit-ci-preflight-historical-044697-{}-{}",
+        std::process::id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&directory).expect("create historical fixture directory");
+    let result = operation(&directory);
+    fs::remove_dir_all(&directory).expect("remove historical fixture directory");
+    result
+}
+
+fn write_matrix_document(directory: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    let path = directory.join(name);
+    fs::write(&path, bytes).expect("write matrix test document");
+    path
+}
+
+fn run_historical_verifier(
+    verifier: &Path,
+    receipt: &Path,
+    policy: &Path,
+    expected_commit: &str,
+) -> std::process::Output {
+    Command::new(verifier)
+        .args([
+            "verify",
+            "--receipt",
+            receipt.to_str().expect("UTF-8 receipt path"),
+            "--policy",
+            policy.to_str().expect("UTF-8 policy path"),
+            "--expected-commit",
+            expected_commit,
+            "--evaluated-at-utc",
+            LEGACY_MATRIX_EVALUATED_AT,
+            "--json",
+        ])
+        .output()
+        .expect("invoke provenance-pinned historical verifier")
 }
 
 fn mutate_leaf(value: &mut serde_json::Value) {
@@ -236,6 +458,249 @@ fn trusted_plan_policy_parser_rejects_unsafe_config_path_and_overlapping_produce
         VerificationPolicyV1_1::parse(overlap.as_bytes()),
         Err(PolicyError::DuplicateValue("producer_contracts"))
     ));
+}
+
+#[test]
+fn current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations() {
+    let policy = legacy_matrix_policy();
+    let original = legacy_matrix_receipt();
+    let original_bytes = original.canonical_bytes().expect("legacy receipt bytes");
+    let valid = matrix_report(&original_bytes, &policy, LEGACY_MATRIX_COMMIT);
+    assert_eq!(valid.decision, VerificationDecision::Pass);
+    assert!(valid.findings.is_empty());
+
+    let mut producer = serde_json::to_value(&original).expect("legacy receipt JSON");
+    producer["receipt"]["producer"]["version"] = serde_json::Value::String("0.1.0".to_owned());
+    let producer = matrix_report(
+        &serde_json::to_vec(&producer).expect("producer mutation"),
+        &policy,
+        LEGACY_MATRIX_COMMIT,
+    );
+    assert_matrix_failure(&producer, "receipt.semantic_or_digest_invalid");
+
+    let wrong_commit = matrix_report(&original_bytes, &policy, &"b".repeat(40));
+    assert_matrix_failure(&wrong_commit, "policy.commit");
+
+    let mut outer = original.clone().receipt;
+    outer.configuration_digest = format!("sha256:{}", "d".repeat(64));
+    let outer = MatrixReceiptEnvelopeV2::seal(outer).expect("reseal outer digest mutation");
+    let outer = matrix_report(
+        &outer.canonical_bytes().expect("outer mutation bytes"),
+        &policy,
+        LEGACY_MATRIX_COMMIT,
+    );
+    assert_matrix_failure(&outer, "policy.configuration");
+
+    let mut runtime = original.clone().receipt;
+    runtime.runtime_receipts[0]
+        .receipt
+        .receipt
+        .configuration_digest = format!("sha256:{}", "d".repeat(64));
+    let inner = runtime.runtime_receipts[0].receipt.receipt.clone();
+    runtime.runtime_receipts[0].receipt = ReceiptEnvelopeV1::seal(inner).expect("reseal runtime");
+    let runtime = MatrixReceiptEnvelopeV2::seal(runtime).expect("reseal runtime mutation");
+    let runtime = matrix_report(
+        &runtime.canonical_bytes().expect("runtime mutation bytes"),
+        &policy,
+        LEGACY_MATRIX_COMMIT,
+    );
+    assert_matrix_failure(&runtime, "policy.runtime_configuration");
+
+    let mut check_binding = policy.clone();
+    check_binding.required_checks[0].runtime_id = "python312".to_owned();
+    check_binding.required_checks[1].runtime_id = "python311".to_owned();
+    let check_binding = matrix_report(&original_bytes, &check_binding, LEGACY_MATRIX_COMMIT);
+    assert_matrix_failure(&check_binding, "policy.check_runtime");
+
+    let mut runtime_binding = original.clone().receipt;
+    runtime_binding.runtime_receipts[0].runtime_id = "python312".to_owned();
+    runtime_binding.runtime_receipts[1].runtime_id = "python311".to_owned();
+    let runtime_binding =
+        MatrixReceiptEnvelopeV2::seal(runtime_binding).expect("reseal runtime binding mutation");
+    let runtime_binding = matrix_report(
+        &runtime_binding
+            .canonical_bytes()
+            .expect("runtime binding mutation bytes"),
+        &policy,
+        LEGACY_MATRIX_COMMIT,
+    );
+    assert_matrix_failure(&runtime_binding, "policy.runtime_image");
+
+    let mut altered_byte = original_bytes;
+    let index = altered_byte
+        .windows(b"legacy-matrix".len())
+        .position(|window| window == b"legacy-matrix")
+        .expect("legacy project in canonical receipt");
+    altered_byte[index] = b'x';
+    let altered_byte = matrix_report(&altered_byte, &policy, LEGACY_MATRIX_COMMIT);
+    assert_matrix_failure(&altered_byte, "receipt.semantic_or_digest_invalid");
+}
+
+#[test]
+#[ignore = "set CCP_HISTORICAL_VERIFIER_044697 to the provenance-pinned 044697 binary, then run with --ignored"]
+fn historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations() {
+    let verifier = historical_verifier();
+    with_historical_fixture(|directory| {
+        let original = legacy_matrix_receipt();
+        let policy =
+            write_matrix_document(directory, "policy.toml", LEGACY_MATRIX_POLICY.as_bytes());
+        let receipt = write_matrix_document(
+            directory,
+            "receipt.json",
+            &original.canonical_bytes().expect("legacy receipt bytes"),
+        );
+        let valid = run_historical_verifier(&verifier, &receipt, &policy, LEGACY_MATRIX_COMMIT);
+        assert!(
+            valid.status.success(),
+            "historical verifier stderr: {}",
+            String::from_utf8_lossy(&valid.stderr)
+        );
+        let valid_report: serde_json::Value =
+            serde_json::from_slice(&valid.stdout).expect("historical valid report");
+        assert_eq!(valid_report["decision"], "PASS");
+
+        let mut producer = serde_json::to_value(&original).expect("legacy receipt JSON");
+        producer["receipt"]["producer"]["version"] = serde_json::Value::String("0.1.0".to_owned());
+        let producer = write_matrix_document(
+            directory,
+            "producer.json",
+            &serde_json::to_vec(&producer).expect("producer mutation"),
+        );
+        let producer = run_historical_verifier(&verifier, &producer, &policy, LEGACY_MATRIX_COMMIT);
+        assert_eq!(producer.status.code(), Some(3));
+        let producer: serde_json::Value =
+            serde_json::from_slice(&producer.stdout).expect("producer report");
+        assert_eq!(
+            producer["findings"][0]["code"],
+            "receipt.semantic_or_digest_invalid"
+        );
+
+        let wrong_commit = run_historical_verifier(&verifier, &receipt, &policy, &"b".repeat(40));
+        assert_eq!(wrong_commit.status.code(), Some(3));
+        let wrong_commit: serde_json::Value =
+            serde_json::from_slice(&wrong_commit.stdout).expect("commit report");
+        assert!(
+            wrong_commit["findings"]
+                .as_array()
+                .expect("commit findings")
+                .iter()
+                .any(|finding| finding["code"] == "policy.commit")
+        );
+
+        let mut outer = original.clone().receipt;
+        outer.configuration_digest = format!("sha256:{}", "d".repeat(64));
+        let outer = MatrixReceiptEnvelopeV2::seal(outer).expect("reseal outer digest mutation");
+        let outer = write_matrix_document(
+            directory,
+            "outer.json",
+            &outer.canonical_bytes().expect("outer mutation bytes"),
+        );
+        let outer = run_historical_verifier(&verifier, &outer, &policy, LEGACY_MATRIX_COMMIT);
+        assert_eq!(outer.status.code(), Some(3));
+        let outer: serde_json::Value = serde_json::from_slice(&outer.stdout).expect("outer report");
+        assert!(
+            outer["findings"]
+                .as_array()
+                .expect("outer findings")
+                .iter()
+                .any(|finding| finding["code"] == "policy.configuration")
+        );
+
+        let mut runtime = original.clone().receipt;
+        runtime.runtime_receipts[0]
+            .receipt
+            .receipt
+            .configuration_digest = format!("sha256:{}", "d".repeat(64));
+        let inner = runtime.runtime_receipts[0].receipt.receipt.clone();
+        runtime.runtime_receipts[0].receipt =
+            ReceiptEnvelopeV1::seal(inner).expect("reseal runtime");
+        let runtime = MatrixReceiptEnvelopeV2::seal(runtime).expect("reseal runtime mutation");
+        let runtime = write_matrix_document(
+            directory,
+            "runtime.json",
+            &runtime.canonical_bytes().expect("runtime mutation bytes"),
+        );
+        let runtime = run_historical_verifier(&verifier, &runtime, &policy, LEGACY_MATRIX_COMMIT);
+        assert_eq!(runtime.status.code(), Some(3));
+        let runtime: serde_json::Value =
+            serde_json::from_slice(&runtime.stdout).expect("runtime report");
+        assert!(
+            runtime["findings"]
+                .as_array()
+                .expect("runtime findings")
+                .iter()
+                .any(|finding| finding["code"] == "policy.runtime_configuration")
+        );
+
+        let policy_with_wrong_check_binding = LEGACY_MATRIX_POLICY
+            .replace(
+                "id = \"python311-version\"\nruntime_id = \"python311\"",
+                "id = \"python311-version\"\nruntime_id = \"python312\"",
+            )
+            .replace(
+                "id = \"python312-version\"\nruntime_id = \"python312\"",
+                "id = \"python312-version\"\nruntime_id = \"python311\"",
+            );
+        let check_binding = write_matrix_document(
+            directory,
+            "check-binding.toml",
+            policy_with_wrong_check_binding.as_bytes(),
+        );
+        let check_binding =
+            run_historical_verifier(&verifier, &receipt, &check_binding, LEGACY_MATRIX_COMMIT);
+        assert_eq!(check_binding.status.code(), Some(3));
+        let check_binding: serde_json::Value =
+            serde_json::from_slice(&check_binding.stdout).expect("check binding report");
+        assert!(
+            check_binding["findings"]
+                .as_array()
+                .expect("check binding findings")
+                .iter()
+                .any(|finding| finding["code"] == "policy.check_runtime")
+        );
+
+        let mut runtime_binding = original.clone().receipt;
+        runtime_binding.runtime_receipts[0].runtime_id = "python312".to_owned();
+        runtime_binding.runtime_receipts[1].runtime_id = "python311".to_owned();
+        let runtime_binding = MatrixReceiptEnvelopeV2::seal(runtime_binding)
+            .expect("reseal runtime binding mutation");
+        let runtime_binding = write_matrix_document(
+            directory,
+            "runtime-binding.json",
+            &runtime_binding
+                .canonical_bytes()
+                .expect("runtime binding mutation bytes"),
+        );
+        let runtime_binding =
+            run_historical_verifier(&verifier, &runtime_binding, &policy, LEGACY_MATRIX_COMMIT);
+        assert_eq!(runtime_binding.status.code(), Some(3));
+        let runtime_binding: serde_json::Value =
+            serde_json::from_slice(&runtime_binding.stdout).expect("runtime binding report");
+        assert!(
+            runtime_binding["findings"]
+                .as_array()
+                .expect("runtime binding findings")
+                .iter()
+                .any(|finding| finding["code"] == "policy.runtime_image")
+        );
+
+        let mut altered_byte = original.canonical_bytes().expect("legacy receipt bytes");
+        let index = altered_byte
+            .windows(b"legacy-matrix".len())
+            .position(|window| window == b"legacy-matrix")
+            .expect("legacy project in canonical receipt");
+        altered_byte[index] = b'x';
+        let altered_byte = write_matrix_document(directory, "byte.json", &altered_byte);
+        let altered_byte =
+            run_historical_verifier(&verifier, &altered_byte, &policy, LEGACY_MATRIX_COMMIT);
+        assert_eq!(altered_byte.status.code(), Some(3));
+        let altered_byte: serde_json::Value =
+            serde_json::from_slice(&altered_byte.stdout).expect("byte report");
+        assert_eq!(
+            altered_byte["findings"][0]["code"],
+            "receipt.semantic_or_digest_invalid"
+        );
+    });
 }
 
 #[test]
