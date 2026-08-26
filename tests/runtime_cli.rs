@@ -39,6 +39,33 @@ fn executable_fixture_root(prefix: &str) -> PathBuf {
         .join(format!("{prefix}-{}", std::process::id()))
 }
 
+fn tree_bytes(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn visit(root: &Path, path: &Path, output: &mut Vec<(PathBuf, Vec<u8>)>) {
+        let mut entries = fs::read_dir(path)
+            .expect("read fixture tree")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture tree entries");
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                visit(root, &path, output);
+            } else {
+                output.push((
+                    path.strip_prefix(root)
+                        .expect("relative fixture path")
+                        .to_path_buf(),
+                    fs::read(&path).expect("fixture file bytes"),
+                ));
+            }
+        }
+    }
+
+    let mut output = Vec::new();
+    visit(root, root, &mut output);
+    output
+}
+
 #[test]
 fn legacy_profile_uses_distinct_plan_cache_identity() {
     let legacy = build_matrix_plan(
@@ -247,6 +274,76 @@ fn matrix_legacy_profile_rejects_v1_schemas_before_runtime_cache_or_admission() 
             );
         }
     }
+    fs::remove_dir_all(root).expect("remove owned fixture root");
+}
+
+#[cfg(unix)]
+#[test]
+fn legacy_profile_rejection_precedes_shared_state() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = executable_fixture_root("ccp-legacy-profile-pre-admission");
+    let _ = fs::remove_dir_all(&root);
+    let source = root.join("source");
+    let bin = root.join("bin");
+    fs::create_dir_all(&source).expect("source fixture root");
+    fs::create_dir_all(&bin).expect("fake runtime directory");
+
+    let config_path = source.join("single-runtime.toml");
+    fs::copy(fixture(), &config_path).expect("copy single-runtime fixture");
+    let source_before = tree_bytes(&source);
+    let cache_dir = root.join("cache");
+    let admission_home = root.join("admission-home");
+    let receipt = source.join(".ccp/receipt.json");
+    let marker = root.join("runtime-marker");
+    let docker = bin.join("docker");
+    fs::write(
+        &docker,
+        format!("#!/bin/sh\nprintf runtime > '{}'\n", marker.display()),
+    )
+    .expect("fake docker");
+    let mut permissions = fs::metadata(&docker)
+        .expect("fake docker metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&docker, permissions).expect("fake docker executable");
+
+    let output = Command::new(binary())
+        .args(["run", "--config"])
+        .arg(&config_path)
+        .args([
+            "--matrix-plan-profile",
+            "matrix-v2-legacy-v1",
+            "--repository",
+        ])
+        .arg(&source)
+        .args(["--cache-dir"])
+        .arg(&cache_dir)
+        .env("HOME", &admission_home)
+        .env("PATH", &bin)
+        .output()
+        .expect("legacy misuse run");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("matrix plan profile requires schema version 2.0")
+    );
+    assert!(!cache_dir.exists(), "run initialized the cache root");
+    assert!(
+        !cache_dir.join("run-journal-v1").exists(),
+        "run initialized the journal"
+    );
+    assert!(!admission_home.exists(), "run initialized admission state");
+    assert!(!receipt.exists(), "run wrote a receipt");
+    assert!(!marker.exists(), "run constructed the Docker runtime");
+    assert_eq!(
+        tree_bytes(&source),
+        source_before,
+        "run mutated the source tree"
+    );
+
     fs::remove_dir_all(root).expect("remove owned fixture root");
 }
 

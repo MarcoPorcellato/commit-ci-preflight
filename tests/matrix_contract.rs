@@ -449,6 +449,10 @@ fn legacy_profile_accessors_reject_mutated_public_plan() {
         envelope.runtime_configuration_digest("python311"),
         Err(MatrixError::PlanDigestMismatch)
     ));
+    assert!(matches!(
+        envelope.canonical_bytes(),
+        Err(MatrixError::PlanDigestMismatch)
+    ));
 }
 
 #[test]

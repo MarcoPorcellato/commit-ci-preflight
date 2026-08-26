@@ -194,6 +194,27 @@ fn matrix_plan_profile_rejects_unknown_values_with_usage_exit_code() {
 }
 
 #[test]
+fn legacy_matrix_profile_rejects_single_runtime_configuration_with_usage_exit_code() {
+    let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args([
+            "plan",
+            "--config",
+            CONFIG,
+            "--matrix-plan-profile",
+            "matrix-v2-legacy-v1",
+        ])
+        .output()
+        .expect("run single-runtime legacy matrix plan command");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("matrix plan profile requires schema version 2.0")
+    );
+}
+
+#[test]
 fn missing_configuration_exits_with_usage_code_two() {
     let output = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
         .args(["plan", "--config", "tests/fixtures/does-not-exist.toml"])
