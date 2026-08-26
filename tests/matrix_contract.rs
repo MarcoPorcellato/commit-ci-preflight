@@ -32,6 +32,7 @@ const CONFIG_SCHEMA: &str = include_str!("../schema/config-v2.schema.json");
 const RECEIPT_SCHEMA: &str = include_str!("../schema/receipt-v2.schema.json");
 const POLICY_SCHEMA: &str = include_str!("../schema/policy-v2.schema.json");
 const LEGACY_COMPATIBLE_POLICY: &str = include_str!("fixtures/policy-v2-legacy-compatible.toml");
+type MatrixEnvelopeMutator = fn(&mut MatrixPlanEnvelopeV2);
 
 fn runtime_receipt(id: &str, image: &str, check_id: &str) -> ReceiptEnvelopeV1 {
     let digest = image.rsplit_once('@').expect("pinned image").1.to_owned();
@@ -483,7 +484,7 @@ fn legacy_runtime_envelopes_recheck_projection() {
         assert_ne!(legacy_runtime.plan_digest, current_runtime.plan_digest);
     }
 
-    let cases: [(&str, fn(&mut MatrixPlanEnvelopeV2)); 4] = [
+    let cases: [(&str, MatrixEnvelopeMutator); 4] = [
         ("runtime", |envelope| {
             envelope.plan.runtimes[0].runtime.image = "example.invalid/mutated@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
         }),
@@ -515,7 +516,7 @@ fn legacy_runtime_envelopes_recheck_projection() {
 
 #[test]
 fn legacy_profile_rejects_each_non_representable_current_field() {
-    let cases: [(&str, fn(&mut MatrixPlanEnvelopeV2)); 6] =
+    let cases: [(&str, MatrixEnvelopeMutator); 6] =
         [
             ("runtime.pull_policy", |envelope| {
                 envelope.plan.runtimes[0].runtime.pull_policy = Some(RuntimePullPolicy::Never);
