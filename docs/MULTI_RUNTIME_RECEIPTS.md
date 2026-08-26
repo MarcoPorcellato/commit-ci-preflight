@@ -169,7 +169,9 @@ to remain byte-for-byte stable.
 The historical verifier external test is
 `tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`
 and is marked `#[ignore]`; run it with `--ignored` only when
-`CCP_HISTORICAL_VERIFIER_044697` points to the provenance-pinned commit
+`CCP_HISTORICAL_VERIFIER_044697` points to the retained binary with SHA-256
+`5321ff4d291ec24db6a7a5919bc08fc00a9d63767b630a3469fc39318c400277`,
+built from provenance-pinned commit
 `044697dee9a0d678d30a4847d62ddf9b4970505b`.
 
 This is the outer-v2 / inner-v1 boundary: outer Matrix schema 2.0 and inner

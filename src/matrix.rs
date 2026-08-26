@@ -45,6 +45,7 @@ use crate::run::{
     write_canonical_receipt_bytes_atomic,
 };
 use crate::runtime::runtime_for;
+use crate::source_snapshot::SourceSnapshot;
 use crate::verify::{
     AcceptedPlatformV1, VerificationDecision, VerificationFindingV1, VerificationPolicyV1,
     VerificationReportV1, VerificationStatus, finding, parse_utc_seconds, validate_commit,
@@ -378,7 +379,7 @@ impl MatrixPlanEnvelopeV2 {
         }
     }
 
-    fn validate_profile_binding(&self) -> Result<(), MatrixError> {
+    pub fn validate_profile_binding(&self) -> Result<(), MatrixError> {
         match self.profile {
             MatrixPlanProfile::CurrentV2 => {
                 if self.legacy_basis.is_some()
@@ -449,6 +450,36 @@ impl MatrixPlanEnvelopeV2 {
         }
         Ok(result)
     }
+
+    /// Prepare the one source-snapshot overlay shared by every Matrix runtime.
+    /// Cache, environment, storage, and fixed-environment fields must be
+    /// identical because the overlay is materialized once before admission.
+    pub fn prepare_source_snapshot_overlay(
+        &self,
+        snapshot: &mut SourceSnapshot,
+    ) -> Result<(), MatrixError> {
+        self.validate_profile_binding()?;
+        let runtime_envelopes = self.runtime_envelopes()?;
+        let (_, first) = runtime_envelopes
+            .first()
+            .ok_or(MatrixError::InvalidReceipt)?;
+        let mut overlay = first.clone();
+        overlay.plan.checks.clear();
+        for (_, runtime) in runtime_envelopes {
+            if runtime.plan.caches != overlay.plan.caches
+                || runtime.plan.environment != overlay.plan.environment
+                || runtime.plan.storage != overlay.plan.storage
+                || runtime.fixed_environment != overlay.fixed_environment
+            {
+                return Err(MatrixError::PlanDigestMismatch);
+            }
+            overlay.plan.checks.extend(runtime.plan.checks);
+        }
+        snapshot
+            .prepare_mount_overlay(&overlay)
+            .map_err(RunError::SourceSnapshot)
+            .map_err(MatrixError::Run)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -465,6 +496,7 @@ pub struct MatrixRunRequestV2<'a> {
     pub repository: &'a Path,
     pub cache: &'a ManagedCache,
     pub generation: u64,
+    pub source_snapshot: &'a SourceSnapshot,
 }
 
 /// Execute every independently pinned runtime sequentially under one caller
@@ -502,7 +534,7 @@ pub fn execute_matrix_run_v2(
                 cache: request.cache,
                 producer_version: request.envelope.profile().producer_version(),
                 generation: request.generation,
-                source_snapshot: None,
+                source_snapshot: Some(request.source_snapshot),
             },
             runtime.as_ref(),
             supervisor,
@@ -1074,12 +1106,17 @@ fn equal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use crate::cache::{CacheRootOptions, PlatformFamily, ResolvedCacheRoot};
-    use crate::process::{GenerationGuard, ProcessError, ProcessRequest, ProcessResult};
+    use crate::process::{
+        CapturedStream, CleanupStatus, ExitOutcome, GenerationGuard, ProcessError, ProcessRequest,
+        ProcessResult, ProcessTermination, RunIdentity,
+    };
     use crate::receipt::{CheckEvidence, PlatformEvidence};
     use crate::run::SystemClock;
+    use crate::source_snapshot::SourceSnapshot;
 
     const IMAGE_311: &str = "example.invalid/python311@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const IMAGE_312: &str = "example.invalid/python312@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -1259,6 +1296,250 @@ pids_limit = 16
         }
     }
 
+    struct SnapshotMatrixSupervisor {
+        repository: PathBuf,
+        execution_roots: Mutex<Vec<PathBuf>>,
+        containers: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+        removals: AtomicU64,
+    }
+
+    impl SnapshotMatrixSupervisor {
+        fn new(repository: PathBuf) -> Self {
+            Self {
+                repository,
+                execution_roots: Mutex::new(Vec::new()),
+                containers: Mutex::new(BTreeMap::new()),
+                removals: AtomicU64::new(0),
+            }
+        }
+
+        fn completed(request: &ProcessRequest, stdout: Vec<u8>, success: bool) -> ProcessResult {
+            ProcessResult {
+                identity: request.identity.clone(),
+                termination: ProcessTermination::Completed,
+                cleanup: CleanupStatus::Verified,
+                exit: Some(ExitOutcome {
+                    success,
+                    code: Some(if success { 0 } else { 1 }),
+                }),
+                stdout: CapturedStream::from_captured(stdout, false),
+                stderr: CapturedStream::from_captured(Vec::new(), false),
+                elapsed_millis: 1,
+            }
+        }
+
+        fn workspace_source(request: &ProcessRequest) -> Option<PathBuf> {
+            request.argv.iter().find_map(|argument| {
+                let argument = argument.to_str()?;
+                let source = argument.strip_prefix("type=bind,src=")?;
+                let (source, target) = source.split_once(",dst=")?;
+                (target == "/workspace,readonly").then(|| PathBuf::from(source))
+            })
+        }
+    }
+
+    impl SupervisorPort for SnapshotMatrixSupervisor {
+        fn execute(
+            &self,
+            request: &ProcessRequest,
+            _cancellation: &CancellationToken,
+            generation: &GenerationGuard,
+        ) -> Result<ProcessResult, ProcessError> {
+            generation.ensure_current(&request.identity)?;
+            if request.program == "git" {
+                let command = request.argv.first().and_then(|argument| argument.to_str());
+                let stdout = match command {
+                    Some("ls-tree") => {
+                        format!("100644 blob {}\tREADME.md\0", "c".repeat(40)).into_bytes()
+                    }
+                    Some("cat-file") => b"snapshot source\n".to_vec(),
+                    Some("hash-object") => format!("{}\n", "c".repeat(40)).into_bytes(),
+                    Some("status") => Vec::new(),
+                    Some("rev-parse") => format!("{}\n", "a".repeat(40)).into_bytes(),
+                    _ => Vec::new(),
+                };
+                return Ok(Self::completed(request, stdout, true));
+            }
+
+            let command = request.argv.first().and_then(|argument| argument.to_str());
+            match command {
+                Some("info") => Ok(Self::completed(
+                    request,
+                    br#"{"ServerVersion":"29.4.0","OperatingSystem":"fixture","OSType":"linux","Name":"private"}"#.to_vec(),
+                    true,
+                )),
+                Some("create") => {
+                    let source = Self::workspace_source(request).expect("read-only workspace mount");
+                    assert_eq!(
+                        fs::read(source.join("README.md")).expect("snapshot source"),
+                        b"snapshot source\n"
+                    );
+                    assert!(
+                        !source.join("ignored-live.txt").exists(),
+                        "live-only mutation leaked into snapshot execution root"
+                    );
+                    self.execution_roots.lock().expect("execution roots").push(source);
+                    let mut name = None;
+                    let mut labels = BTreeMap::new();
+                    let mut arguments = request.argv.iter();
+                    while let Some(argument) = arguments.next() {
+                        match argument.to_str() {
+                            Some("--name") => name = arguments.next().and_then(|value| value.to_str()),
+                            Some("--label") => {
+                                if let Some((key, value)) = arguments
+                                    .next()
+                                    .and_then(|value| value.to_str())
+                                    .and_then(|value| value.split_once('='))
+                                {
+                                    labels.insert(key.to_owned(), value.to_owned());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.containers
+                        .lock()
+                        .expect("containers")
+                        .insert(name.expect("container name").to_owned(), labels);
+                    Ok(Self::completed(
+                        request,
+                        format!("{}\n", "d".repeat(64)).into_bytes(),
+                        true,
+                    ))
+                }
+                Some("inspect") => {
+                    let name = request
+                        .argv
+                        .last()
+                        .and_then(|argument| argument.to_str())
+                        .expect("container name");
+                    if let Some(labels) = self
+                        .containers
+                        .lock()
+                        .expect("containers")
+                        .get(name)
+                        .cloned()
+                    {
+                        Ok(Self::completed(
+                            request,
+                            serde_json::to_vec(&serde_json::json!({
+                                "Name": format!("/{name}"),
+                                "Config": {"Labels": labels},
+                                "State": {"Status": "running"},
+                            }))
+                            .expect("inspect JSON"),
+                            true,
+                        ))
+                    } else {
+                        Ok(Self::completed(request, b"No such container\n".to_vec(), false))
+                    }
+                }
+                Some("rm") => {
+                    let name = request
+                        .argv
+                        .last()
+                        .and_then(|argument| argument.to_str())
+                        .expect("container name");
+                    self.containers.lock().expect("containers").remove(name);
+                    if self.removals.fetch_add(1, Ordering::SeqCst) == 0 {
+                        fs::write(self.repository.join("ignored-live.txt"), b"live mutation\n")
+                            .expect("mutate live repository between runtimes");
+                    }
+                    Ok(Self::completed(request, Vec::new(), true))
+                }
+                Some("wait") => Ok(Self::completed(request, b"0\n".to_vec(), true)),
+                Some("attach" | "start" | "stop" | "kill") => {
+                    Ok(Self::completed(request, b"fixture\n".to_vec(), true))
+                }
+                _ => Ok(Self::completed(request, b"fixture\n".to_vec(), true)),
+            }
+        }
+    }
+
+    #[test]
+    fn matrix_runtimes_share_one_immutable_source_snapshot() {
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .parent()
+            .expect("repository parent")
+            .join(format!(
+                ".ccp-matrix-source-snapshot-{}",
+                std::process::id()
+            ));
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("clean fixture root");
+        }
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).expect("repository root");
+        fs::write(repository.join("README.md"), b"live source\n").expect("live source");
+        let cache = ManagedCache::initialize(
+            ResolvedCacheRoot::resolve(
+                &repository,
+                &CacheRootOptions {
+                    explicit: Some(root.join("cache")),
+                    environment: None,
+                    home: None,
+                    xdg_cache_home: None,
+                    local_app_data: None,
+                    platform: PlatformFamily::Unix,
+                },
+            )
+            .expect("cache root"),
+        )
+        .expect("cache");
+        let envelope = envelope(MatrixPlanProfile::LegacyV1);
+        let supervisor = SnapshotMatrixSupervisor::new(repository.clone());
+        let commit = "a".repeat(40);
+        let identity = RunIdentity {
+            project: envelope.plan.project.clone(),
+            commit: Some(commit.clone()),
+            config_digest: envelope.plan_digest.clone(),
+            generation: "7".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let mut snapshot = SourceSnapshot::materialize(
+            &repository,
+            &commit,
+            &root.join("source-snapshot"),
+            &supervisor,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("source snapshot");
+        envelope
+            .prepare_source_snapshot_overlay(&mut snapshot)
+            .expect("matrix snapshot overlay");
+        let mut barrier = NoopCompletionBarrier;
+
+        let outcome = execute_matrix_run_v2(
+            &MatrixRunRequestV2 {
+                envelope: &envelope,
+                repository: &repository,
+                cache: &cache,
+                generation: 7,
+                source_snapshot: &snapshot,
+            },
+            &supervisor,
+            &CancellationToken::default(),
+            &SystemClock,
+            &mut barrier,
+        )
+        .expect("matrix run");
+
+        assert_eq!(outcome.receipt.receipt.runtime_receipts.len(), 2);
+        let roots = supervisor.execution_roots.lock().expect("execution roots");
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0], roots[1]);
+        assert_eq!(roots[0], snapshot.root());
+        assert!(repository.join("ignored-live.txt").is_file());
+        assert!(!snapshot.root().join("ignored-live.txt").exists());
+        drop(roots);
+        snapshot.cleanup().expect("snapshot cleanup");
+        drop(cache);
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
     #[test]
     fn executor_rejects_tampered_legacy_plan_before_supervisor_execution() {
         let root = std::env::current_dir()
@@ -1290,6 +1571,28 @@ pids_limit = 16
         )
         .expect("cache");
         let mut envelope = envelope(MatrixPlanProfile::LegacyV1);
+        let snapshot_supervisor = SnapshotMatrixSupervisor::new(repository.clone());
+        let commit = "a".repeat(40);
+        let identity = RunIdentity {
+            project: envelope.plan.project.clone(),
+            commit: Some(commit.clone()),
+            config_digest: envelope.plan_digest.clone(),
+            generation: "7".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let mut snapshot = SourceSnapshot::materialize(
+            &repository,
+            &commit,
+            &root.join("source-snapshot"),
+            &snapshot_supervisor,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("source snapshot");
+        envelope
+            .prepare_source_snapshot_overlay(&mut snapshot)
+            .expect("matrix snapshot overlay");
         envelope.plan.project = "owner/tampered".to_owned();
         let supervisor = CountingSupervisor::default();
         let mut barrier = NoopCompletionBarrier;
@@ -1300,6 +1603,7 @@ pids_limit = 16
                 repository: &repository,
                 cache: &cache,
                 generation: 7,
+                source_snapshot: &snapshot,
             },
             &supervisor,
             &CancellationToken::default(),
@@ -1309,6 +1613,7 @@ pids_limit = 16
 
         assert!(matches!(result, Err(MatrixError::PlanDigestMismatch)));
         assert_eq!(supervisor.calls.load(Ordering::SeqCst), 0);
+        snapshot.cleanup().expect("snapshot cleanup");
         drop(cache);
         fs::remove_dir_all(root).expect("remove fixture root");
     }

@@ -1248,6 +1248,16 @@ fn config_schema_version(path: &Path) -> Result<Option<String>, CliError> {
         .map(str::to_owned))
 }
 
+fn after_validated_matrix_profile_binding<T>(
+    envelope: &commit_ci_preflight::matrix::MatrixPlanEnvelopeV2,
+    operation: impl FnOnce() -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    envelope
+        .validate_profile_binding()
+        .map_err(CliError::Matrix)?;
+    operation()
+}
+
 fn print_matrix_run(
     path: &Path,
     profile: MatrixPlanProfile,
@@ -1257,10 +1267,11 @@ fn print_matrix_run(
     json: bool,
 ) -> Result<(), CliError> {
     let envelope = load_matrix_plan(path, profile)?;
-    let root = resolve_cache_root(location)?;
+    let root = after_validated_matrix_profile_binding(&envelope, || resolve_cache_root(location))?;
+    let plan_digest = envelope.plan_digest().map_err(CliError::Matrix)?.to_owned();
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
     let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
-    let journal_id = new_journal_id(&envelope.plan_digest, generation)?;
+    let journal_id = new_journal_id(&plan_digest, generation)?;
     let journal_clock = SystemClock;
     journal
         .create_run(
@@ -1276,6 +1287,73 @@ fn print_matrix_run(
     let supervisor = Arc::new(ProcessSupervisor::standard());
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
+    let source_identity = RunIdentity {
+        project: envelope.plan.project.clone(),
+        commit: None,
+        config_digest: plan_digest,
+        generation: generation.to_string(),
+    };
+    let source_generation = GenerationGuard::new(source_identity.clone());
+    let commit = match resolve_clean_head(
+        &location.repository,
+        &envelope.plan.receipt.output,
+        supervisor.as_ref(),
+        &cancellation,
+        &source_generation,
+        &source_identity,
+    ) {
+        Ok(commit) => commit,
+        Err(error) => {
+            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::Run(RunError::SourceSnapshot(error)));
+        }
+    };
+    let source_identity = RunIdentity {
+        commit: Some(commit.clone()),
+        ..source_identity
+    };
+    source_generation
+        .replace(source_identity.clone())
+        .map_err(|error| CliError::Run(RunError::Process(error)))?;
+    let source_resource = match journal.reserve_resource(&journal_id, "source-snapshot-v1") {
+        Ok(path) => path,
+        Err(error) => {
+            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::RunJournal(error));
+        }
+    };
+    let mut source_snapshot = match SourceSnapshot::materialize(
+        &location.repository,
+        &commit,
+        &source_resource,
+        supervisor.as_ref(),
+        &cancellation,
+        &source_generation,
+        &source_identity,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::Run(RunError::SourceSnapshot(error)));
+        }
+    };
+    if let Err(error) = envelope.prepare_source_snapshot_overlay(&mut source_snapshot) {
+        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        return Err(CliError::Matrix(error));
+    }
+    if let Err(error) = journal.bind_source(
+        &journal_id,
+        &commit,
+        &source_snapshot.evidence().manifest_digest,
+        source_snapshot.evidence().entry_count,
+    ) {
+        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        return Err(CliError::RunJournal(error));
+    }
+    if let Err(error) = envelope.validate_profile_binding() {
+        lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
+        return Err(CliError::Matrix(error));
+    }
     let admission =
         AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
     let guard = match admission.acquire(
@@ -1343,6 +1421,7 @@ fn print_matrix_run(
             repository: &location.repository,
             cache: &cache,
             generation,
+            source_snapshot: &source_snapshot,
         },
         supervisor.as_ref(),
         &cancellation,
@@ -1368,6 +1447,10 @@ fn print_matrix_run(
             }
         },
     )?;
+    if let Err(error) = source_snapshot.cleanup() {
+        lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)?;
+        return Err(CliError::Run(RunError::SourceSnapshot(error)));
+    }
     lifecycle
         .transition(RunLifecyclePhase::Finalizing)
         .map_err(CliError::Run)?;
@@ -2737,9 +2820,10 @@ mod tests {
     use super::{
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
         ResourceExecutionModeArg, ResourceExecutorArg, RunTerminalJournalEvent,
-        WatchdogCompletionBarrier, detect_resource_executor, finalize_benchmark_terminal,
-        finalize_guard_exec_result, finalize_run_terminal, new_journal_id,
-        reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
+        WatchdogCompletionBarrier, after_validated_matrix_profile_binding,
+        detect_resource_executor, finalize_benchmark_terminal, finalize_guard_exec_result,
+        finalize_run_terminal, new_journal_id, reconcile_watchdog_outcome,
+        resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::admission::AdmissionError;
@@ -2747,6 +2831,9 @@ mod tests {
         CacheError, CacheKey, CacheRootSource, ManagedCache, ResolvedCacheRoot,
     };
     use commit_ci_preflight::config::ConfigV1;
+    use commit_ci_preflight::matrix::{
+        MatrixConfigV2, MatrixError, MatrixPlanProfile, build_matrix_plan,
+    };
     use commit_ci_preflight::process::CancellationToken;
     use commit_ci_preflight::process::{
         CleanupStatus, ExitOutcome, ProcessResult, ProcessTermination, RunIdentity,
@@ -2967,6 +3054,33 @@ timeout_seconds = 60
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+    }
+
+    #[test]
+    fn mutated_matrix_profile_binding_stops_before_all_setup_effects() {
+        let source = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/config-v2-legacy-compatible.toml"),
+        )
+        .expect("legacy fixture");
+        let mut envelope = build_matrix_plan(
+            MatrixConfigV2::parse(&source).expect("matrix config"),
+            MatrixPlanProfile::LegacyV1,
+        )
+        .expect("matrix plan");
+        envelope.plan.project = "example/mutated-before-effects".to_owned();
+        let effects = AtomicUsize::new(0);
+
+        let result = after_validated_matrix_profile_binding(&envelope, || {
+            effects.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        assert!(matches!(
+            result,
+            Err(CliError::Matrix(MatrixError::PlanDigestMismatch))
+        ));
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
     }
 
     #[test]

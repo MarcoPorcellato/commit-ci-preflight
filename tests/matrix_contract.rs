@@ -309,6 +309,61 @@ fn legacy_profile_reproduces_historical_plan() {
 }
 
 #[test]
+fn legacy_digest_basis_preserves_exact_historical_nested_json_shape() {
+    let envelope = build_matrix_plan(
+        MatrixConfigV2::parse(legacy_compatible_config()).expect("parse fixture"),
+        MatrixPlanProfile::LegacyV1,
+    )
+    .expect("legacy plan");
+    let basis = envelope
+        .legacy_digest_basis_value()
+        .expect("legacy basis")
+        .expect("legacy profile basis");
+    let historical: Value =
+        serde_json::from_str(include_str!("fixtures/matrix-v2-legacy-plan-044697.json"))
+            .expect("historical plan JSON");
+
+    assert_eq!(basis, historical["plan"]);
+    assert_eq!(
+        basis["receipt"],
+        serde_json::json!({
+            "output": ".ccp/receipt.json",
+            "freshness_seconds": 300
+        })
+    );
+    assert_eq!(
+        basis["caches"],
+        serde_json::json!([{
+            "id": "cargo",
+            "mount_path": ".cache/cargo"
+        }])
+    );
+    assert_eq!(
+        basis["runtimes"][0]["runtime"],
+        serde_json::json!({
+            "kind": "docker_compatible",
+            "image": IMAGE_311,
+            "cpu_count": 1,
+            "memory_mib": 256,
+            "pids_limit": 64,
+            "network": false
+        })
+    );
+    assert_eq!(
+        basis["runtimes"][0]["checks"][0],
+        serde_json::json!({
+            "id": "python311-version",
+            "required": true,
+            "argv": ["python", "-V"],
+            "working_directory": ".",
+            "timeout_seconds": 30,
+            "depends_on": [],
+            "artifacts": []
+        })
+    );
+}
+
+#[test]
 fn legacy_compatible_policy_fixture_binds_historical_profile_digests() {
     let provenance: Value = serde_json::from_str(include_str!(
         "fixtures/matrix-v2-legacy-plan-044697.provenance.json"
@@ -452,6 +507,24 @@ fn legacy_profile_accessors_reject_mutated_public_plan() {
     ));
     assert!(matches!(
         envelope.canonical_bytes(),
+        Err(MatrixError::PlanDigestMismatch)
+    ));
+}
+
+#[test]
+fn cli_boundary_can_validate_profile_binding_before_mutation() {
+    let mut envelope = build_matrix_plan(
+        MatrixConfigV2::parse(legacy_compatible_config()).expect("parse fixture"),
+        MatrixPlanProfile::LegacyV1,
+    )
+    .expect("legacy plan");
+    envelope
+        .validate_profile_binding()
+        .expect("fresh production envelope");
+
+    envelope.plan.project = "example/mutated-before-run".to_owned();
+    assert!(matches!(
+        envelope.validate_profile_binding(),
         Err(MatrixError::PlanDigestMismatch)
     ));
 }

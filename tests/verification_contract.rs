@@ -19,7 +19,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use commit_ci_preflight::matrix::{
-    MatrixReceiptEnvelopeV2, MatrixReceiptV2, MatrixRuntimeReceiptV2, MatrixVerificationPolicyV2,
+    MatrixConfigV2, MatrixError, MatrixPlanEnvelopeV2, MatrixPlanProfile, MatrixReceiptEnvelopeV2,
+    MatrixReceiptV2, MatrixRuntimeReceiptV2, MatrixVerificationPolicyV2, build_matrix_plan,
     verify_matrix_receipt_document,
 };
 use commit_ci_preflight::receipt::{
@@ -54,15 +55,6 @@ const HISTORICAL_VERIFIER_PROVENANCE: &str =
     include_str!("fixtures/historical-verifier-044697.provenance.json");
 const LEGACY_MATRIX_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const LEGACY_MATRIX_EVALUATED_AT: &str = "2026-08-16T10:01:00Z";
-const LEGACY_MATRIX_PRODUCER: &str = "0.1.0+matrix-v2-legacy-v1";
-const LEGACY_MATRIX_OUTER_DIGEST: &str =
-    "sha256:3248c763ccc37fecac1e29727007232d274f561e0943fc2e5a1996a38526fe13";
-const LEGACY_MATRIX_PY311_DIGEST: &str =
-    "sha256:755f77f6815b1ed7b4415b3312c48a6528e2d752270775916efa6c10f1ffe192";
-const LEGACY_MATRIX_PY312_DIGEST: &str =
-    "sha256:be2eb7d200946e9f1dc84cebd8c0cca8739e424163f91c86063bbe4caed936f9";
-const LEGACY_MATRIX_PY311_IMAGE: &str = "example.invalid/python311@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const LEGACY_MATRIX_PY312_IMAGE: &str = "example.invalid/python312@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn policy() -> VerificationPolicyV1 {
@@ -111,6 +103,16 @@ fn legacy_matrix_policy() -> MatrixVerificationPolicyV2 {
     MatrixVerificationPolicyV2::parse(LEGACY_MATRIX_POLICY).expect("legacy Matrix policy")
 }
 
+fn legacy_production_plan() -> MatrixPlanEnvelopeV2 {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/config-v2-legacy-compatible.toml");
+    build_matrix_plan(
+        MatrixConfigV2::load(&path).expect("legacy Matrix config"),
+        MatrixPlanProfile::LegacyV1,
+    )
+    .expect("legacy production plan")
+}
+
 #[test]
 fn retained_historical_verifier_provenance_is_separate_from_generator_provenance() {
     let generator: serde_json::Value =
@@ -138,13 +140,34 @@ fn retained_historical_verifier_provenance_is_separate_from_generator_provenance
     assert_eq!(verifier["runtime_digests"], generator["runtime_digests"]);
 }
 
+#[test]
+fn historical_receipt_builder_rejects_mutated_production_projection() {
+    let mut plan = legacy_production_plan();
+    plan.plan.runtimes[0].checks[0]
+        .argv
+        .push("--mutated".to_owned());
+
+    assert!(matches!(
+        legacy_matrix_receipt_from_production_plan(&plan),
+        Err(MatrixError::PlanDigestMismatch)
+    ));
+}
+
 fn legacy_runtime_receipt(
+    plan: &MatrixPlanEnvelopeV2,
     runtime_id: &str,
-    image_reference: &str,
-    configuration_digest: &str,
-    check_id: &str,
-) -> ReceiptEnvelopeV1 {
-    let image_digest = image_reference
+) -> Result<ReceiptEnvelopeV1, MatrixError> {
+    plan.validate_profile_binding()?;
+    let runtime = plan
+        .plan
+        .runtimes
+        .iter()
+        .find(|runtime| runtime.id == runtime_id)
+        .ok_or_else(|| MatrixError::UnknownRuntime(runtime_id.to_owned()))?;
+    let configuration_digest = plan.runtime_configuration_digest(runtime_id)?.to_owned();
+    let image_digest = runtime
+        .runtime
+        .image
         .rsplit_once('@')
         .expect("pinned image")
         .1
@@ -152,11 +175,11 @@ fn legacy_runtime_receipt(
     ReceiptEnvelopeV1::seal(ReceiptV1 {
         schema_version: "1.0".to_owned(),
         producer: ProducerEvidence {
-            name: "commit-ci-preflight".to_owned(),
-            version: LEGACY_MATRIX_PRODUCER.to_owned(),
+            name: env!("CARGO_PKG_NAME").to_owned(),
+            version: plan.profile().producer_version().to_owned(),
         },
         repository: RepositoryEvidence {
-            repository: "example/legacy-matrix".to_owned(),
+            repository: plan.plan.project.clone(),
             commit_sha: LEGACY_MATRIX_COMMIT.to_owned(),
             dirty: false,
         },
@@ -171,39 +194,57 @@ fn legacy_runtime_receipt(
             host_arch: "aarch64".to_owned(),
             runtime_kind: "docker_compatible".to_owned(),
             runtime_version: "test".to_owned(),
-            image_reference: image_reference.to_owned(),
+            image_reference: runtime.runtime.image.clone(),
             image_digest,
         },
-        configuration_digest: configuration_digest.to_owned(),
-        checks: vec![CheckEvidence {
-            id: check_id.to_owned(),
-            required: true,
-            argv: vec!["python".to_owned(), "-V".to_owned()],
-            working_directory: ".".to_owned(),
-            status: EvidenceStatus::Pass,
-            exit_code: Some(0),
-            duration_ms: 1,
-            timed_out: false,
-            cancelled: false,
-            output_digest: Some(configuration_digest.to_owned()),
-            incomplete_reason: None,
-        }],
+        configuration_digest: configuration_digest.clone(),
+        checks: runtime
+            .checks
+            .iter()
+            .map(|check| CheckEvidence {
+                id: check.id.clone(),
+                required: check.required,
+                argv: check.argv.clone(),
+                working_directory: check.working_directory.clone(),
+                status: EvidenceStatus::Pass,
+                exit_code: Some(0),
+                duration_ms: 1,
+                timed_out: false,
+                cancelled: false,
+                output_digest: Some(configuration_digest.clone()),
+                incomplete_reason: None,
+            })
+            .collect(),
         overall_status: EvidenceStatus::Pass,
         incomplete_reason: None,
         redaction_policy_version: "1.0".to_owned(),
     })
-    .expect("seal legacy runtime receipt")
+    .map_err(MatrixError::Receipt)
 }
 
-fn legacy_matrix_receipt() -> MatrixReceiptEnvelopeV2 {
+fn legacy_matrix_receipt_from_production_plan(
+    plan: &MatrixPlanEnvelopeV2,
+) -> Result<MatrixReceiptEnvelopeV2, MatrixError> {
+    plan.validate_profile_binding()?;
+    let runtime_receipts = plan
+        .plan
+        .runtimes
+        .iter()
+        .map(|runtime| {
+            Ok(MatrixRuntimeReceiptV2 {
+                runtime_id: runtime.id.clone(),
+                receipt: legacy_runtime_receipt(plan, &runtime.id)?,
+            })
+        })
+        .collect::<Result<Vec<_>, MatrixError>>()?;
     MatrixReceiptEnvelopeV2::seal(MatrixReceiptV2 {
         schema_version: "2.0".to_owned(),
         producer: ProducerEvidence {
-            name: "commit-ci-preflight".to_owned(),
-            version: LEGACY_MATRIX_PRODUCER.to_owned(),
+            name: env!("CARGO_PKG_NAME").to_owned(),
+            version: plan.profile().producer_version().to_owned(),
         },
         repository: RepositoryEvidence {
-            repository: "example/legacy-matrix".to_owned(),
+            repository: plan.plan.project.clone(),
             commit_sha: LEGACY_MATRIX_COMMIT.to_owned(),
             dirty: false,
         },
@@ -213,32 +254,17 @@ fn legacy_matrix_receipt() -> MatrixReceiptEnvelopeV2 {
             started_at_utc: "2026-08-16T10:00:00Z".to_owned(),
             finished_at_utc: "2026-08-16T10:00:02Z".to_owned(),
         },
-        configuration_digest: LEGACY_MATRIX_OUTER_DIGEST.to_owned(),
-        runtime_receipts: vec![
-            MatrixRuntimeReceiptV2 {
-                runtime_id: "python311".to_owned(),
-                receipt: legacy_runtime_receipt(
-                    "python311",
-                    LEGACY_MATRIX_PY311_IMAGE,
-                    LEGACY_MATRIX_PY311_DIGEST,
-                    "python311-version",
-                ),
-            },
-            MatrixRuntimeReceiptV2 {
-                runtime_id: "python312".to_owned(),
-                receipt: legacy_runtime_receipt(
-                    "python312",
-                    LEGACY_MATRIX_PY312_IMAGE,
-                    LEGACY_MATRIX_PY312_DIGEST,
-                    "python312-version",
-                ),
-            },
-        ],
+        configuration_digest: plan.plan_digest()?.to_owned(),
+        runtime_receipts,
         overall_status: EvidenceStatus::Pass,
         incomplete_reason: None,
         redaction_policy_version: "1.0".to_owned(),
     })
-    .expect("seal legacy Matrix receipt")
+}
+
+fn legacy_matrix_receipt() -> MatrixReceiptEnvelopeV2 {
+    legacy_matrix_receipt_from_production_plan(&legacy_production_plan())
+        .expect("production-derived legacy Matrix receipt")
 }
 
 fn matrix_report(

@@ -298,9 +298,19 @@ fixture provenance:
 
 - source commit: `044697dee9a0d678d30a4847d62ddf9b4970505b`;
 - source tree: `5220164edf17831ce0c42dae1c14300ed1045015`;
-- isolated binary SHA-256:
+- preliminary isolated-reproduction binary SHA-256:
   `71d64cdbb1bb509bb459aebd6c53e06d819150de42be4fe3715c35bd73426af7`;
 - exact plan command and raw canonical output.
+
+Three separately built binaries from that exact commit/tree have distinct
+evidence roles and are not interchangeable. The `71d64c...` build was the
+preliminary isolated reproduction and was not the checked-in fixture generator.
+Task 1 generated the checked-in fixture with the non-retained `6372674cff4b7f8bef6272403f1493cbc88228f031759d588aa532589cde0106`
+build recorded in `matrix-v2-legacy-plan-044697.provenance.json`. The later
+retained verifier used for exact replay is
+`5321ff4d291ec24db6a7a5919bc08fc00a9d63767b630a3469fc39318c400277`,
+recorded in `historical-verifier-044697.provenance.json`. Reproducible plan
+bytes across these builds do not make their executable hashes identical.
 
 The fixture is not Latent-TRIZ-specific. A separate adopter regression may use
 the public Latent-TRIZ configuration and trusted digests as end-to-end evidence.

@@ -16,8 +16,12 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::config::{NormalizedCache, NormalizedReceipt, NormalizedRuntime};
-use crate::matrix::{MatrixError, MatrixPlanV2};
+use crate::config::{
+    NormalizedArtifactContract, NormalizedCache, NormalizedCheck, NormalizedEnvironment,
+    NormalizedFixedEnvironment, NormalizedReceipt, NormalizedRuntime,
+    NormalizedRuntimeInternalEnvironment,
+};
+use crate::matrix::{MatrixError, MatrixPlanV2, MatrixRuntimePlanV2};
 use crate::receipt::canonical_digest;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,9 +52,9 @@ struct LegacyExecutionPlanV1 {
     schema_version: String,
     project: String,
     runtime: LegacyNormalizedRuntime,
-    receipt: NormalizedReceipt,
+    receipt: LegacyNormalizedReceipt,
     environment_allow: Vec<String>,
-    caches: Vec<NormalizedCache>,
+    caches: Vec<LegacyNormalizedCache>,
     checks: Vec<LegacyNormalizedCheck>,
 }
 
@@ -58,9 +62,9 @@ struct LegacyExecutionPlanV1 {
 struct LegacyMatrixPlanV2 {
     schema_version: String,
     project: String,
-    receipt: NormalizedReceipt,
+    receipt: LegacyNormalizedReceipt,
     environment_allow: Vec<String>,
-    caches: Vec<NormalizedCache>,
+    caches: Vec<LegacyNormalizedCache>,
     runtimes: Vec<LegacyMatrixRuntimePlanV2>,
 }
 
@@ -72,6 +76,18 @@ struct LegacyNormalizedRuntime {
     memory_mib: u64,
     pids_limit: u32,
     network: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LegacyNormalizedReceipt {
+    output: String,
+    freshness_seconds: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct LegacyNormalizedCache {
+    id: String,
+    mount_path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -104,62 +120,39 @@ pub(crate) fn project_legacy_basis(
         caches,
         runtimes,
     } = plan;
-    // Matrix V2 has no storage field today. This intentionally exhaustive
-    // destructuring makes any future field addition fail compilation until its
-    // legacy representability classification, including storage, is explicit.
-    for runtime in runtimes {
-        validate_runtime_representability(&runtime.runtime)?;
-    }
-    if !environment.fixed.is_empty() {
-        return Err(MatrixError::LegacyPlanNotRepresentable("environment.fixed"));
-    }
-    if !environment.runtime_internal.is_empty() {
-        return Err(MatrixError::LegacyPlanNotRepresentable(
-            "environment.runtime_internal",
-        ));
-    }
-    if !environment.remote_secret_only.is_empty() {
-        return Err(MatrixError::LegacyPlanNotRepresentable(
-            "environment.remote_secret_only",
-        ));
-    }
+    // Matrix V2 has no storage field today. Exhaustive destructuring at every
+    // current nested boundary makes a future field addition fail compilation
+    // until it is either represented in the historical shape or rejected.
+    let environment_allow = legacy_environment(environment)?;
+    let legacy_receipt = legacy_receipt(receipt);
+    let legacy_caches = caches.iter().map(legacy_cache).collect::<Vec<_>>();
     let mut runtime_digests = BTreeMap::new();
     let mut legacy_runtimes = Vec::with_capacity(runtimes.len());
-    for runtime in runtimes {
-        let checks = runtime
-            .checks
+    for runtime_plan in runtimes {
+        let MatrixRuntimePlanV2 {
+            id,
+            configuration_digest: _,
+            runtime,
+            checks,
+        } = runtime_plan;
+        let checks = checks
             .iter()
-            .map(|check| {
-                if !check.artifact_contracts.is_empty() {
-                    return Err(MatrixError::LegacyPlanNotRepresentable(
-                        "checks.artifact_contracts",
-                    ));
-                }
-                Ok(LegacyNormalizedCheck {
-                    id: check.id.clone(),
-                    required: check.required,
-                    argv: check.argv.clone(),
-                    working_directory: check.working_directory.clone(),
-                    timeout_seconds: check.timeout_seconds,
-                    depends_on: check.depends_on.clone(),
-                    artifacts: check.artifacts.clone(),
-                })
-            })
+            .map(legacy_check)
             .collect::<Result<Vec<_>, MatrixError>>()?;
-        let legacy_runtime = legacy_runtime(&runtime.runtime);
+        let legacy_runtime = legacy_runtime(runtime)?;
         let configuration_digest = canonical_digest(&LegacyExecutionPlanV1 {
             schema_version: "1.0".to_owned(),
             project: project.clone(),
             runtime: legacy_runtime.clone(),
-            receipt: receipt.clone(),
-            environment_allow: environment.inherit.clone(),
-            caches: caches.clone(),
+            receipt: legacy_receipt.clone(),
+            environment_allow: environment_allow.clone(),
+            caches: legacy_caches.clone(),
             checks: checks.clone(),
         })
         .map_err(MatrixError::Receipt)?;
-        runtime_digests.insert(runtime.id.clone(), configuration_digest.clone());
+        runtime_digests.insert(id.clone(), configuration_digest.clone());
         legacy_runtimes.push(LegacyMatrixRuntimePlanV2 {
-            id: runtime.id.clone(),
+            id: id.clone(),
             configuration_digest,
             runtime: legacy_runtime,
             checks,
@@ -170,34 +163,125 @@ pub(crate) fn project_legacy_basis(
         plan: LegacyMatrixPlanV2 {
             schema_version: schema_version.clone(),
             project: project.clone(),
-            receipt: receipt.clone(),
-            environment_allow: environment.inherit.clone(),
-            caches: caches.clone(),
+            receipt: legacy_receipt,
+            environment_allow,
+            caches: legacy_caches,
             runtimes: legacy_runtimes,
         },
         runtime_digests,
     })
 }
 
-fn validate_runtime_representability(runtime: &NormalizedRuntime) -> Result<(), MatrixError> {
-    if runtime.pull_policy.is_some() {
+fn legacy_environment(environment: &NormalizedEnvironment) -> Result<Vec<String>, MatrixError> {
+    let NormalizedEnvironment {
+        inherit,
+        fixed,
+        runtime_internal,
+        remote_secret_only,
+    } = environment;
+    if let Some(binding) = fixed.first() {
+        let NormalizedFixedEnvironment {
+            name: _,
+            value_digest: _,
+        } = binding;
+        return Err(MatrixError::LegacyPlanNotRepresentable("environment.fixed"));
+    }
+    if let Some(binding) = runtime_internal.first() {
+        let NormalizedRuntimeInternalEnvironment {
+            name: _,
+            cache_id: _,
+            container_target: _,
+        } = binding;
+        return Err(MatrixError::LegacyPlanNotRepresentable(
+            "environment.runtime_internal",
+        ));
+    }
+    if !remote_secret_only.is_empty() {
+        return Err(MatrixError::LegacyPlanNotRepresentable(
+            "environment.remote_secret_only",
+        ));
+    }
+    Ok(inherit.clone())
+}
+
+fn legacy_receipt(receipt: &NormalizedReceipt) -> LegacyNormalizedReceipt {
+    let NormalizedReceipt {
+        output,
+        freshness_seconds,
+    } = receipt;
+    LegacyNormalizedReceipt {
+        output: output.clone(),
+        freshness_seconds: *freshness_seconds,
+    }
+}
+
+fn legacy_cache(cache: &NormalizedCache) -> LegacyNormalizedCache {
+    let NormalizedCache { id, mount_path } = cache;
+    LegacyNormalizedCache {
+        id: id.clone(),
+        mount_path: mount_path.clone(),
+    }
+}
+
+fn legacy_runtime(runtime: &NormalizedRuntime) -> Result<LegacyNormalizedRuntime, MatrixError> {
+    let NormalizedRuntime {
+        kind,
+        image,
+        cpu_count,
+        memory_mib,
+        pids_limit,
+        network,
+        pull_policy,
+        swap_mode,
+    } = runtime;
+    if pull_policy.is_some() {
         return Err(MatrixError::LegacyPlanNotRepresentable(
             "runtime.pull_policy",
         ));
     }
-    if runtime.swap_mode.is_some() {
+    if swap_mode.is_some() {
         return Err(MatrixError::LegacyPlanNotRepresentable("runtime.swap_mode"));
     }
-    Ok(())
+    Ok(LegacyNormalizedRuntime {
+        kind: *kind,
+        image: image.clone(),
+        cpu_count: *cpu_count,
+        memory_mib: *memory_mib,
+        pids_limit: *pids_limit,
+        network: *network,
+    })
 }
 
-fn legacy_runtime(runtime: &NormalizedRuntime) -> LegacyNormalizedRuntime {
-    LegacyNormalizedRuntime {
-        kind: runtime.kind,
-        image: runtime.image.clone(),
-        cpu_count: runtime.cpu_count,
-        memory_mib: runtime.memory_mib,
-        pids_limit: runtime.pids_limit,
-        network: runtime.network,
+fn legacy_check(check: &NormalizedCheck) -> Result<LegacyNormalizedCheck, MatrixError> {
+    let NormalizedCheck {
+        id,
+        required,
+        argv,
+        working_directory,
+        timeout_seconds,
+        depends_on,
+        artifacts,
+        artifact_contracts,
+    } = check;
+    if let Some(contract) = artifact_contracts.first() {
+        let NormalizedArtifactContract {
+            path: _,
+            kind: _,
+            max_bytes: _,
+            max_entries: _,
+            producer_check: _,
+        } = contract;
+        return Err(MatrixError::LegacyPlanNotRepresentable(
+            "checks.artifact_contracts",
+        ));
     }
+    Ok(LegacyNormalizedCheck {
+        id: id.clone(),
+        required: *required,
+        argv: argv.clone(),
+        working_directory: working_directory.clone(),
+        timeout_seconds: *timeout_seconds,
+        depends_on: depends_on.clone(),
+        artifacts: artifacts.clone(),
+    })
 }

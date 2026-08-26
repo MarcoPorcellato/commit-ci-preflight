@@ -163,7 +163,8 @@ and zero pre-admission mutation
 The historical verifier is
 `tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`,
 marked `#[ignore]` and run with `--ignored` only when
-`CCP_HISTORICAL_VERIFIER_044697` points to the provenance-pinned SHA
-`044697dee9a0d678d30a4847d62ddf9b4970505b`; the ordinary suite does not prove
-historical acceptance. `verify` has no profile flag. Tests do not infer policy
-or general trust; rollback target is `current-v2`.
+`CCP_HISTORICAL_VERIFIER_044697` points to the retained verifier binary with
+SHA-256 `5321ff4d291ec24db6a7a5919bc08fc00a9d63767b630a3469fc39318c400277`,
+The ordinary suite does not prove historical acceptance. The retained binary
+was built from commit `044697dee9a0d678d30a4847d62ddf9b4970505b`. `verify` has no profile flag.
+Tests do not infer policy or general trust; rollback target is `current-v2`.
