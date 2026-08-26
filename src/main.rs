@@ -1350,12 +1350,12 @@ fn print_matrix_run(
         lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
         return Err(CliError::RunJournal(error));
     }
+    let admission =
+        AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
     if let Err(error) = envelope.validate_profile_binding() {
         lifecycle.fail(RunFailureKindV1::PreparationFailed)?;
         return Err(CliError::Matrix(error));
     }
-    let admission =
-        AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
     let guard = match admission.acquire(
         Duration::from_secs(admission_timeout_seconds),
         &cancellation,
