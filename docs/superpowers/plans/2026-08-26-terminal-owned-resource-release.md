@@ -363,9 +363,9 @@ fn guard_cache_pin_remains_live_through_terminal_release() {
 Run:
 
 ```bash
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::benchmark_terminal_preserves_primary_and_release_precedence
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::guard_exec_finalization_releases_once_for_success_error_and_resource_pressure
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::guard_cache_pin_remains_live_through_terminal_release
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::benchmark_terminal_preserves_primary_and_release_precedence
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::guard_exec_finalization_releases_once_for_success_error_and_resource_pressure
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::guard_cache_pin_remains_live_through_terminal_release
 ```
 
 Expected: the benchmark test fails to compile because
@@ -443,10 +443,10 @@ or read the barrier again. Keep the lexical cache-pin scope around
 Run:
 
 ```bash
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::benchmark_terminal_preserves_primary_and_release_precedence
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::guard_exec_finalization_releases_once_for_success_error_and_resource_pressure
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::guard_cache_pin_remains_live_through_terminal_release
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::guard_cache_pins_
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::benchmark_terminal_preserves_primary_and_release_precedence
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::guard_exec_finalization_releases_once_for_success_error_and_resource_pressure
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::guard_cache_pin_remains_live_through_terminal_release
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::guard_cache_pins_
 rtk cargo test --offline --locked --test guard_exec_cli
 rtk cargo fmt --check
 rtk git diff --check
@@ -568,7 +568,7 @@ Import `AdmissionError`, `ResourceGuardError`, `RunFailureKindV1`, and
 Run:
 
 ```bash
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::run_terminal_
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::run_terminal_
 ```
 
 Expected: compilation fails because `finalize_run_terminal` and
@@ -691,8 +691,8 @@ Immediately compile the historical path before editing matrix run:
 
 ```bash
 rtk cargo check --offline --locked --bin commit-ci-preflight
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::run_terminal_
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::watchdog_barrier_joins_once_after_early_run_error
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::run_terminal_
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::watchdog_barrier_joins_once_after_early_run_error
 ```
 
 Expected: the binary compiles and the historical terminal/watchdog tests pass;
@@ -866,10 +866,10 @@ watchdog classification coverage.
 Run:
 
 ```bash
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::run_terminal_
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::all_heavy_family_adapters_release_once_and_fail_closed
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::benchmark_and_run_preserve_opaque_terminal_outcomes
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::watchdog_barrier_joins_once_after_early_run_error
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::run_terminal_
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::all_heavy_family_adapters_release_once_and_fail_closed
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::benchmark_and_run_preserve_opaque_terminal_outcomes
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::watchdog_barrier_joins_once_after_early_run_error
 rtk cargo test --offline --locked --lib run::tests::
 rtk cargo test --offline --locked --lib resource::tests::watchdog_
 rtk cargo test --offline --locked --test runtime_cli
@@ -1012,10 +1012,10 @@ Run:
 
 ```bash
 rtk cargo test --offline --locked --bin commit-ci-preflight terminal::tests::
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::run_terminal_
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::all_heavy_family_adapters_release_once_and_fail_closed
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::guard_cache_pin_remains_live_through_terminal_release
-rtk cargo test --offline --locked --bin commit-ci-preflight main::tests::watchdog_barrier_joins_once_after_early_run_error
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::run_terminal_
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::all_heavy_family_adapters_release_once_and_fail_closed
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::guard_cache_pin_remains_live_through_terminal_release
+rtk cargo test --offline --locked --bin commit-ci-preflight tests::watchdog_barrier_joins_once_after_early_run_error
 rtk cargo test --offline --locked --lib run::tests::
 rtk cargo test --offline --locked --lib resource::tests::watchdog_
 rtk cargo test --offline --locked --test guard_exec_cli
