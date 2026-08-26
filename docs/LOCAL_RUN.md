@@ -92,6 +92,9 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
     joins before slot release. Compressor occupancy alone never cancels an
     otherwise healthy in-progress run.
     `benchmark` has no mid-workload watchdog in this tranche.
+    The watchdog joins before admission release, and admission release is
+    attempted exactly once. A release failure overrides the primary result.
+    `benchmark` has no mid-workload watchdog.
 13. Execute the `run` checks or benchmark workload with timeout, cancellation, and
     stale-generation guards.
 14. Mark cache entries complete only when every check passes.

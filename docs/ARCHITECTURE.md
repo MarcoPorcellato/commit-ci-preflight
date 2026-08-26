@@ -87,6 +87,15 @@ executor, cache state, execution mode, target platform and optional requested
 CPU/memory ceilings. Persistence is advisory: failures produce a generic warning
 without changing process, admission, cancellation or receipt semantics.
 
+The run, benchmark, and guarded-terminal paths share a private terminal
+finalization primitive. It completes the owned workload result, joins any
+applicable watchdog, and then attempts the admission release exactly once;
+release failure overrides the primary result. This primitive does not change
+the cache-pin lifetime: a managed-cache pin remains held for the guarded child
+lifecycle and is released when that operation returns. Nor does it change the
+source-snapshot lifecycle: a run cleans its snapshot after terminal admission
+finalization and before sealing the receipt.
+
 On macOS, a fresh strict sample from the absolute system tools is required
 after slot acquisition and before heavy work. `run` starts a two-second
 resource watchdog before local execution; `benchmark` has pre-start admission
