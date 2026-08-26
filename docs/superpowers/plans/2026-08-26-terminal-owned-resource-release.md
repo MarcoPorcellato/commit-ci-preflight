@@ -452,8 +452,10 @@ rtk cargo fmt --check
 rtk git diff --check
 ```
 
-Expected: all focused and existing guard tests pass; no pin is released before
-the terminal release closure returns.
+Expected: the named deterministic tests pass; `guard_exec_cli` compiles and
+exits 0, but its native opt-in test remains ignored (0 passed, 1 ignored) and
+is NOT_RUN, not PASS. No pin is released before the terminal release closure
+returns.
 
 - [ ] **Step 6: Commit the benchmark and guard adapters**
 
@@ -1026,8 +1028,11 @@ rtk cargo test --offline --locked --test matrix_contract
 rtk cargo test --offline --locked --test cache_pin_contract
 ```
 
-Expected: every named suite passes. `process_supervisor` may start its existing
-local fixture processes, but no new test may invoke CCP or Docker.
+Expected: all named deterministic suites pass. `guard_exec_cli` compiles and
+exits 0, but its native opt-in test remains ignored (0 passed, 1 ignored) and
+is NOT_RUN, not PASS; this does not block deterministic task closure.
+`process_supervisor` may start its existing local fixture processes, but no
+test may acquire admission or invoke CCP/Docker.
 
 - [ ] **Step 4: Run the complete native suite and doctests**
 
