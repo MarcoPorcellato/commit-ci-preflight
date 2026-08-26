@@ -222,3 +222,20 @@ and artifact contracts. It uses the same CCP canonical JSON v1 profile
 described in `docs/RECEIPT_SPEC.md`.
 
 The digest is integrity evidence, not a signature or identity attestation.
+# Matrix V2 compatibility profile
+
+The `matrix-v2-legacy-v1` profile is Matrix-only compatibility for the legacy
+producer suffix. It does not widen the schema or infer policy. Review the plan
+and copy its digests into Matrix policy v2; never copy them from a completed
+receipt. Use the same command parity sequence for each selected source:
+
+```console
+commit-ci-preflight plan --matrix-plan-profile matrix-v2-legacy-v1 --json
+commit-ci-preflight doctor --matrix-plan-profile matrix-v2-legacy-v1 --json
+commit-ci-preflight dry-run --matrix-plan-profile matrix-v2-legacy-v1 --json
+commit-ci-preflight run --matrix-plan-profile matrix-v2-legacy-v1 --generation N --json
+```
+
+Legacy and current cache identities are separate. `verify` has no profile flag.
+An old trusted historical verifier must accept the exact receipt before policy
+migration; this is evidence acceptance, not a general trust claim.

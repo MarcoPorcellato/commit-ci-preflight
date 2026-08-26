@@ -228,3 +228,11 @@ Include:
 Keep private source, raw logs, credentials, tokens, environment values, and
 personal paths out of public issues. Security findings belong in the private
 channel described by [SECURITY.md](../SECURITY.md).
+# Matrix V2 legacy troubleshooting
+
+For Matrix-only compatibility, confirm the exact `matrix-v2-legacy-v1` profile
+and the command parity sequence (`plan`, `doctor`, `dry-run`, `run`). Legacy and
+current cache namespaces must not be mixed. `verify` has no profile flag. Before
+policy migration, an old trusted historical verifier must accept the exact
+receipt. Review digests into Matrix policy v2 only from the reviewed plan, never
+from a completed receipt; do not infer policy or general trust.

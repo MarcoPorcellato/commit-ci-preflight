@@ -202,3 +202,10 @@ cargo test --test receipt_contract
 
 Regeneration is accepted only when the schema/fixture diff is intentionally
 reviewed. Tests require generated and pinned bytes to remain identical.
+# Compatibility-profile boundary
+
+Receipts produced under `matrix-v2-legacy-v1` are Matrix-only compatibility
+evidence and retain the producer suffix. The profile applies to `plan`,
+`doctor`, `dry-run`, and `run`; `verify` has no profile flag. A historical
+verifier must accept the exact receipt before Matrix policy v2 migration. This
+does not widen the schema, infer policy, or establish general trust.

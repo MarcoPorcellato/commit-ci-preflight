@@ -25,6 +25,50 @@ const ROADMAP: &str = include_str!("../ROADMAP.md");
 const SOCIAL_PREVIEW: &str = include_str!("../docs/assets/social-preview.svg");
 
 #[test]
+fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let docs = [
+        "docs/CONFIGURATION.md",
+        "docs/LOCAL_RUN.md",
+        "docs/MULTI_RUNTIME_RECEIPTS.md",
+        "docs/RECEIPT_SPEC.md",
+        "docs/GITHUB_GATE.md",
+        "docs/ADOPTION_GUIDE.md",
+        "docs/CACHE_AND_WORKSPACE.md",
+        "docs/TROUBLESHOOTING.md",
+        "docs/INVARIANT_EVIDENCE_MATRIX.md",
+        "docs/TESTING_AND_FAULT_INJECTION.md",
+    ];
+    let corpus = docs
+        .iter()
+        .map(|path| fs::read_to_string(root.join(path)).expect("read public documentation"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for required in [
+        "matrix-v2-legacy-v1",
+        "Matrix-only",
+        "producer suffix",
+        "command parity",
+        "cache namespace",
+        "policy inference",
+        "historical verifier",
+        "current-v2",
+    ] {
+        assert!(corpus.to_lowercase().contains(&required.to_lowercase()), "missing documentation contract: {required}");
+    }
+    let source = fs::read_dir(root.join("src")).expect("read src");
+    let source_text = source
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().and_then(|v| v.to_str()) == Some("rs"))
+        .map(|entry| fs::read_to_string(entry.path()).expect("read source"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in ["latent-adopter", "golden digest", "golden_digest"] {
+        assert!(!source_text.to_lowercase().contains(forbidden), "forbidden production digest constant: {forbidden}");
+    }
+}
+
+#[test]
 fn issue_template_yaml_is_present_and_safe() {
     assert_yaml_mapping("issue template config", ISSUE_CONFIG, true);
     assert_yaml_mapping("bug report form", BUG_FORM, true);

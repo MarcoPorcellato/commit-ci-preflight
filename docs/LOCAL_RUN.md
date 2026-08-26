@@ -213,3 +213,14 @@ release. This declaration is cooperative and non-attesting: undeclared paths
 are not pinned, and manual or non-cooperative replacement is unsupported. The
 flags do not initialize, repair, delete, quarantine, publish, or attest cache
 contents. Legacy `guard exec` without these flags remains unchanged.
+# Matrix V2 legacy operator sequence
+
+For Matrix-only compatibility, use the exact `matrix-v2-legacy-v1` profile and
+preserve command parity: `plan`, `doctor`, `dry-run`, then `run` with generation
+`N`. The operator reviews and copies digests into Matrix policy v2, never from a
+completed receipt. The producer suffix is part of the reviewed evidence.
+
+`verify` has no profile flag. Legacy and current cache namespace identities are
+separate, and an old trusted historical verifier must accept the exact receipt
+before policy migration. These statements document boundaries and do not infer
+policy or general trust.

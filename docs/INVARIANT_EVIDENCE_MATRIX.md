@@ -39,3 +39,18 @@ The implemented source boundary is explicit:
 
 This closes T2 in deterministic source evidence. Native platform,
 crash/power-loss and release qualification remain separate gates.
+# Task 8 documentation evidence matrix
+
+| Invariant | Focused evidence |
+|---|---|
+| Projection reproducibility | projection contract test |
+| Representability rejection | representability test |
+| Command parity | profile CLI contract test |
+| Cache separation | cache identity test |
+| Producer uniformity | producer suffix test |
+| Historical verifier acceptance | compatibility verifier test |
+| Mutation rejection | mutation-boundary test |
+| Zero pre-admission mutation | admission journal test |
+
+All entries are Matrix-only evidence for `matrix-v2-legacy-v1`; they do not infer
+policy or establish general trust. Rollback target is `current-v2`.

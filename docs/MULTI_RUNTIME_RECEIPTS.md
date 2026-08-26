@@ -164,3 +164,11 @@ project code.
 Regenerate all pinned contracts with `cargo run --locked --example
 generate_contract`. The v1 schema/fixture tests require historical v1 output
 to remain byte-for-byte stable.
+# Matrix-only legacy compatibility
+
+The `matrix-v2-legacy-v1` profile is Matrix-only and retains the producer suffix
+as reviewed evidence. Run `plan`, `doctor`, `dry-run`, and `run` with the profile
+for command parity; `verify` has no profile flag. Copy reviewed digests into
+Matrix policy v2, never from a completed receipt. Legacy and current cache
+namespaces remain separate. Historical verifier acceptance is required before
+migration and is not policy inference or a general trust statement.

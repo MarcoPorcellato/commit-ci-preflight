@@ -147,3 +147,10 @@ trusted configuration validation.
 6. Record platform-native evidence separately from deterministic tests.
 7. Keep fault fixtures free of secrets, personal data, network access, and the
    operator's real cache or repository state.
+# Matrix V2 compatibility test matrix
+
+Focused tests cover projection reproducibility, representability rejection,
+command parity, cache namespace separation, producer uniformity, historical
+verifier acceptance, mutation rejection, and zero pre-admission mutation for
+the Matrix-only `matrix-v2-legacy-v1` profile. `verify` has no profile flag.
+Tests should not infer policy or general trust; rollback target is `current-v2`.
