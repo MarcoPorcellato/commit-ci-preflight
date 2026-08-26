@@ -67,6 +67,50 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
             assert!(text.contains(snippet), "{path} missing {snippet}");
         }
     }
+    for (path, name) in [
+        (
+            "tests/matrix_contract.rs",
+            "legacy_profile_reproduces_historical_plan",
+        ),
+        (
+            "tests/matrix_contract.rs",
+            "legacy_profile_rejects_each_non_representable_current_field",
+        ),
+        (
+            "tests/matrix_contract.rs",
+            "legacy_receipt_provenance_is_uniform",
+        ),
+        (
+            "tests/plan_cli.rs",
+            "matrix_plan_profile_flag_is_exposed_only_by_configuration_commands",
+        ),
+        (
+            "tests/runtime_cli.rs",
+            "legacy_profile_uses_distinct_plan_cache_identity",
+        ),
+        (
+            "tests/runtime_cli.rs",
+            "legacy_profile_rejection_precedes_shared_state",
+        ),
+        (
+            "tests/runtime_cli.rs",
+            "legacy_profile_rejects_current_only_matrix_syntax_before_shared_state",
+        ),
+        (
+            "tests/verification_contract.rs",
+            "current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations",
+        ),
+        (
+            "tests/verification_contract.rs",
+            "historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations",
+        ),
+    ] {
+        let source = fs::read_to_string(root.join(path)).expect("read referenced test");
+        assert!(
+            source.contains(&format!("fn {name}")),
+            "missing referenced test {path}::{name}"
+        );
+    }
     for (path, snippets) in [
         (
             "docs/ADOPTION_GUIDE.md",
@@ -83,7 +127,7 @@ fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
         (
             "docs/INVARIANT_EVIDENCE_MATRIX.md",
             &[
-                "tests/matrix_contract.rs::legacy_profile_projection_matches_historical_fixture",
+            "tests/matrix_contract.rs::legacy_profile_reproduces_historical_plan",
                 "current-v2",
             ],
         ),

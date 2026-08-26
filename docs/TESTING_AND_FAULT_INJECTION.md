@@ -150,11 +150,11 @@ trusted configuration validation.
 ## Matrix V2 compatibility test matrix
 
 Focused tests cover the Matrix-only `matrix-v2-legacy-v1` profile: projection
-`tests/matrix_contract.rs::legacy_profile_projection_matches_historical_fixture`,
+`tests/matrix_contract.rs::legacy_profile_reproduces_historical_plan`,
 representability `tests/matrix_contract.rs::legacy_profile_rejects_each_non_representable_current_field`,
 command parity and cache identity
 `tests/runtime_cli.rs::legacy_profile_uses_distinct_plan_cache_identity`,
-producer uniformity `tests/receipt_contract.rs::explicit_producer_version_is_sealed`,
+producer uniformity `tests/matrix_contract.rs::legacy_receipt_provenance_is_uniform`,
 mutation rejection
 `tests/verification_contract.rs::current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`,
 and zero pre-admission mutation
