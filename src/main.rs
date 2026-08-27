@@ -2159,17 +2159,39 @@ where
     Seal: FnOnce(T) -> Result<S, CliError>,
     Write: FnOnce(S) -> Result<O, CliError>,
 {
-    (ports.validate_before_admission)()?;
-    let guard = (ports.acquire)()?;
-    let material = finalize_run_terminal(
-        (ports.execute)(),
-        ports.complete,
-        || (ports.release)(guard),
-        ports.journal,
-    )?;
-    (ports.cleanup_snapshot)()?;
-    let sealed = (ports.seal)(material)?;
-    (ports.write)(sealed)
+    let MatrixTerminalLifecyclePorts {
+        validate_before_admission,
+        acquire,
+        execute,
+        complete,
+        release,
+        mut journal,
+        cleanup_snapshot,
+        seal,
+        write,
+    } = ports;
+    validate_before_admission()?;
+    let guard = acquire()?;
+    let material = finalize_run_terminal(execute(), complete, || release(guard), &mut journal)?;
+    cleanup_snapshot()?;
+    let sealed = match seal(material) {
+        Ok(sealed) => sealed,
+        Err(error) => {
+            journal(RunTerminalJournalEvent::PrimaryFailure(
+                RunFailureKindV1::FinalizationFailed,
+            ))?;
+            return Err(error);
+        }
+    };
+    match write(sealed) {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            journal(RunTerminalJournalEvent::PrimaryFailure(
+                RunFailureKindV1::FinalizationFailed,
+            ))?;
+            Err(error)
+        }
+    }
 }
 
 struct GuardExecSession {
@@ -2948,6 +2970,7 @@ mod tests {
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
     use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
+    use commit_ci_preflight::run::RunError;
     use commit_ci_preflight::run_journal::{RunFailureKindV1, RunJournalError};
     use std::ffi::OsString;
     use std::fs;
@@ -3358,6 +3381,105 @@ timeout_seconds = 60
                 "journal cleanup-pending"
             ]
         );
+    }
+
+    #[test]
+    fn matrix_terminal_orchestration_journals_seal_and_write_failures() {
+        use std::cell::RefCell;
+
+        #[derive(Clone, Copy)]
+        enum Failure {
+            Seal,
+            Write,
+        }
+
+        for (failure, expected) in [
+            (
+                Failure::Seal,
+                vec![
+                    "validate",
+                    "acquire",
+                    "complete/join",
+                    "release",
+                    "snapshot cleanup",
+                    "seal",
+                    "journal finalization-failed",
+                ],
+            ),
+            (
+                Failure::Write,
+                vec![
+                    "validate",
+                    "acquire",
+                    "complete/join",
+                    "release",
+                    "snapshot cleanup",
+                    "seal",
+                    "write",
+                    "journal finalization-failed",
+                ],
+            ),
+        ] {
+            let events = RefCell::new(Vec::new());
+            let result = orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+                validate_before_admission: || {
+                    events.borrow_mut().push("validate");
+                    Ok(())
+                },
+                acquire: || {
+                    events.borrow_mut().push("acquire");
+                    Ok(())
+                },
+                execute: || Ok("material"),
+                complete: |primary| {
+                    events.borrow_mut().push("complete/join");
+                    primary
+                },
+                release: |_| {
+                    events.borrow_mut().push("release");
+                    Ok(())
+                },
+                journal: |event| {
+                    events.borrow_mut().push(match event {
+                        RunTerminalJournalEvent::PrimaryFailure(
+                            RunFailureKindV1::FinalizationFailed,
+                        ) => "journal finalization-failed",
+                        _ => "unexpected journal event",
+                    });
+                    Ok(())
+                },
+                cleanup_snapshot: || {
+                    events.borrow_mut().push("snapshot cleanup");
+                    Ok(())
+                },
+                seal: |material| {
+                    events.borrow_mut().push("seal");
+                    if matches!(failure, Failure::Seal) {
+                        Err(CliError::Matrix(MatrixError::InvalidReceipt))
+                    } else {
+                        Ok(material)
+                    }
+                },
+                write: |sealed| {
+                    events.borrow_mut().push("write");
+                    if matches!(failure, Failure::Write) {
+                        Err(CliError::Matrix(MatrixError::Run(
+                            RunError::UnsafeReceiptPath,
+                        )))
+                    } else {
+                        events.borrow_mut().push("sealed");
+                        Ok(sealed)
+                    }
+                },
+            });
+
+            assert!(matches!(result, Err(CliError::Matrix(_))));
+            assert_eq!(&*events.borrow(), expected.as_slice());
+            assert!(
+                !events.borrow().contains(&"sealed"),
+                "failed sealing or writing must not transition the journal to sealed"
+            );
+        }
     }
 
     #[test]
