@@ -488,6 +488,14 @@ pub struct MatrixRunOutcomeV2 {
     pub receipt_path: PathBuf,
 }
 
+/// Unsealed, unpublished Matrix receipt material collected while the caller
+/// owns admission and source-snapshot lifecycle. It must be revalidated and
+/// sealed only after terminal admission finalization and snapshot cleanup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixRunMaterialV2 {
+    receipt: MatrixReceiptV2,
+}
+
 /// Inputs that are fixed for the complete matrix execution. Grouping these
 /// immutable values keeps the executor below Clippy's argument-count limit
 /// without obscuring the owned admission/watchdog dependencies.
@@ -500,16 +508,18 @@ pub struct MatrixRunRequestV2<'a> {
 }
 
 /// Execute every independently pinned runtime sequentially under one caller
-/// owned admission/watchdog session, then publish exactly one outer receipt.
-/// The inner v1 receipts stay in memory: no intermediate source-tree mutation
-/// can make a later runtime observe a different Git state.
+/// owned admission/watchdog session and return unsealed receipt material. The
+/// caller must finalize admission, clean the source snapshot, then seal and
+/// publish the outer receipt. The inner v1 receipts stay in memory: no
+/// intermediate source-tree mutation can make a later runtime observe a
+/// different Git state.
 pub fn execute_matrix_run_v2(
     request: &MatrixRunRequestV2<'_>,
     supervisor: &dyn SupervisorPort,
     cancellation: &CancellationToken,
     clock: &dyn Clock,
     barrier: &mut dyn CompletionBarrier,
-) -> Result<MatrixRunOutcomeV2, MatrixError> {
+) -> Result<MatrixRunMaterialV2, MatrixError> {
     request.envelope.validate_profile_binding()?;
     let started_at_utc = clock.now_utc().map_err(MatrixError::Run)?;
     let mut runtime_receipts = Vec::new();
@@ -574,10 +584,9 @@ pub fn execute_matrix_run_v2(
         started_at_utc: &started_at_utc,
     })
     .map_err(MatrixError::Receipt)?;
-    let producer = validate_matrix_receipts_for_seal(request.envelope, &runtime_receipts)?;
-    let receipt = MatrixReceiptEnvelopeV2::seal(MatrixReceiptV2 {
+    let receipt = MatrixReceiptV2 {
         schema_version: MATRIX_RECEIPT_SCHEMA_VERSION.to_owned(),
-        producer,
+        producer: first.receipt.receipt.producer.clone(),
         repository: repository_evidence,
         run: RunEvidence {
             run_id,
@@ -591,18 +600,29 @@ pub fn execute_matrix_run_v2(
         incomplete_reason: (overall_status == EvidenceStatus::Pending)
             .then(|| "one or more required checks were not run".to_owned()),
         redaction_policy_version,
-    })?;
+    };
+    Ok(MatrixRunMaterialV2 { receipt })
+}
+
+/// Revalidate the selected profile and every inner receipt immediately before
+/// sealing the outer Matrix receipt.
+pub fn seal_matrix_run_material(
+    envelope: &MatrixPlanEnvelopeV2,
+    material: MatrixRunMaterialV2,
+) -> Result<MatrixReceiptEnvelopeV2, MatrixError> {
+    validate_matrix_receipts_for_seal(envelope, &material.receipt.runtime_receipts)?;
+    MatrixReceiptEnvelopeV2::seal(material.receipt)
+}
+
+/// Atomically publish a previously sealed Matrix receipt. Callers must invoke
+/// this only after caller-owned terminal and source-snapshot lifecycle steps.
+pub fn write_matrix_receipt(
+    repository: &Path,
+    output: &str,
+    receipt: &MatrixReceiptEnvelopeV2,
+) -> Result<PathBuf, MatrixError> {
     let bytes = receipt.canonical_bytes()?;
-    let receipt_path = write_canonical_receipt_bytes_atomic(
-        request.repository,
-        &request.envelope.plan.receipt.output,
-        &bytes,
-    )
-    .map_err(MatrixError::Run)?;
-    Ok(MatrixRunOutcomeV2 {
-        receipt,
-        receipt_path,
-    })
+    write_canonical_receipt_bytes_atomic(repository, output, &bytes).map_err(MatrixError::Run)
 }
 
 fn validate_matrix_receipts_for_seal(
@@ -1527,7 +1547,11 @@ pids_limit = 16
         )
         .expect("matrix run");
 
-        assert_eq!(outcome.receipt.receipt.runtime_receipts.len(), 2);
+        assert_eq!(outcome.receipt.runtime_receipts.len(), 2);
+        assert!(
+            !repository.join(&envelope.plan.receipt.output).exists(),
+            "matrix execution must return unsealed, unpublished material"
+        );
         let roots = supervisor.execution_roots.lock().expect("execution roots");
         assert_eq!(roots.len(), 2);
         assert_eq!(roots[0], roots[1]);
