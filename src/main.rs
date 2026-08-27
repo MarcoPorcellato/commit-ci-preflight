@@ -1143,6 +1143,9 @@ fn print_run(
             RunTerminalJournalEvent::ReleaseFailure => {
                 lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
             }
+            RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => {
+                lifecycle.cleanup_pending_after_admission_acquired()
+            }
         },
     )?;
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
@@ -1154,6 +1157,9 @@ fn print_run(
                 RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
                 RunTerminalJournalEvent::ReleaseFailure => {
                     lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+                }
+                RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => {
+                    lifecycle.cleanup_pending_after_admission_acquired()
                 }
             },
         );
@@ -1170,6 +1176,9 @@ fn print_run(
                         RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
                         RunTerminalJournalEvent::ReleaseFailure => {
                             lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+                        }
+                        RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => {
+                            lifecycle.cleanup_pending_after_admission_acquired()
                         }
                     },
                 );
@@ -1215,6 +1224,9 @@ fn print_run(
             RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
             RunTerminalJournalEvent::ReleaseFailure => {
                 lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+            }
+            RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => {
+                lifecycle.cleanup_pending_after_admission_acquired()
             }
         },
     )?;
@@ -1415,6 +1427,9 @@ fn print_matrix_run(
                     RunTerminalJournalEvent::ReleaseFailure => lifecycle
                         .borrow_mut()
                         .transition_state(RunJournalStateV1::CleanupPending, None),
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                        .borrow_mut()
+                        .cleanup_pending_after_admission_acquired(),
                 },
             )
         },
@@ -1477,6 +1492,9 @@ fn print_matrix_run(
             RunTerminalJournalEvent::ReleaseFailure => lifecycle
                 .borrow_mut()
                 .transition_state(RunJournalStateV1::CleanupPending, None),
+            RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                .borrow_mut()
+                .cleanup_pending_after_admission_acquired(),
         },
         cleanup_snapshot: || {
             if let Err(error) = source_snapshot.borrow_mut().cleanup() {
@@ -1591,6 +1609,14 @@ impl JournalLifecycleObserver<'_> {
 
     fn fail(&mut self, kind: RunFailureKindV1) -> Result<(), CliError> {
         self.transition_state(RunJournalStateV1::Failed, Some(kind))
+    }
+
+    fn cleanup_pending_after_admission_acquired(&mut self) -> Result<(), CliError> {
+        let at_utc = self.clock.now_utc().map_err(CliError::Run)?;
+        self.store
+            .transition_cleanup_pending_after_admission_acquired(self.run_id, &at_utc)
+            .map_err(CliError::RunJournal)?;
+        Ok(())
     }
 }
 
@@ -2098,6 +2124,7 @@ fn finalize_benchmark_terminal<T>(
 enum RunTerminalJournalEvent {
     PrimaryFailure(RunFailureKindV1),
     ReleaseFailure,
+    ReleaseFailureAfterAdmissionAcquired,
 }
 
 fn finalize_run_terminal<T>(
@@ -2135,7 +2162,13 @@ fn acquire_admission_with_journal<G, L>(
             Err::<G, _>(error),
             std::convert::identity,
             || release(guard),
-            |event| journal(lifecycle, event),
+            |event| match event {
+                RunTerminalJournalEvent::ReleaseFailure => journal(
+                    lifecycle,
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired,
+                ),
+                event => journal(lifecycle, event),
+            },
         ),
     }
 }
@@ -3350,6 +3383,7 @@ timeout_seconds = 60
                         Ok(())
                     }
                     RunTerminalJournalEvent::PrimaryFailure(_) => Ok(()),
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => Ok(()),
                 },
                 cleanup_snapshot: || {
                     events.borrow_mut().push("snapshot cleanup");
@@ -3419,6 +3453,7 @@ timeout_seconds = 60
                         Ok(())
                     }
                     RunTerminalJournalEvent::PrimaryFailure(_) => Ok(()),
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => Ok(()),
                 },
                 cleanup_snapshot: || unreachable!("release failure suppresses snapshot cleanup"),
                 seal: |_: &'static str| unreachable!("release failure suppresses seal"),
@@ -3579,6 +3614,9 @@ timeout_seconds = 60
                     RunTerminalJournalEvent::ReleaseFailure => lifecycle
                         .borrow_mut()
                         .transition_state(RunJournalStateV1::CleanupPending, None),
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                        .borrow_mut()
+                        .cleanup_pending_after_admission_acquired(),
                 },
             );
 
@@ -3616,6 +3654,75 @@ timeout_seconds = 60
             }
             fs::remove_dir_all(root).expect("remove temporary journal root");
         }
+    }
+
+    #[test]
+    fn post_acquisition_release_failure_from_created_persists_cleanup_pending() {
+        struct OwnedGuard<'a> {
+            releases: &'a AtomicUsize,
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ccp-created-post-acquisition-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("temporary journal root");
+        let store = RunJournalStore::initialize(&root).expect("journal store");
+        let run_id = "c".repeat(64);
+        let clock = FixedJournalClock;
+        store
+            .create_run(&run_id, "2026-08-27T12:00:00Z")
+            .expect("created journal");
+        let lifecycle = RefCell::new(JournalLifecycleObserver {
+            store: &store,
+            run_id: &run_id,
+            clock: &clock,
+        });
+        let releases = AtomicUsize::new(0);
+        let mut lifecycle_ref = &lifecycle;
+        let result = acquire_admission_with_journal(
+            &mut lifecycle_ref,
+            |_| {
+                Ok(OwnedGuard {
+                    releases: &releases,
+                })
+            },
+            |_| Err(CliError::RunJournal(RunJournalError::InvalidTransition)),
+            |guard| {
+                guard.releases.fetch_add(1, Ordering::SeqCst);
+                Err(AdmissionError::Clock)
+            },
+            |lifecycle, event| match event {
+                RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.borrow_mut().fail(kind),
+                RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                    .borrow_mut()
+                    .transition_state(RunJournalStateV1::CleanupPending, None),
+                RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                    .borrow_mut()
+                    .cleanup_pending_after_admission_acquired(),
+            },
+        );
+
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            result,
+            Err(CliError::Admission(AdmissionError::Clock))
+        ));
+        let status = store.status().expect("durable journal status");
+        assert_eq!(
+            status.runs[0].state,
+            Some(RunJournalStateV1::CleanupPending)
+        );
+        assert_eq!(
+            status.runs[0].classification,
+            RecoveryClassificationV1::CleanupRequired
+        );
+        assert_ne!(status.runs[0].state, Some(RunJournalStateV1::Sealed));
+        fs::remove_dir_all(root).expect("remove temporary journal root");
     }
 
     #[test]
@@ -3789,6 +3896,9 @@ timeout_seconds = 60
                         RunTerminalJournalEvent::ReleaseFailure => lifecycle
                             .borrow_mut()
                             .transition_state(RunJournalStateV1::CleanupPending, None),
+                        RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                            .borrow_mut()
+                            .cleanup_pending_after_admission_acquired(),
                     },
                     cleanup_snapshot: || Ok(()),
                     seal: |material| {

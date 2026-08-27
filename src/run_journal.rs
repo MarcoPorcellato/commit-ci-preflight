@@ -275,13 +275,46 @@ impl RunJournalStore {
         validate_timestamp(at_utc)?;
         let entries = self.read_entries(run_id)?;
         let previous = entries.last().ok_or(RunJournalError::Corrupt)?;
-        if !legal_transition(previous.state, state) {
+        if !legal_transition(previous.state, state)
+            || (previous.state == RunJournalStateV1::Created
+                && state == RunJournalStateV1::CleanupPending)
+        {
             return Err(RunJournalError::InvalidTransition);
         }
         if (state == RunJournalStateV1::Failed) != failure_kind.is_some() {
             return Err(RunJournalError::InvalidTransition);
         }
         self.append_entry(run_id, previous.seq + 1, state, at_utc, failure_kind)
+    }
+
+    /// Persist cleanup uncertainty after admission ownership was acquired but
+    /// its durable `Admitted` record could not be written.
+    pub fn transition_cleanup_pending_after_admission_acquired(
+        &self,
+        run_id: &str,
+        at_utc: &str,
+    ) -> Result<RunJournalEntryV1, RunJournalError> {
+        validate_run_id(run_id)?;
+        validate_timestamp(at_utc)?;
+        let entries = self.read_entries(run_id)?;
+        let previous = entries.last().ok_or(RunJournalError::Corrupt)?;
+        if !matches!(
+            previous.state,
+            RunJournalStateV1::Created
+                | RunJournalStateV1::Admitted
+                | RunJournalStateV1::Prepared
+                | RunJournalStateV1::Executing
+                | RunJournalStateV1::Finalizing
+        ) {
+            return Err(RunJournalError::InvalidTransition);
+        }
+        self.append_entry(
+            run_id,
+            previous.seq + 1,
+            RunJournalStateV1::CleanupPending,
+            at_utc,
+            None,
+        )
     }
 
     /// Reserve one exact CCP-owned location for ephemeral run resources.
@@ -740,24 +773,22 @@ fn legal_transition(previous: RunJournalStateV1, next: RunJournalStateV1) -> boo
     use RunJournalStateV1 as State;
     matches!(
         (previous, next),
-        (State::Created, State::Admitted | State::Failed)
-            | (
-                State::Admitted,
-                State::Prepared | State::Failed | State::CleanupPending
-            )
-            | (
-                State::Prepared,
-                State::Executing | State::Failed | State::CleanupPending
-            )
-            | (
-                State::Executing,
-                State::Finalizing | State::Failed | State::CleanupPending
-            )
-            | (
-                State::Finalizing,
-                State::Sealed | State::Failed | State::CleanupPending
-            )
-            | (State::CleanupPending, State::Failed)
+        (
+            State::Created,
+            State::Admitted | State::Failed | State::CleanupPending
+        ) | (
+            State::Admitted,
+            State::Prepared | State::Failed | State::CleanupPending
+        ) | (
+            State::Prepared,
+            State::Executing | State::Failed | State::CleanupPending
+        ) | (
+            State::Executing,
+            State::Finalizing | State::Failed | State::CleanupPending
+        ) | (
+            State::Finalizing,
+            State::Sealed | State::Failed | State::CleanupPending
+        ) | (State::CleanupPending, State::Failed)
     )
 }
 
