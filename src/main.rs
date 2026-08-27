@@ -1124,17 +1124,27 @@ fn print_run(
     }
     let admission =
         AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
-    let guard = match admission.acquire(
-        Duration::from_secs(admission_timeout_seconds),
-        &cancellation,
-    ) {
-        Ok(guard) => guard,
-        Err(error) => {
-            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
-            return Err(CliError::Admission(error));
-        }
-    };
-    lifecycle.transition_state(RunJournalStateV1::Admitted, None)?;
+    let guard = acquire_admission_with_journal(
+        &mut lifecycle,
+        |lifecycle| match admission.acquire(
+            Duration::from_secs(admission_timeout_seconds),
+            &cancellation,
+        ) {
+            Ok(guard) => Ok(guard),
+            Err(error) => {
+                lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
+                Err(CliError::Admission(error))
+            }
+        },
+        |lifecycle| lifecycle.transition_state(RunJournalStateV1::Admitted, None),
+        |guard| guard.release(),
+        |lifecycle, event| match event {
+            RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
+            RunTerminalJournalEvent::ReleaseFailure => {
+                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+            }
+        },
+    )?;
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
         return finalize_run_terminal(
             Err::<(), _>(error),
@@ -1376,22 +1386,37 @@ fn print_matrix_run(
             }
             Ok(())
         },
-        acquire: || match admission.acquire(
-            Duration::from_secs(admission_timeout_seconds),
-            &cancellation,
-        ) {
-            Ok(guard) => {
-                lifecycle
-                    .borrow_mut()
-                    .transition_state(RunJournalStateV1::Admitted, None)?;
-                Ok(guard)
-            }
-            Err(error) => {
-                lifecycle
-                    .borrow_mut()
-                    .fail(RunFailureKindV1::AdmissionRejected)?;
-                Err(CliError::Admission(error))
-            }
+        acquire: || {
+            let mut matrix_lifecycle = &lifecycle;
+            acquire_admission_with_journal(
+                &mut matrix_lifecycle,
+                |lifecycle| match admission.acquire(
+                    Duration::from_secs(admission_timeout_seconds),
+                    &cancellation,
+                ) {
+                    Ok(guard) => Ok(guard),
+                    Err(error) => {
+                        lifecycle
+                            .borrow_mut()
+                            .fail(RunFailureKindV1::AdmissionRejected)?;
+                        Err(CliError::Admission(error))
+                    }
+                },
+                |lifecycle| {
+                    lifecycle
+                        .borrow_mut()
+                        .transition_state(RunJournalStateV1::Admitted, None)
+                },
+                |guard| guard.release(),
+                |lifecycle, event| match event {
+                    RunTerminalJournalEvent::PrimaryFailure(kind) => {
+                        lifecycle.borrow_mut().fail(kind)
+                    }
+                    RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                        .borrow_mut()
+                        .transition_state(RunJournalStateV1::CleanupPending, None),
+                },
+            )
         },
         execute: || {
             resource_pre_start(supervisor.clone(), &cancellation)?;
@@ -2093,6 +2118,25 @@ fn finalize_run_terminal<T>(
             journal(RunTerminalJournalEvent::ReleaseFailure)?;
             Err(CliError::Admission(error))
         }
+    }
+}
+
+fn acquire_admission_with_journal<G, L>(
+    lifecycle: &mut L,
+    acquire: impl FnOnce(&mut L) -> Result<G, CliError>,
+    record_admitted: impl FnOnce(&mut L) -> Result<(), CliError>,
+    release: impl FnOnce(G) -> Result<(), AdmissionError>,
+    mut journal: impl FnMut(&mut L, RunTerminalJournalEvent) -> Result<(), CliError>,
+) -> Result<G, CliError> {
+    let guard = acquire(lifecycle)?;
+    match record_admitted(lifecycle) {
+        Ok(()) => Ok(guard),
+        Err(error) => finalize_run_terminal(
+            Err::<G, _>(error),
+            std::convert::identity,
+            || release(guard),
+            |event| journal(lifecycle, event),
+        ),
     }
 }
 
@@ -2948,10 +2992,10 @@ mod tests {
         Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, JournalLifecycleObserver,
         MatrixTerminalLifecyclePorts, ResourceCacheStateArg, ResourceExecutionModeArg,
         ResourceExecutorArg, RunTerminalJournalEvent, WatchdogCompletionBarrier,
-        after_validated_matrix_profile_binding, detect_resource_executor,
-        finalize_benchmark_terminal, finalize_guard_exec_result, finalize_run_terminal,
-        new_journal_id, orchestrate_matrix_terminal_lifecycle, reconcile_watchdog_outcome,
-        resource_run_outcome, resource_terminal_detail,
+        acquire_admission_with_journal, after_validated_matrix_profile_binding,
+        detect_resource_executor, finalize_benchmark_terminal, finalize_guard_exec_result,
+        finalize_run_terminal, new_journal_id, orchestrate_matrix_terminal_lifecycle,
+        reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::admission::AdmissionError;
@@ -2976,6 +3020,7 @@ mod tests {
         RecoveryClassificationV1, RunFailureKindV1, RunJournalEntryV1, RunJournalError,
         RunJournalStateV1, RunJournalStore,
     };
+    use std::cell::RefCell;
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -3393,6 +3438,184 @@ timeout_seconds = 60
                 "journal cleanup-pending"
             ]
         );
+    }
+
+    #[test]
+    fn matrix_post_acquisition_journal_failure_releases_the_owned_guard() {
+        struct OwnedGuard<'a> {
+            dropped: &'a AtomicUsize,
+        }
+
+        impl Drop for OwnedGuard<'_> {
+            fn drop(&mut self) {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let explicit_releases = AtomicUsize::new(0);
+        let dropped_guards = AtomicUsize::new(0);
+        let mut post_acquisition = ();
+        let result: Result<(), CliError> =
+            orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+                validate_before_admission: || Ok(()),
+                acquire: || {
+                    acquire_admission_with_journal(
+                        &mut post_acquisition,
+                        |_| {
+                            Ok(OwnedGuard {
+                                dropped: &dropped_guards,
+                            })
+                        },
+                        |_| Err(CliError::RunJournal(RunJournalError::InvalidTransition)),
+                        |guard| {
+                            explicit_releases.fetch_add(1, Ordering::SeqCst);
+                            drop(guard);
+                            Ok(())
+                        },
+                        |_, _| Ok(()),
+                    )
+                },
+                execute: || unreachable!("acquisition failure stops execution"),
+                complete: |_| unreachable!("acquisition failure stops completion"),
+                release: |_: OwnedGuard<'_>| {
+                    explicit_releases.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                journal: |_| {
+                    unreachable!("acquisition failure currently bypasses terminal journal")
+                },
+                cleanup_snapshot: || unreachable!("acquisition failure stops cleanup"),
+                seal: |_: ()| unreachable!("acquisition failure stops sealing"),
+                write: |_: ()| unreachable!("acquisition failure stops writing"),
+            });
+
+        assert!(matches!(
+            result,
+            Err(CliError::RunJournal(RunJournalError::InvalidTransition))
+        ));
+        assert_eq!(
+            explicit_releases.load(Ordering::SeqCst),
+            1,
+            "a post-acquisition journal failure must explicitly release its guard"
+        );
+        assert_eq!(dropped_guards.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn run_families_persist_post_acquisition_journal_failure_outcomes() {
+        struct OwnedGuard<'a> {
+            releases: &'a AtomicUsize,
+            release_fails: bool,
+        }
+
+        impl OwnedGuard<'_> {
+            fn release(self) -> Result<(), AdmissionError> {
+                self.releases.fetch_add(1, Ordering::SeqCst);
+                if self.release_fails {
+                    Err(AdmissionError::Clock)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        for (case_index, (family, release_fails)) in [
+            ("historical", false),
+            ("historical", true),
+            ("matrix", false),
+            ("matrix", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "ccp-post-acquisition-{family}-{case_index}-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("temporary journal root");
+            let store = RunJournalStore::initialize(&root).expect("journal store");
+            let run_id = format!("{case_index:064x}");
+            let clock = FixedJournalClock;
+            store
+                .create_run(&run_id, "2026-08-27T12:00:00Z")
+                .expect("created journal");
+            store
+                .transition(
+                    &run_id,
+                    RunJournalStateV1::Admitted,
+                    "2026-08-27T12:00:00Z",
+                    None,
+                )
+                .expect("admitted journal");
+            let lifecycle = RefCell::new(JournalLifecycleObserver {
+                store: &store,
+                run_id: &run_id,
+                clock: &clock,
+            });
+            let releases = AtomicUsize::new(0);
+            let mut lifecycle_ref = &lifecycle;
+            let result = acquire_admission_with_journal(
+                &mut lifecycle_ref,
+                |_| {
+                    Ok(OwnedGuard {
+                        releases: &releases,
+                        release_fails,
+                    })
+                },
+                |lifecycle| {
+                    lifecycle
+                        .borrow_mut()
+                        .transition_state(RunJournalStateV1::Admitted, None)
+                },
+                |guard| guard.release(),
+                |lifecycle, event| match event {
+                    RunTerminalJournalEvent::PrimaryFailure(kind) => {
+                        lifecycle.borrow_mut().fail(kind)
+                    }
+                    RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                        .borrow_mut()
+                        .transition_state(RunJournalStateV1::CleanupPending, None),
+                },
+            );
+
+            assert_eq!(
+                releases.load(Ordering::SeqCst),
+                1,
+                "{family} must explicitly release the acquired guard once"
+            );
+            let status = store.status().expect("durable journal status");
+            assert_eq!(status.runs.len(), 1);
+            assert_ne!(status.runs[0].state, Some(RunJournalStateV1::Sealed));
+            if release_fails {
+                assert!(matches!(
+                    result,
+                    Err(CliError::Admission(AdmissionError::Clock))
+                ));
+                assert_eq!(
+                    status.runs[0].state,
+                    Some(RunJournalStateV1::CleanupPending)
+                );
+                assert_eq!(
+                    status.runs[0].classification,
+                    RecoveryClassificationV1::CleanupRequired
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(CliError::RunJournal(RunJournalError::InvalidTransition))
+                ));
+                assert_eq!(status.runs[0].state, Some(RunJournalStateV1::Failed));
+                assert_eq!(
+                    status.runs[0].classification,
+                    RecoveryClassificationV1::Terminal
+                );
+            }
+            fs::remove_dir_all(root).expect("remove temporary journal root");
+        }
     }
 
     #[test]
