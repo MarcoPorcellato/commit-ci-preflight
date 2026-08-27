@@ -2945,12 +2945,13 @@ impl std::error::Error for CliMessageError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, MatrixTerminalLifecyclePorts,
-        ResourceCacheStateArg, ResourceExecutionModeArg, ResourceExecutorArg,
-        RunTerminalJournalEvent, WatchdogCompletionBarrier, after_validated_matrix_profile_binding,
-        detect_resource_executor, finalize_benchmark_terminal, finalize_guard_exec_result,
-        finalize_run_terminal, new_journal_id, orchestrate_matrix_terminal_lifecycle,
-        reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
+        Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, JournalLifecycleObserver,
+        MatrixTerminalLifecyclePorts, ResourceCacheStateArg, ResourceExecutionModeArg,
+        ResourceExecutorArg, RunTerminalJournalEvent, WatchdogCompletionBarrier,
+        after_validated_matrix_profile_binding, detect_resource_executor,
+        finalize_benchmark_terminal, finalize_guard_exec_result, finalize_run_terminal,
+        new_journal_id, orchestrate_matrix_terminal_lifecycle, reconcile_watchdog_outcome,
+        resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
     use commit_ci_preflight::admission::AdmissionError;
@@ -2970,13 +2971,24 @@ mod tests {
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
     use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
-    use commit_ci_preflight::run::RunError;
-    use commit_ci_preflight::run_journal::{RunFailureKindV1, RunJournalError};
+    use commit_ci_preflight::run::{Clock, RunError, RunLifecycleObserver, RunLifecyclePhase};
+    use commit_ci_preflight::run_journal::{
+        RecoveryClassificationV1, RunFailureKindV1, RunJournalEntryV1, RunJournalError,
+        RunJournalStateV1, RunJournalStore,
+    };
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct FixedJournalClock;
+
+    impl Clock for FixedJournalClock {
+        fn now_utc(&self) -> Result<String, RunError> {
+            Ok("2026-08-27T12:00:00Z".to_owned())
+        }
+    }
 
     fn guard_cache_fixture(name: &str) -> (ManagedCache, PathBuf, PathBuf) {
         let stamp = SystemTime::now()
@@ -3479,6 +3491,167 @@ timeout_seconds = 60
                 !events.borrow().contains(&"sealed"),
                 "failed sealing or writing must not transition the journal to sealed"
             );
+        }
+    }
+
+    #[test]
+    fn matrix_terminal_finalization_failures_persist_durable_journal_states() {
+        use std::cell::RefCell;
+
+        #[derive(Clone, Copy)]
+        enum Failure {
+            Seal,
+            Write,
+        }
+
+        for (case_index, (failure, persistence_fails)) in [
+            (Failure::Seal, false),
+            (Failure::Write, false),
+            (Failure::Seal, true),
+            (Failure::Write, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "ccp-matrix-finalization-journal-{case_index}-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("temporary journal root");
+            let store = RunJournalStore::initialize(&root).expect("journal store");
+            let run_id = format!("{case_index:064x}");
+            let clock = FixedJournalClock;
+            store
+                .create_run(&run_id, "2026-08-27T12:00:00Z")
+                .expect("created journal");
+            store
+                .transition(
+                    &run_id,
+                    RunJournalStateV1::Admitted,
+                    "2026-08-27T12:00:00Z",
+                    None,
+                )
+                .expect("admitted journal");
+            let lifecycle = RefCell::new(JournalLifecycleObserver {
+                store: &store,
+                run_id: &run_id,
+                clock: &clock,
+            });
+            lifecycle
+                .borrow_mut()
+                .transition(RunLifecyclePhase::Prepared)
+                .expect("prepared journal");
+            lifecycle
+                .borrow_mut()
+                .transition(RunLifecyclePhase::Executing)
+                .expect("executing journal");
+            let run_path = root.join("run-journal-v1").join("runs").join(&run_id);
+            let persistence_target = run_path.clone();
+
+            let result: Result<&str, CliError> =
+                orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+                    validate_before_admission: || Ok(()),
+                    acquire: || Ok(()),
+                    execute: || Ok("material"),
+                    complete: std::convert::identity,
+                    release: |_| Ok(()),
+                    journal: |event| match event {
+                        RunTerminalJournalEvent::PrimaryFailure(kind) => {
+                            lifecycle.borrow_mut().fail(kind)
+                        }
+                        RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                            .borrow_mut()
+                            .transition_state(RunJournalStateV1::CleanupPending, None),
+                    },
+                    cleanup_snapshot: || Ok(()),
+                    seal: |material| {
+                        lifecycle
+                            .borrow_mut()
+                            .transition(RunLifecyclePhase::Finalizing)
+                            .map_err(CliError::Run)?;
+                        if matches!(failure, Failure::Seal) {
+                            if persistence_fails {
+                                fs::remove_dir_all(&persistence_target)
+                                    .map_err(CliError::internal)?;
+                            }
+                            Err(CliError::Matrix(MatrixError::InvalidReceipt))
+                        } else {
+                            Ok(material)
+                        }
+                    },
+                    write: |sealed| {
+                        if matches!(failure, Failure::Write) {
+                            if persistence_fails {
+                                fs::remove_dir_all(&persistence_target)
+                                    .map_err(CliError::internal)?;
+                            }
+                            Err(CliError::Matrix(MatrixError::Run(
+                                RunError::UnsafeReceiptPath,
+                            )))
+                        } else {
+                            Ok(sealed)
+                        }
+                    },
+                });
+
+            if persistence_fails {
+                assert!(matches!(
+                    result,
+                    Err(CliError::RunJournal(RunJournalError::OwnershipMismatch))
+                ));
+                assert!(
+                    !persistence_target.exists(),
+                    "the injected temporary-store removal must make persistence fail"
+                );
+            } else {
+                match failure {
+                    Failure::Seal => assert!(matches!(
+                        result,
+                        Err(CliError::Matrix(MatrixError::InvalidReceipt))
+                    )),
+                    Failure::Write => assert!(matches!(
+                        result,
+                        Err(CliError::Matrix(MatrixError::Run(
+                            RunError::UnsafeReceiptPath
+                        )))
+                    )),
+                }
+                let status = store.status().expect("durable journal status");
+                assert_eq!(status.runs.len(), 1);
+                assert_eq!(status.runs[0].state, Some(RunJournalStateV1::Failed));
+                assert_eq!(
+                    status.runs[0].classification,
+                    RecoveryClassificationV1::Terminal
+                );
+                let final_entry: RunJournalEntryV1 = serde_json::from_slice(
+                    &fs::read(run_path.join("00000000000000000005-failed.json"))
+                        .expect("durable failed journal entry"),
+                )
+                .expect("decode failed journal entry");
+                assert_eq!(final_entry.state, RunJournalStateV1::Failed);
+                assert_eq!(
+                    final_entry.failure_kind,
+                    Some(RunFailureKindV1::FinalizationFailed)
+                );
+                assert!(
+                    !fs::read_dir(&run_path)
+                        .expect("journal entries")
+                        .any(|entry| {
+                            entry
+                                .expect("journal entry")
+                                .file_name()
+                                .to_string_lossy()
+                                .ends_with("-sealed.json")
+                        }),
+                    "failed sealing or writing must not persist a sealed journal state"
+                );
+            }
+
+            fs::remove_dir_all(root).expect("remove temporary journal root");
         }
     }
 
