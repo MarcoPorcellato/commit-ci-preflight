@@ -167,6 +167,9 @@ Semantic Versioning after its first public release.
 
 ### Changed
 
+- Clarify that `dry-run` renders a planning and mount-review surface rather
+  than a self-contained replay bundle; copied container arguments require
+  independently validated, caller-owned writable mount sources.
 - Plans with no artifact contracts now finalize with an empty artifact manifest
   without requiring or creating a managed `artifacts` directory; plans with
   declared contracts retain the existing fail-closed observation checks.
