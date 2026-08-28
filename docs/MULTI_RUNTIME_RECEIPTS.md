@@ -164,3 +164,22 @@ project code.
 Regenerate all pinned contracts with `cargo run --locked --example
 generate_contract`. The v1 schema/fixture tests require historical v1 output
 to remain byte-for-byte stable.
+## Matrix-only legacy compatibility
+
+The historical verifier external test is
+`tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`
+and is marked `#[ignore]`; run it with `--ignored` only when
+`CCP_HISTORICAL_VERIFIER_044697` points to the retained binary with SHA-256
+`5321ff4d291ec24db6a7a5919bc08fc00a9d63767b630a3469fc39318c400277`,
+built from provenance-pinned commit
+`044697dee9a0d678d30a4847d62ddf9b4970505b`.
+
+This is the outer-v2 / inner-v1 boundary: outer Matrix schema 2.0 and inner
+runtime schema 1.0, produced with version `0.1.0+matrix-v2-legacy-v1`.
+
+The `matrix-v2-legacy-v1` profile is Matrix-only and retains the producer suffix
+as reviewed evidence. Run `plan`, `doctor`, `dry-run`, and `run` with the profile
+for command parity; `verify` has no profile flag. Copy reviewed digests into
+Matrix policy v2, never from a completed receipt. Legacy and current cache
+namespaces remain separate. Historical verifier acceptance is required before
+migration and is not policy inference or a general trust statement.

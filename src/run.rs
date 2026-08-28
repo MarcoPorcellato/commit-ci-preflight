@@ -56,6 +56,7 @@ pub struct RunRequest<'a> {
     pub envelope: &'a ExecutionPlanEnvelopeV1,
     pub repository: &'a Path,
     pub cache: &'a ManagedCache,
+    pub producer_version: &'a str,
     pub generation: u64,
     pub source_snapshot: Option<&'a SourceSnapshot>,
 }
@@ -665,7 +666,7 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
         schema_version: crate::receipt::RECEIPT_SCHEMA_VERSION.to_owned(),
         producer: ProducerEvidence {
             name: env!("CARGO_PKG_NAME").to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: request.producer_version.to_owned(),
         },
         repository: RepositoryEvidence {
             repository: request.envelope.plan.project.clone(),
@@ -1237,6 +1238,10 @@ mod tests {
                 }
                 let stdout = if git_command == Some("ls-tree") {
                     format!("100644 blob {}\tREADME.md\0", "c".repeat(40)).into_bytes()
+                } else if git_command == Some("cat-file")
+                    && request.argv.get(1).is_some_and(|argument| argument == "-s")
+                {
+                    b"16\n".to_vec()
                 } else if git_command == Some("cat-file") {
                     b"snapshot source\n".to_vec()
                 } else if git_command == Some("hash-object") {
@@ -1650,6 +1655,7 @@ depends_on = ["first"]
                     envelope: &self.envelope,
                     repository: &self.repository,
                     cache: &self.cache,
+                    producer_version: env!("CARGO_PKG_VERSION"),
                     generation: 7,
                     source_snapshot: None,
                 },
@@ -1670,6 +1676,7 @@ depends_on = ["first"]
                     envelope: &self.envelope,
                     repository: &self.repository,
                     cache: &self.cache,
+                    producer_version: env!("CARGO_PKG_VERSION"),
                     generation: 7,
                     source_snapshot: None,
                 },
@@ -1731,6 +1738,37 @@ depends_on = ["first"]
     }
 
     #[test]
+    fn local_receipt_seals_the_producer_version_from_its_request() {
+        for (label, producer_version) in [
+            ("package-producer", env!("CARGO_PKG_VERSION")),
+            ("compatibility-producer", "0.1.0+matrix-v2-legacy-v1"),
+        ] {
+            let fixture = RunFixture::new(label);
+            let outcome = execute_local_run(
+                &RunRequest {
+                    envelope: &fixture.envelope,
+                    repository: &fixture.repository,
+                    cache: &fixture.cache,
+                    producer_version,
+                    generation: 7,
+                    source_snapshot: None,
+                },
+                &DockerCompatibleRuntime,
+                &FakeSupervisor::new(ExecutionMode::Pass),
+                &CancellationToken::default(),
+                &FixedClock::new(),
+            )
+            .expect("run");
+
+            assert_eq!(outcome.receipt.receipt.producer.version, producer_version);
+            let decoded: ReceiptEnvelopeV1 =
+                serde_json::from_slice(&fs::read(&outcome.receipt_path).expect("receipt bytes"))
+                    .expect("receipt JSON");
+            assert_eq!(decoded.receipt.producer.version, producer_version);
+        }
+    }
+
+    #[test]
     fn snapshot_run_publishes_v2_receipt_bound_to_manifest() {
         let fixture = RunFixture::new("snapshot-v2");
         let supervisor = FakeSupervisor::new(ExecutionMode::Pass);
@@ -1762,6 +1800,7 @@ depends_on = ["first"]
                 envelope: &fixture.envelope,
                 repository: &fixture.repository,
                 cache: &fixture.cache,
+                producer_version: env!("CARGO_PKG_VERSION"),
                 generation: 7,
                 source_snapshot: Some(&snapshot),
             },
@@ -1853,6 +1892,7 @@ depends_on = ["first"]
                 envelope: &fixture.envelope,
                 repository: &fixture.repository,
                 cache: &fixture.cache,
+                producer_version: env!("CARGO_PKG_VERSION"),
                 generation: 7,
                 source_snapshot: Some(&snapshot),
             },
@@ -1920,6 +1960,7 @@ depends_on = ["first"]
                 envelope: &fixture.envelope,
                 repository: &fixture.repository,
                 cache: &fixture.cache,
+                producer_version: env!("CARGO_PKG_VERSION"),
                 generation: 7,
                 source_snapshot: Some(&snapshot),
             },
@@ -1953,6 +1994,7 @@ depends_on = ["first"]
                 envelope: &fixture.envelope,
                 repository: &fixture.repository,
                 cache: &fixture.cache,
+                producer_version: env!("CARGO_PKG_VERSION"),
                 generation: 7,
                 source_snapshot: None,
             },
@@ -2123,6 +2165,7 @@ depends_on = ["first"]
                 envelope: &fixture.envelope,
                 repository: &fixture.repository,
                 cache: &fixture.cache,
+                producer_version: env!("CARGO_PKG_VERSION"),
                 generation: 7,
                 source_snapshot: None,
             },
@@ -2173,6 +2216,7 @@ depends_on = ["first"]
                 envelope: &fixture.envelope,
                 repository: &fixture.repository,
                 cache: &fixture.cache,
+                producer_version: env!("CARGO_PKG_VERSION"),
                 generation: 7,
                 source_snapshot: None,
             },

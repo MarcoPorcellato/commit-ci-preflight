@@ -34,6 +34,16 @@ fn pinned_pass_fixture_round_trips_byte_for_byte() {
 }
 
 #[test]
+fn explicit_producer_version_is_sealed() {
+    let envelope: ReceiptEnvelopeV1 =
+        serde_json::from_slice(PASS_FIXTURE).expect("pinned fixture parses");
+
+    assert_eq!(envelope.receipt.producer.name, "commit-ci-preflight");
+    assert_eq!(envelope.receipt.producer.version, "0.1.0");
+    envelope.verify().expect("producer version remains sealed");
+}
+
+#[test]
 fn generated_schema_matches_pinned_contract_byte_for_byte() {
     assert_eq!(
         receipt_schema_json().expect("generated schema"),

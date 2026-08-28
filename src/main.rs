@@ -15,6 +15,7 @@
 mod terminal;
 use terminal::{TerminalFailure, finalize_owned_terminal};
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
@@ -40,7 +41,9 @@ use commit_ci_preflight::github_actions::{
     GithubActionsError, MigrationReadiness, analyze_workflow_file,
 };
 use commit_ci_preflight::matrix::{
-    MatrixConfigV2, MatrixError, MatrixPlanEnvelopeV2, MatrixRunRequestV2, execute_matrix_run_v2,
+    MatrixConfigV2, MatrixError, MatrixPlanEnvelopeV2, MatrixPlanProfile, MatrixPlanV2,
+    MatrixRunOutcomeV2, MatrixRunRequestV2, build_matrix_plan, execute_matrix_run_v2,
+    seal_matrix_run_material, write_matrix_receipt,
 };
 use commit_ci_preflight::process::{
     CancellationReason, CancellationToken, GenerationGuard, OutputMode, ProcessRequest,
@@ -116,6 +119,8 @@ enum Command {
         /// Emit canonical machine-readable JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        matrix_plan_profile: MatrixPlanProfileArgs,
     },
     /// Probe the configured runtime without running project checks.
     Doctor {
@@ -125,6 +130,8 @@ enum Command {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        matrix_plan_profile: MatrixPlanProfileArgs,
     },
     /// Render runtime argv without spawning a process.
     DryRun {
@@ -136,6 +143,8 @@ enum Command {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        matrix_plan_profile: MatrixPlanProfileArgs,
     },
     /// Execute the validated checks locally and write a canonical receipt.
     Run {
@@ -153,6 +162,8 @@ enum Command {
         /// Maximum time to wait for the host-wide heavy-command slot.
         #[arg(long, default_value_t = DEFAULT_QUEUE_TIMEOUT.as_secs())]
         admission_timeout_seconds: u64,
+        #[command(flatten)]
+        matrix_plan_profile: MatrixPlanProfileArgs,
     },
     /// Independently verify receipt integrity and repository policy.
     Verify {
@@ -303,6 +314,27 @@ struct GuardExecArgs {
     argv: Vec<OsString>,
 }
 
+#[derive(Debug, Args)]
+struct MatrixPlanProfileArgs {
+    /// Compatibility digest profile for Matrix V2 configuration.
+    #[arg(
+        long,
+        default_value = "current-v2",
+        value_parser = parse_matrix_plan_profile
+    )]
+    matrix_plan_profile: MatrixPlanProfile,
+}
+
+fn parse_matrix_plan_profile(value: &str) -> Result<MatrixPlanProfile, String> {
+    match value {
+        "current-v2" => Ok(MatrixPlanProfile::CurrentV2),
+        "matrix-v2-legacy-v1" => Ok(MatrixPlanProfile::LegacyV1),
+        _ => Err(format!(
+            "unknown matrix plan profile {value:?}; expected current-v2 or matrix-v2-legacy-v1"
+        )),
+    }
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ResourceExecutorArg {
     Native,
@@ -450,21 +482,37 @@ fn main() {
         Some(Command::Admission { action }) => run_admission_command(action),
         Some(Command::Resource { action }) => run_resource_command(action),
         Some(Command::Guard { action }) => run_guard_command(action),
-        Some(Command::Plan { config, json }) => print_plan(&config, json),
-        Some(Command::Doctor { config, json }) => print_doctor(&config, json),
+        Some(Command::Plan {
+            config,
+            json,
+            matrix_plan_profile,
+        }) => print_plan(&config, matrix_plan_profile.matrix_plan_profile, json),
+        Some(Command::Doctor {
+            config,
+            json,
+            matrix_plan_profile,
+        }) => print_doctor(&config, matrix_plan_profile.matrix_plan_profile, json),
         Some(Command::DryRun {
             config,
             location,
             json,
-        }) => print_dry_run(&config, &location, json),
+            matrix_plan_profile,
+        }) => print_dry_run(
+            &config,
+            matrix_plan_profile.matrix_plan_profile,
+            &location,
+            json,
+        ),
         Some(Command::Run {
             config,
             location,
             generation,
             json,
             admission_timeout_seconds,
+            matrix_plan_profile,
         }) => print_run(
             &config,
+            matrix_plan_profile.matrix_plan_profile,
             &location,
             generation,
             admission_timeout_seconds,
@@ -953,13 +1001,23 @@ fn print_verify(
 
 fn print_run(
     path: &Path,
+    profile: MatrixPlanProfile,
     location: &CacheLocationArgs,
     generation: u64,
     admission_timeout_seconds: u64,
     json: bool,
 ) -> Result<(), CliError> {
-    if config_schema_version(path)?.as_deref() == Some("2.0") {
-        return print_matrix_run(path, location, generation, admission_timeout_seconds, json);
+    if profile == MatrixPlanProfile::LegacyV1
+        || config_schema_version(path)?.as_deref() == Some("2.0")
+    {
+        return print_matrix_run(
+            path,
+            profile,
+            location,
+            generation,
+            admission_timeout_seconds,
+            json,
+        );
     }
     let envelope = load_plan(path)?;
     if !envelope.plan.environment.remote_secret_only.is_empty() {
@@ -1066,17 +1124,30 @@ fn print_run(
     }
     let admission =
         AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
-    let guard = match admission.acquire(
-        Duration::from_secs(admission_timeout_seconds),
-        &cancellation,
-    ) {
-        Ok(guard) => guard,
-        Err(error) => {
-            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
-            return Err(CliError::Admission(error));
-        }
-    };
-    lifecycle.transition_state(RunJournalStateV1::Admitted, None)?;
+    let guard = acquire_admission_with_journal(
+        &mut lifecycle,
+        |lifecycle| match admission.acquire(
+            Duration::from_secs(admission_timeout_seconds),
+            &cancellation,
+        ) {
+            Ok(guard) => Ok(guard),
+            Err(error) => {
+                lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
+                Err(CliError::Admission(error))
+            }
+        },
+        |lifecycle| lifecycle.transition_state(RunJournalStateV1::Admitted, None),
+        |guard| guard.release(),
+        |lifecycle, event| match event {
+            RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
+            RunTerminalJournalEvent::ReleaseFailure => {
+                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+            }
+            RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => {
+                lifecycle.cleanup_pending_after_admission_acquired()
+            }
+        },
+    )?;
     if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
         return finalize_run_terminal(
             Err::<(), _>(error),
@@ -1086,6 +1157,9 @@ fn print_run(
                 RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
                 RunTerminalJournalEvent::ReleaseFailure => {
                     lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+                }
+                RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => {
+                    lifecycle.cleanup_pending_after_admission_acquired()
                 }
             },
         );
@@ -1102,6 +1176,9 @@ fn print_run(
                         RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
                         RunTerminalJournalEvent::ReleaseFailure => {
                             lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+                        }
+                        RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => {
+                            lifecycle.cleanup_pending_after_admission_acquired()
                         }
                     },
                 );
@@ -1124,6 +1201,7 @@ fn print_run(
             envelope: &envelope,
             repository: &location.repository,
             cache: &cache,
+            producer_version: env!("CARGO_PKG_VERSION"),
             generation,
             source_snapshot: Some(&source_snapshot),
         },
@@ -1146,6 +1224,9 @@ fn print_run(
             RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
             RunTerminalJournalEvent::ReleaseFailure => {
                 lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+            }
+            RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => {
+                lifecycle.cleanup_pending_after_admission_acquired()
             }
         },
     )?;
@@ -1191,21 +1272,30 @@ fn config_schema_version(path: &Path) -> Result<Option<String>, CliError> {
         .map(str::to_owned))
 }
 
+fn after_validated_matrix_profile_binding<T>(
+    envelope: &commit_ci_preflight::matrix::MatrixPlanEnvelopeV2,
+    operation: impl FnOnce() -> Result<T, CliError>,
+) -> Result<T, CliError> {
+    envelope
+        .validate_profile_binding()
+        .map_err(CliError::Matrix)?;
+    operation()
+}
+
 fn print_matrix_run(
     path: &Path,
+    profile: MatrixPlanProfile,
     location: &CacheLocationArgs,
     generation: u64,
     admission_timeout_seconds: u64,
     json: bool,
 ) -> Result<(), CliError> {
-    let envelope = MatrixConfigV2::load(path)
-        .map_err(CliError::Matrix)?
-        .into_plan()
-        .map_err(CliError::Matrix)?;
-    let root = resolve_cache_root(location)?;
+    let envelope = load_matrix_plan(path, profile)?;
+    let root = after_validated_matrix_profile_binding(&envelope, || resolve_cache_root(location))?;
+    let plan_digest = envelope.plan_digest().map_err(CliError::Matrix)?.to_owned();
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
     let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
-    let journal_id = new_journal_id(&envelope.plan_digest, generation)?;
+    let journal_id = new_journal_id(&plan_digest, generation)?;
     let journal_clock = SystemClock;
     journal
         .create_run(
@@ -1213,110 +1303,230 @@ fn print_matrix_run(
             &journal_clock.now_utc().map_err(CliError::Run)?,
         )
         .map_err(CliError::RunJournal)?;
-    let mut lifecycle = JournalLifecycleObserver {
+    let lifecycle = RefCell::new(JournalLifecycleObserver {
         store: &journal,
         run_id: &journal_id,
         clock: &journal_clock,
-    };
+    });
     let supervisor = Arc::new(ProcessSupervisor::standard());
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
-    let admission =
-        AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
-    let guard = match admission.acquire(
-        Duration::from_secs(admission_timeout_seconds),
-        &cancellation,
-    ) {
-        Ok(guard) => guard,
-        Err(error) => {
-            lifecycle.fail(RunFailureKindV1::AdmissionRejected)?;
-            return Err(CliError::Admission(error));
-        }
+    let source_identity = RunIdentity {
+        project: envelope.plan.project.clone(),
+        commit: None,
+        config_digest: plan_digest,
+        generation: generation.to_string(),
     };
-    lifecycle.transition_state(RunJournalStateV1::Admitted, None)?;
-    if let Err(error) = resource_pre_start(supervisor.clone(), &cancellation) {
-        return finalize_run_terminal(
-            Err::<(), _>(error),
-            std::convert::identity,
-            || guard.release(),
-            |event| match event {
-                RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
-                RunTerminalJournalEvent::ReleaseFailure => {
-                    lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
-                }
-            },
-        );
-    }
-    let watchdog = if ResourcePlatform::current() == ResourcePlatform::MacOs {
-        let current_dir = match std::env::current_dir() {
-            Ok(path) => path,
-            Err(error) => {
-                return finalize_run_terminal(
-                    Err::<(), _>(CliError::internal(error)),
-                    std::convert::identity,
-                    || guard.release(),
-                    |event| match event {
-                        RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
-                        RunTerminalJournalEvent::ReleaseFailure => {
-                            lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
-                        }
-                    },
-                );
-            }
-        };
-        Some(ResourceWatchdog::start(
-            ResourceProbe::new(SupervisorResourceRunner::new(
-                supervisor.clone(),
-                current_dir,
-                cancellation.clone(),
-            )),
-            cancellation.clone(),
-        ))
-    } else {
-        None
-    };
-    let mut completion_barrier = WatchdogCompletionBarrier::new(watchdog);
-    lifecycle
-        .transition(RunLifecyclePhase::Prepared)
-        .map_err(CliError::Run)?;
-    lifecycle
-        .transition(RunLifecyclePhase::Executing)
-        .map_err(CliError::Run)?;
-    let result = execute_matrix_run_v2(
-        &MatrixRunRequestV2 {
-            envelope: &envelope,
-            repository: &location.repository,
-            cache: &cache,
-            generation,
-        },
+    let source_generation = GenerationGuard::new(source_identity.clone());
+    let commit = match resolve_clean_head(
+        &location.repository,
+        &envelope.plan.receipt.output,
         supervisor.as_ref(),
         &cancellation,
-        &SystemClock,
-        &mut completion_barrier,
-    )
-    .map_err(CliError::Matrix);
-    let outcome = finalize_run_terminal(
-        result,
-        |result| {
-            completion_barrier.ensure_joined();
-            if let Some(error) = completion_barrier.take_join_error() {
-                Err(CliError::Resource(ResourceGuardError::Watchdog(error)))
+        &source_generation,
+        &source_identity,
+    ) {
+        Ok(commit) => commit,
+        Err(error) => {
+            lifecycle
+                .borrow_mut()
+                .fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::Run(RunError::SourceSnapshot(error)));
+        }
+    };
+    let source_identity = RunIdentity {
+        commit: Some(commit.clone()),
+        ..source_identity
+    };
+    source_generation
+        .replace(source_identity.clone())
+        .map_err(|error| CliError::Run(RunError::Process(error)))?;
+    let source_resource = match journal.reserve_resource(&journal_id, "source-snapshot-v1") {
+        Ok(path) => path,
+        Err(error) => {
+            lifecycle
+                .borrow_mut()
+                .fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::RunJournal(error));
+        }
+    };
+    let mut source_snapshot = match SourceSnapshot::materialize(
+        &location.repository,
+        &commit,
+        &source_resource,
+        supervisor.as_ref(),
+        &cancellation,
+        &source_generation,
+        &source_identity,
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            lifecycle
+                .borrow_mut()
+                .fail(RunFailureKindV1::PreparationFailed)?;
+            return Err(CliError::Run(RunError::SourceSnapshot(error)));
+        }
+    };
+    if let Err(error) = envelope.prepare_source_snapshot_overlay(&mut source_snapshot) {
+        lifecycle
+            .borrow_mut()
+            .fail(RunFailureKindV1::PreparationFailed)?;
+        return Err(CliError::Matrix(error));
+    }
+    if let Err(error) = journal.bind_source(
+        &journal_id,
+        &commit,
+        &source_snapshot.evidence().manifest_digest,
+        source_snapshot.evidence().entry_count,
+    ) {
+        lifecycle
+            .borrow_mut()
+            .fail(RunFailureKindV1::PreparationFailed)?;
+        return Err(CliError::RunJournal(error));
+    }
+    let source_snapshot = RefCell::new(source_snapshot);
+    let admission =
+        AdmissionCoordinator::platform_for(&location.repository).map_err(CliError::Admission)?;
+    let completion_barrier = RefCell::new(None);
+    let outcome = orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+        validate_before_admission: || {
+            if let Err(error) = envelope.validate_profile_binding() {
+                lifecycle
+                    .borrow_mut()
+                    .fail(RunFailureKindV1::PreparationFailed)?;
+                return Err(CliError::Matrix(error));
+            }
+            Ok(())
+        },
+        acquire: || {
+            let mut matrix_lifecycle = &lifecycle;
+            acquire_admission_with_journal(
+                &mut matrix_lifecycle,
+                |lifecycle| match admission.acquire(
+                    Duration::from_secs(admission_timeout_seconds),
+                    &cancellation,
+                ) {
+                    Ok(guard) => Ok(guard),
+                    Err(error) => {
+                        lifecycle
+                            .borrow_mut()
+                            .fail(RunFailureKindV1::AdmissionRejected)?;
+                        Err(CliError::Admission(error))
+                    }
+                },
+                |lifecycle| {
+                    lifecycle
+                        .borrow_mut()
+                        .transition_state(RunJournalStateV1::Admitted, None)
+                },
+                |guard| guard.release(),
+                |lifecycle, event| match event {
+                    RunTerminalJournalEvent::PrimaryFailure(kind) => {
+                        lifecycle.borrow_mut().fail(kind)
+                    }
+                    RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                        .borrow_mut()
+                        .transition_state(RunJournalStateV1::CleanupPending, None),
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                        .borrow_mut()
+                        .cleanup_pending_after_admission_acquired(),
+                },
+            )
+        },
+        execute: || {
+            resource_pre_start(supervisor.clone(), &cancellation)?;
+            let watchdog = if ResourcePlatform::current() == ResourcePlatform::MacOs {
+                let current_dir = std::env::current_dir().map_err(CliError::internal)?;
+                Some(ResourceWatchdog::start(
+                    ResourceProbe::new(SupervisorResourceRunner::new(
+                        supervisor.clone(),
+                        current_dir,
+                        cancellation.clone(),
+                    )),
+                    cancellation.clone(),
+                ))
             } else {
-                result
-            }
+                None
+            };
+            *completion_barrier.borrow_mut() = Some(WatchdogCompletionBarrier::new(watchdog));
+            lifecycle
+                .borrow_mut()
+                .transition(RunLifecyclePhase::Prepared)
+                .map_err(CliError::Run)?;
+            lifecycle
+                .borrow_mut()
+                .transition(RunLifecyclePhase::Executing)
+                .map_err(CliError::Run)?;
+            let mut barrier = completion_barrier.borrow_mut();
+            let snapshot = source_snapshot.borrow();
+            execute_matrix_run_v2(
+                &MatrixRunRequestV2 {
+                    envelope: &envelope,
+                    repository: &location.repository,
+                    cache: &cache,
+                    generation,
+                    source_snapshot: &snapshot,
+                },
+                supervisor.as_ref(),
+                &cancellation,
+                &SystemClock,
+                barrier
+                    .as_mut()
+                    .expect("matrix execution must own a completion barrier"),
+            )
+            .map_err(CliError::Matrix)
         },
-        || guard.release(),
-        |event| match event {
-            RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.fail(kind),
-            RunTerminalJournalEvent::ReleaseFailure => {
-                lifecycle.transition_state(RunJournalStateV1::CleanupPending, None)
+        complete: |result| {
+            let mut barrier = completion_barrier.borrow_mut();
+            if let Some(barrier) = barrier.as_mut() {
+                barrier.ensure_joined();
+                if let Some(error) = barrier.take_join_error() {
+                    return Err(CliError::Resource(ResourceGuardError::Watchdog(error)));
+                }
             }
+            result
         },
-    )?;
+        release: |guard: AdmissionGuard| guard.release(),
+        journal: |event| match event {
+            RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.borrow_mut().fail(kind),
+            RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                .borrow_mut()
+                .transition_state(RunJournalStateV1::CleanupPending, None),
+            RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                .borrow_mut()
+                .cleanup_pending_after_admission_acquired(),
+        },
+        cleanup_snapshot: || {
+            if let Err(error) = source_snapshot.borrow_mut().cleanup() {
+                lifecycle
+                    .borrow_mut()
+                    .transition_state(RunJournalStateV1::CleanupPending, None)?;
+                return Err(CliError::Run(RunError::SourceSnapshot(error)));
+            }
+            Ok(())
+        },
+        seal: |material| {
+            lifecycle
+                .borrow_mut()
+                .transition(RunLifecyclePhase::Finalizing)
+                .map_err(CliError::Run)?;
+            seal_matrix_run_material(&envelope, material).map_err(CliError::Matrix)
+        },
+        write: |receipt| {
+            let receipt_path = write_matrix_receipt(
+                &location.repository,
+                &envelope.plan.receipt.output,
+                &receipt,
+            )
+            .map_err(CliError::Matrix)?;
+            Ok(MatrixRunOutcomeV2 {
+                receipt,
+                receipt_path,
+            })
+        },
+    })?;
     lifecycle
-        .transition(RunLifecyclePhase::Finalizing)
-        .map_err(CliError::Run)?;
-    lifecycle
+        .borrow_mut()
         .transition(RunLifecyclePhase::Sealed)
         .map_err(CliError::Run)?;
     if json {
@@ -1326,6 +1536,9 @@ fn print_matrix_run(
             .map_err(CliError::Matrix)?;
         println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
     } else {
+        if profile == MatrixPlanProfile::LegacyV1 {
+            println!("Matrix plan profile: matrix-v2-legacy-v1");
+        }
         println!("Matrix receipt: {}", outcome.receipt.receipt_id);
         println!(
             "Runtimes: {}",
@@ -1397,6 +1610,14 @@ impl JournalLifecycleObserver<'_> {
     fn fail(&mut self, kind: RunFailureKindV1) -> Result<(), CliError> {
         self.transition_state(RunJournalStateV1::Failed, Some(kind))
     }
+
+    fn cleanup_pending_after_admission_acquired(&mut self) -> Result<(), CliError> {
+        let at_utc = self.clock.now_utc().map_err(CliError::Run)?;
+        self.store
+            .transition_cleanup_pending_after_admission_acquired(self.run_id, &at_utc)
+            .map_err(CliError::RunJournal)?;
+        Ok(())
+    }
 }
 
 impl RunLifecycleObserver for JournalLifecycleObserver<'_> {
@@ -1447,16 +1668,71 @@ fn load_plan(path: &Path) -> Result<ExecutionPlanEnvelopeV1, CliError> {
         .map_err(CliError::usage)
 }
 
-fn print_plan(path: &Path, json: bool) -> Result<(), CliError> {
-    if config_schema_version(path)?.as_deref() == Some("2.0") {
-        let envelope = MatrixConfigV2::load(path)
-            .map_err(CliError::Matrix)?
-            .into_plan()
-            .map_err(CliError::Matrix)?;
+fn load_matrix_plan(
+    path: &Path,
+    profile: MatrixPlanProfile,
+) -> Result<MatrixPlanEnvelopeV2, CliError> {
+    if config_schema_version(path)?.as_deref() != Some("2.0") {
+        return Err(CliError::usage(MatrixPlanProfileSchemaError));
+    }
+    let config = MatrixConfigV2::load(path).map_err(CliError::Matrix)?;
+    build_matrix_plan(config, profile).map_err(CliError::Matrix)
+}
+
+#[derive(Debug)]
+struct MatrixPlanProfileSchemaError;
+
+impl fmt::Display for MatrixPlanProfileSchemaError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("matrix plan profile requires schema version 2.0")
+    }
+}
+
+impl std::error::Error for MatrixPlanProfileSchemaError {}
+
+#[derive(Debug, Serialize)]
+struct LegacyMatrixPlanReportV1 {
+    matrix_plan_profile: &'static str,
+    plan_digest: String,
+    plan: MatrixPlanV2,
+    legacy_digest_basis: serde_json::Value,
+}
+
+fn legacy_matrix_plan_report(
+    envelope: &MatrixPlanEnvelopeV2,
+) -> Result<LegacyMatrixPlanReportV1, CliError> {
+    let legacy_digest_basis = envelope
+        .legacy_digest_basis_value()
+        .map_err(CliError::Matrix)?
+        .ok_or_else(|| CliError::internal(MatrixPlanProfileSchemaError))?;
+    Ok(LegacyMatrixPlanReportV1 {
+        matrix_plan_profile: "matrix-v2-legacy-v1",
+        plan_digest: envelope.plan_digest().map_err(CliError::Matrix)?.to_owned(),
+        plan: envelope.plan.clone(),
+        legacy_digest_basis,
+    })
+}
+
+fn print_plan(path: &Path, profile: MatrixPlanProfile, json: bool) -> Result<(), CliError> {
+    if profile == MatrixPlanProfile::LegacyV1
+        || config_schema_version(path)?.as_deref() == Some("2.0")
+    {
+        let envelope = load_matrix_plan(path, profile)?;
         if json {
-            let bytes = envelope.canonical_bytes().map_err(CliError::Matrix)?;
-            println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+            if profile == MatrixPlanProfile::LegacyV1 {
+                println!(
+                    "{}",
+                    serde_json::to_string(&legacy_matrix_plan_report(&envelope)?)
+                        .map_err(CliError::internal)?
+                );
+            } else {
+                let bytes = envelope.canonical_bytes().map_err(CliError::Matrix)?;
+                println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
+            }
         } else {
+            if profile == MatrixPlanProfile::LegacyV1 {
+                println!("Matrix plan profile: matrix-v2-legacy-v1");
+            }
             println!("Matrix plan: {}", envelope.plan_digest);
             println!("Project: {}", envelope.plan.project);
             for runtime in &envelope.plan.runtimes {
@@ -1483,9 +1759,16 @@ fn print_plan(path: &Path, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-fn print_dry_run(path: &Path, location: &CacheLocationArgs, json: bool) -> Result<(), CliError> {
-    if config_schema_version(path)?.as_deref() == Some("2.0") {
-        return print_matrix_dry_run(path, location, json);
+fn print_dry_run(
+    path: &Path,
+    profile: MatrixPlanProfile,
+    location: &CacheLocationArgs,
+    json: bool,
+) -> Result<(), CliError> {
+    if profile == MatrixPlanProfile::LegacyV1
+        || config_schema_version(path)?.as_deref() == Some("2.0")
+    {
+        return print_matrix_dry_run(path, profile, location, json);
     }
     let envelope = load_plan(path)?;
     let cache = resolve_cache_root(location)?;
@@ -1522,13 +1805,11 @@ struct MatrixRuntimeDryRunV2 {
 
 fn print_matrix_dry_run(
     path: &Path,
+    profile: MatrixPlanProfile,
     location: &CacheLocationArgs,
     json: bool,
 ) -> Result<(), CliError> {
-    let envelope = MatrixConfigV2::load(path)
-        .map_err(CliError::Matrix)?
-        .into_plan()
-        .map_err(CliError::Matrix)?;
+    let envelope = load_matrix_plan(path, profile)?;
     let cache = resolve_cache_root(location)?;
     let mut runtimes = Vec::with_capacity(envelope.plan.runtimes.len());
     for (runtime_id, runtime_envelope) in envelope.runtime_envelopes().map_err(CliError::Matrix)? {
@@ -1555,6 +1836,9 @@ fn print_matrix_dry_run(
             serde_json::to_string(&report).map_err(CliError::internal)?
         );
     } else {
+        if profile == MatrixPlanProfile::LegacyV1 {
+            println!("Matrix plan profile: matrix-v2-legacy-v1");
+        }
         println!("Matrix plan: {}", report.plan_digest);
         for runtime in &report.runtimes {
             println!("Runtime ID: {}", runtime.runtime_id);
@@ -1840,6 +2124,7 @@ fn finalize_benchmark_terminal<T>(
 enum RunTerminalJournalEvent {
     PrimaryFailure(RunFailureKindV1),
     ReleaseFailure,
+    ReleaseFailureAfterAdmissionAcquired,
 }
 
 fn finalize_run_terminal<T>(
@@ -1859,6 +2144,129 @@ fn finalize_run_terminal<T>(
         Err(TerminalFailure::Release(error)) => {
             journal(RunTerminalJournalEvent::ReleaseFailure)?;
             Err(CliError::Admission(error))
+        }
+    }
+}
+
+fn acquire_admission_with_journal<G, L>(
+    lifecycle: &mut L,
+    acquire: impl FnOnce(&mut L) -> Result<G, CliError>,
+    record_admitted: impl FnOnce(&mut L) -> Result<(), CliError>,
+    release: impl FnOnce(G) -> Result<(), AdmissionError>,
+    mut journal: impl FnMut(&mut L, RunTerminalJournalEvent) -> Result<(), CliError>,
+) -> Result<G, CliError> {
+    let guard = acquire(lifecycle)?;
+    match record_admitted(lifecycle) {
+        Ok(()) => Ok(guard),
+        Err(error) => finalize_run_terminal(
+            Err::<G, _>(error),
+            std::convert::identity,
+            || release(guard),
+            |event| match event {
+                RunTerminalJournalEvent::ReleaseFailure => journal(
+                    lifecycle,
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired,
+                ),
+                event => journal(lifecycle, event),
+            },
+        ),
+    }
+}
+
+/// Caller-owned ports for the Matrix terminal lifecycle. Runtime execution
+/// yields only unsealed material; terminal release and snapshot cleanup must
+/// complete before outer receipt sealing and atomic publication.
+struct MatrixTerminalLifecyclePorts<
+    Validate,
+    Acquire,
+    Execute,
+    Complete,
+    Release,
+    Journal,
+    Cleanup,
+    Seal,
+    Write,
+> {
+    validate_before_admission: Validate,
+    acquire: Acquire,
+    execute: Execute,
+    complete: Complete,
+    release: Release,
+    journal: Journal,
+    cleanup_snapshot: Cleanup,
+    seal: Seal,
+    write: Write,
+}
+
+fn orchestrate_matrix_terminal_lifecycle<
+    T,
+    S,
+    O,
+    G,
+    Validate,
+    Acquire,
+    Execute,
+    Complete,
+    Release,
+    Journal,
+    Cleanup,
+    Seal,
+    Write,
+>(
+    ports: MatrixTerminalLifecyclePorts<
+        Validate,
+        Acquire,
+        Execute,
+        Complete,
+        Release,
+        Journal,
+        Cleanup,
+        Seal,
+        Write,
+    >,
+) -> Result<O, CliError>
+where
+    Validate: FnOnce() -> Result<(), CliError>,
+    Acquire: FnOnce() -> Result<G, CliError>,
+    Execute: FnOnce() -> Result<T, CliError>,
+    Complete: FnOnce(Result<T, CliError>) -> Result<T, CliError>,
+    Release: FnOnce(G) -> Result<(), AdmissionError>,
+    Journal: FnMut(RunTerminalJournalEvent) -> Result<(), CliError>,
+    Cleanup: FnOnce() -> Result<(), CliError>,
+    Seal: FnOnce(T) -> Result<S, CliError>,
+    Write: FnOnce(S) -> Result<O, CliError>,
+{
+    let MatrixTerminalLifecyclePorts {
+        validate_before_admission,
+        acquire,
+        execute,
+        complete,
+        release,
+        mut journal,
+        cleanup_snapshot,
+        seal,
+        write,
+    } = ports;
+    validate_before_admission()?;
+    let guard = acquire()?;
+    let material = finalize_run_terminal(execute(), complete, || release(guard), &mut journal)?;
+    cleanup_snapshot()?;
+    let sealed = match seal(material) {
+        Ok(sealed) => sealed,
+        Err(error) => {
+            journal(RunTerminalJournalEvent::PrimaryFailure(
+                RunFailureKindV1::FinalizationFailed,
+            ))?;
+            return Err(error);
+        }
+    };
+    match write(sealed) {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            journal(RunTerminalJournalEvent::PrimaryFailure(
+                RunFailureKindV1::FinalizationFailed,
+            ))?;
+            Err(error)
         }
     }
 }
@@ -2256,9 +2664,11 @@ fn print_serializable_or_path(
     Ok(())
 }
 
-fn print_doctor(path: &Path, json: bool) -> Result<(), CliError> {
-    if config_schema_version(path)?.as_deref() == Some("2.0") {
-        return print_matrix_doctor(path, json);
+fn print_doctor(path: &Path, profile: MatrixPlanProfile, json: bool) -> Result<(), CliError> {
+    if profile == MatrixPlanProfile::LegacyV1
+        || config_schema_version(path)?.as_deref() == Some("2.0")
+    {
+        return print_matrix_doctor(path, profile, json);
     }
     let envelope = load_plan(path)?;
     let runtime = runtime_for(envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
@@ -2322,11 +2732,12 @@ fn collect_matrix_doctor_report(
     })
 }
 
-fn print_matrix_doctor(path: &Path, json: bool) -> Result<(), CliError> {
-    let envelope = MatrixConfigV2::load(path)
-        .map_err(CliError::Matrix)?
-        .into_plan()
-        .map_err(CliError::Matrix)?;
+fn print_matrix_doctor(
+    path: &Path,
+    profile: MatrixPlanProfile,
+    json: bool,
+) -> Result<(), CliError> {
+    let envelope = load_matrix_plan(path, profile)?;
     let supervisor = ProcessSupervisor::standard();
     let cancellation = CancellationToken::default();
     install_cancellation_handler(&cancellation)?;
@@ -2350,6 +2761,9 @@ fn print_matrix_doctor(path: &Path, json: bool) -> Result<(), CliError> {
             serde_json::to_string(&report).map_err(CliError::internal)?
         );
     } else {
+        if profile == MatrixPlanProfile::LegacyV1 {
+            println!("Matrix plan profile: matrix-v2-legacy-v1");
+        }
         println!("Matrix plan: {}", report.plan_digest);
         for runtime in &report.runtimes {
             println!("Runtime ID: {}", runtime.runtime_id);
@@ -2608,10 +3022,12 @@ impl std::error::Error for CliMessageError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, ResourceCacheStateArg,
-        ResourceExecutionModeArg, ResourceExecutorArg, RunTerminalJournalEvent,
-        WatchdogCompletionBarrier, detect_resource_executor, finalize_benchmark_terminal,
-        finalize_guard_exec_result, finalize_run_terminal, new_journal_id,
+        Cli, CliError, GuardCommand, GuardExecArgs, GuardExecError, JournalLifecycleObserver,
+        MatrixTerminalLifecyclePorts, ResourceCacheStateArg, ResourceExecutionModeArg,
+        ResourceExecutorArg, RunTerminalJournalEvent, WatchdogCompletionBarrier,
+        acquire_admission_with_journal, after_validated_matrix_profile_binding,
+        detect_resource_executor, finalize_benchmark_terminal, finalize_guard_exec_result,
+        finalize_run_terminal, new_journal_id, orchestrate_matrix_terminal_lifecycle,
         reconcile_watchdog_outcome, resource_run_outcome, resource_terminal_detail,
     };
     use clap::{CommandFactory, Parser};
@@ -2620,6 +3036,9 @@ mod tests {
         CacheError, CacheKey, CacheRootSource, ManagedCache, ResolvedCacheRoot,
     };
     use commit_ci_preflight::config::ConfigV1;
+    use commit_ci_preflight::matrix::{
+        MatrixConfigV2, MatrixError, MatrixPlanProfile, build_matrix_plan,
+    };
     use commit_ci_preflight::process::CancellationToken;
     use commit_ci_preflight::process::{
         CleanupStatus, ExitOutcome, ProcessResult, ProcessTermination, RunIdentity,
@@ -2629,12 +3048,25 @@ mod tests {
         ResourceCommand, ResourceCommandRunner, ResourceProbe, ResourceProbeError, ResourceWatchdog,
     };
     use commit_ci_preflight::resource_history::{ResourceExecutorV2, ResourceTerminalDetailV2};
-    use commit_ci_preflight::run_journal::{RunFailureKindV1, RunJournalError};
+    use commit_ci_preflight::run::{Clock, RunError, RunLifecycleObserver, RunLifecyclePhase};
+    use commit_ci_preflight::run_journal::{
+        RecoveryClassificationV1, RunFailureKindV1, RunJournalEntryV1, RunJournalError,
+        RunJournalStateV1, RunJournalStore,
+    };
+    use std::cell::RefCell;
     use std::ffi::OsString;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct FixedJournalClock;
+
+    impl Clock for FixedJournalClock {
+        fn now_utc(&self) -> Result<String, RunError> {
+            Ok("2026-08-27T12:00:00Z".to_owned())
+        }
+    }
 
     fn guard_cache_fixture(name: &str) -> (ManagedCache, PathBuf, PathBuf) {
         let stamp = SystemTime::now()
@@ -2840,6 +3272,720 @@ timeout_seconds = 60
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         );
+    }
+
+    #[test]
+    fn mutated_matrix_profile_binding_stops_before_all_setup_effects() {
+        let source = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/config-v2-legacy-compatible.toml"),
+        )
+        .expect("legacy fixture");
+        let mut envelope = build_matrix_plan(
+            MatrixConfigV2::parse(&source).expect("matrix config"),
+            MatrixPlanProfile::LegacyV1,
+        )
+        .expect("matrix plan");
+        envelope.plan.project = "example/mutated-before-effects".to_owned();
+        let effects = AtomicUsize::new(0);
+
+        let result = after_validated_matrix_profile_binding(&envelope, || {
+            effects.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        assert!(matches!(
+            result,
+            Err(CliError::Matrix(MatrixError::PlanDigestMismatch))
+        ));
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn matrix_terminal_orchestration_orders_finalization_before_publication() {
+        use std::cell::RefCell;
+
+        #[derive(Clone, Copy)]
+        enum Failure {
+            None,
+            Validation,
+            Release,
+            Cleanup,
+        }
+
+        for (failure, expected) in [
+            (
+                Failure::None,
+                vec![
+                    "validate",
+                    "acquire",
+                    "complete/join",
+                    "release",
+                    "snapshot cleanup",
+                    "seal",
+                    "write",
+                ],
+            ),
+            (Failure::Validation, vec!["validate"]),
+            (
+                Failure::Release,
+                vec![
+                    "validate",
+                    "acquire",
+                    "complete/join",
+                    "release",
+                    "journal cleanup-pending",
+                ],
+            ),
+            (
+                Failure::Cleanup,
+                vec![
+                    "validate",
+                    "acquire",
+                    "complete/join",
+                    "release",
+                    "snapshot cleanup",
+                    "journal cleanup-pending",
+                ],
+            ),
+        ] {
+            let events = RefCell::new(Vec::new());
+            let release_attempts = AtomicUsize::new(0);
+            let result = orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+                validate_before_admission: || {
+                    events.borrow_mut().push("validate");
+                    if matches!(failure, Failure::Validation) {
+                        return Err(CliError::Matrix(MatrixError::PlanDigestMismatch));
+                    }
+                    Ok(())
+                },
+                acquire: || {
+                    events.borrow_mut().push("acquire");
+                    Ok(())
+                },
+                execute: || Ok("material"),
+                complete: |primary| {
+                    events.borrow_mut().push("complete/join");
+                    primary
+                },
+                release: |_| {
+                    events.borrow_mut().push("release");
+                    release_attempts.fetch_add(1, Ordering::SeqCst);
+                    if matches!(failure, Failure::Release) {
+                        Err(AdmissionError::Clock)
+                    } else {
+                        Ok(())
+                    }
+                },
+                journal: |event| match event {
+                    RunTerminalJournalEvent::ReleaseFailure => {
+                        events.borrow_mut().push("journal cleanup-pending");
+                        Ok(())
+                    }
+                    RunTerminalJournalEvent::PrimaryFailure(_) => Ok(()),
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => Ok(()),
+                },
+                cleanup_snapshot: || {
+                    events.borrow_mut().push("snapshot cleanup");
+                    if matches!(failure, Failure::Cleanup) {
+                        events.borrow_mut().push("journal cleanup-pending");
+                        return Err(CliError::internal(std::io::Error::other("cleanup")));
+                    }
+                    Ok(())
+                },
+                seal: |material| {
+                    events.borrow_mut().push("seal");
+                    Ok(material)
+                },
+                write: |sealed| {
+                    events.borrow_mut().push("write");
+                    Ok(sealed)
+                },
+            });
+
+            assert_eq!(&*events.borrow(), expected.as_slice());
+            assert!(
+                release_attempts.load(Ordering::SeqCst) <= 1,
+                "release is attempted at most once"
+            );
+            match failure {
+                Failure::None => assert_eq!(result.expect("successful write"), "material"),
+                Failure::Validation => assert!(matches!(
+                    result,
+                    Err(CliError::Matrix(MatrixError::PlanDigestMismatch))
+                )),
+                Failure::Release => {
+                    assert_eq!(release_attempts.load(Ordering::SeqCst), 1);
+                    assert!(matches!(
+                        result,
+                        Err(CliError::Admission(AdmissionError::Clock))
+                    ));
+                }
+                Failure::Cleanup => assert!(matches!(result, Err(CliError::Internal(_)))),
+            }
+        }
+
+        let events = RefCell::new(Vec::new());
+        let result: Result<(), CliError> =
+            orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+                validate_before_admission: || {
+                    events.borrow_mut().push("validate");
+                    Ok(())
+                },
+                acquire: || {
+                    events.borrow_mut().push("acquire");
+                    Ok(())
+                },
+                execute: || {
+                    Err::<&'static str, _>(CliError::Resource(ResourceGuardError::PreStartDenied))
+                },
+                complete: |primary| {
+                    events.borrow_mut().push("complete/join");
+                    primary
+                },
+                release: |_| {
+                    events.borrow_mut().push("release");
+                    Err(AdmissionError::Clock)
+                },
+                journal: |event| match event {
+                    RunTerminalJournalEvent::ReleaseFailure => {
+                        events.borrow_mut().push("journal cleanup-pending");
+                        Ok(())
+                    }
+                    RunTerminalJournalEvent::PrimaryFailure(_) => Ok(()),
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => Ok(()),
+                },
+                cleanup_snapshot: || unreachable!("release failure suppresses snapshot cleanup"),
+                seal: |_: &'static str| unreachable!("release failure suppresses seal"),
+                write: |_: &'static str| unreachable!("release failure suppresses write"),
+            });
+        assert!(matches!(
+            result,
+            Err(CliError::Admission(AdmissionError::Clock))
+        ));
+        assert_eq!(
+            &*events.borrow(),
+            &[
+                "validate",
+                "acquire",
+                "complete/join",
+                "release",
+                "journal cleanup-pending"
+            ]
+        );
+    }
+
+    #[test]
+    fn matrix_post_acquisition_journal_failure_releases_the_owned_guard() {
+        struct OwnedGuard<'a> {
+            dropped: &'a AtomicUsize,
+        }
+
+        impl Drop for OwnedGuard<'_> {
+            fn drop(&mut self) {
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let explicit_releases = AtomicUsize::new(0);
+        let dropped_guards = AtomicUsize::new(0);
+        let mut post_acquisition = ();
+        let result: Result<(), CliError> =
+            orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+                validate_before_admission: || Ok(()),
+                acquire: || {
+                    acquire_admission_with_journal(
+                        &mut post_acquisition,
+                        |_| {
+                            Ok(OwnedGuard {
+                                dropped: &dropped_guards,
+                            })
+                        },
+                        |_| Err(CliError::RunJournal(RunJournalError::InvalidTransition)),
+                        |guard| {
+                            explicit_releases.fetch_add(1, Ordering::SeqCst);
+                            drop(guard);
+                            Ok(())
+                        },
+                        |_, _| Ok(()),
+                    )
+                },
+                execute: || unreachable!("acquisition failure stops execution"),
+                complete: |_| unreachable!("acquisition failure stops completion"),
+                release: |_: OwnedGuard<'_>| {
+                    explicit_releases.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                journal: |_| {
+                    unreachable!("acquisition failure currently bypasses terminal journal")
+                },
+                cleanup_snapshot: || unreachable!("acquisition failure stops cleanup"),
+                seal: |_: ()| unreachable!("acquisition failure stops sealing"),
+                write: |_: ()| unreachable!("acquisition failure stops writing"),
+            });
+
+        assert!(matches!(
+            result,
+            Err(CliError::RunJournal(RunJournalError::InvalidTransition))
+        ));
+        assert_eq!(
+            explicit_releases.load(Ordering::SeqCst),
+            1,
+            "a post-acquisition journal failure must explicitly release its guard"
+        );
+        assert_eq!(dropped_guards.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn run_families_persist_post_acquisition_journal_failure_outcomes() {
+        struct OwnedGuard<'a> {
+            releases: &'a AtomicUsize,
+            release_fails: bool,
+        }
+
+        impl OwnedGuard<'_> {
+            fn release(self) -> Result<(), AdmissionError> {
+                self.releases.fetch_add(1, Ordering::SeqCst);
+                if self.release_fails {
+                    Err(AdmissionError::Clock)
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        for (case_index, (family, release_fails)) in [
+            ("historical", false),
+            ("historical", true),
+            ("matrix", false),
+            ("matrix", true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "ccp-post-acquisition-{family}-{case_index}-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("temporary journal root");
+            let store = RunJournalStore::initialize(&root).expect("journal store");
+            let run_id = format!("{case_index:064x}");
+            let clock = FixedJournalClock;
+            store
+                .create_run(&run_id, "2026-08-27T12:00:00Z")
+                .expect("created journal");
+            store
+                .transition(
+                    &run_id,
+                    RunJournalStateV1::Admitted,
+                    "2026-08-27T12:00:00Z",
+                    None,
+                )
+                .expect("admitted journal");
+            let lifecycle = RefCell::new(JournalLifecycleObserver {
+                store: &store,
+                run_id: &run_id,
+                clock: &clock,
+            });
+            let releases = AtomicUsize::new(0);
+            let mut lifecycle_ref = &lifecycle;
+            let result = acquire_admission_with_journal(
+                &mut lifecycle_ref,
+                |_| {
+                    Ok(OwnedGuard {
+                        releases: &releases,
+                        release_fails,
+                    })
+                },
+                |lifecycle| {
+                    lifecycle
+                        .borrow_mut()
+                        .transition_state(RunJournalStateV1::Admitted, None)
+                },
+                |guard| guard.release(),
+                |lifecycle, event| match event {
+                    RunTerminalJournalEvent::PrimaryFailure(kind) => {
+                        lifecycle.borrow_mut().fail(kind)
+                    }
+                    RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                        .borrow_mut()
+                        .transition_state(RunJournalStateV1::CleanupPending, None),
+                    RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                        .borrow_mut()
+                        .cleanup_pending_after_admission_acquired(),
+                },
+            );
+
+            assert_eq!(
+                releases.load(Ordering::SeqCst),
+                1,
+                "{family} must explicitly release the acquired guard once"
+            );
+            let status = store.status().expect("durable journal status");
+            assert_eq!(status.runs.len(), 1);
+            assert_ne!(status.runs[0].state, Some(RunJournalStateV1::Sealed));
+            if release_fails {
+                assert!(matches!(
+                    result,
+                    Err(CliError::Admission(AdmissionError::Clock))
+                ));
+                assert_eq!(
+                    status.runs[0].state,
+                    Some(RunJournalStateV1::CleanupPending)
+                );
+                assert_eq!(
+                    status.runs[0].classification,
+                    RecoveryClassificationV1::CleanupRequired
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(CliError::RunJournal(RunJournalError::InvalidTransition))
+                ));
+                assert_eq!(status.runs[0].state, Some(RunJournalStateV1::Failed));
+                assert_eq!(
+                    status.runs[0].classification,
+                    RecoveryClassificationV1::Terminal
+                );
+            }
+            fs::remove_dir_all(root).expect("remove temporary journal root");
+        }
+    }
+
+    #[test]
+    fn post_acquisition_release_failure_from_created_persists_cleanup_pending() {
+        struct OwnedGuard<'a> {
+            releases: &'a AtomicUsize,
+        }
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ccp-created-post-acquisition-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("temporary journal root");
+        let store = RunJournalStore::initialize(&root).expect("journal store");
+        let run_id = "c".repeat(64);
+        let clock = FixedJournalClock;
+        store
+            .create_run(&run_id, "2026-08-27T12:00:00Z")
+            .expect("created journal");
+        let lifecycle = RefCell::new(JournalLifecycleObserver {
+            store: &store,
+            run_id: &run_id,
+            clock: &clock,
+        });
+        let releases = AtomicUsize::new(0);
+        let mut lifecycle_ref = &lifecycle;
+        let result = acquire_admission_with_journal(
+            &mut lifecycle_ref,
+            |_| {
+                Ok(OwnedGuard {
+                    releases: &releases,
+                })
+            },
+            |_| Err(CliError::RunJournal(RunJournalError::InvalidTransition)),
+            |guard| {
+                guard.releases.fetch_add(1, Ordering::SeqCst);
+                Err(AdmissionError::Clock)
+            },
+            |lifecycle, event| match event {
+                RunTerminalJournalEvent::PrimaryFailure(kind) => lifecycle.borrow_mut().fail(kind),
+                RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                    .borrow_mut()
+                    .transition_state(RunJournalStateV1::CleanupPending, None),
+                RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                    .borrow_mut()
+                    .cleanup_pending_after_admission_acquired(),
+            },
+        );
+
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            result,
+            Err(CliError::Admission(AdmissionError::Clock))
+        ));
+        let status = store.status().expect("durable journal status");
+        assert_eq!(
+            status.runs[0].state,
+            Some(RunJournalStateV1::CleanupPending)
+        );
+        assert_eq!(
+            status.runs[0].classification,
+            RecoveryClassificationV1::CleanupRequired
+        );
+        assert_ne!(status.runs[0].state, Some(RunJournalStateV1::Sealed));
+        fs::remove_dir_all(root).expect("remove temporary journal root");
+    }
+
+    #[test]
+    fn matrix_terminal_orchestration_journals_seal_and_write_failures() {
+        use std::cell::RefCell;
+
+        #[derive(Clone, Copy)]
+        enum Failure {
+            Seal,
+            Write,
+        }
+
+        for (failure, expected) in [
+            (
+                Failure::Seal,
+                vec![
+                    "validate",
+                    "acquire",
+                    "complete/join",
+                    "release",
+                    "snapshot cleanup",
+                    "seal",
+                    "journal finalization-failed",
+                ],
+            ),
+            (
+                Failure::Write,
+                vec![
+                    "validate",
+                    "acquire",
+                    "complete/join",
+                    "release",
+                    "snapshot cleanup",
+                    "seal",
+                    "write",
+                    "journal finalization-failed",
+                ],
+            ),
+        ] {
+            let events = RefCell::new(Vec::new());
+            let result = orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+                validate_before_admission: || {
+                    events.borrow_mut().push("validate");
+                    Ok(())
+                },
+                acquire: || {
+                    events.borrow_mut().push("acquire");
+                    Ok(())
+                },
+                execute: || Ok("material"),
+                complete: |primary| {
+                    events.borrow_mut().push("complete/join");
+                    primary
+                },
+                release: |_| {
+                    events.borrow_mut().push("release");
+                    Ok(())
+                },
+                journal: |event| {
+                    events.borrow_mut().push(match event {
+                        RunTerminalJournalEvent::PrimaryFailure(
+                            RunFailureKindV1::FinalizationFailed,
+                        ) => "journal finalization-failed",
+                        _ => "unexpected journal event",
+                    });
+                    Ok(())
+                },
+                cleanup_snapshot: || {
+                    events.borrow_mut().push("snapshot cleanup");
+                    Ok(())
+                },
+                seal: |material| {
+                    events.borrow_mut().push("seal");
+                    if matches!(failure, Failure::Seal) {
+                        Err(CliError::Matrix(MatrixError::InvalidReceipt))
+                    } else {
+                        Ok(material)
+                    }
+                },
+                write: |sealed| {
+                    events.borrow_mut().push("write");
+                    if matches!(failure, Failure::Write) {
+                        Err(CliError::Matrix(MatrixError::Run(
+                            RunError::UnsafeReceiptPath,
+                        )))
+                    } else {
+                        events.borrow_mut().push("sealed");
+                        Ok(sealed)
+                    }
+                },
+            });
+
+            assert!(matches!(result, Err(CliError::Matrix(_))));
+            assert_eq!(&*events.borrow(), expected.as_slice());
+            assert!(
+                !events.borrow().contains(&"sealed"),
+                "failed sealing or writing must not transition the journal to sealed"
+            );
+        }
+    }
+
+    #[test]
+    fn matrix_terminal_finalization_failures_persist_durable_journal_states() {
+        use std::cell::RefCell;
+
+        #[derive(Clone, Copy)]
+        enum Failure {
+            Seal,
+            Write,
+        }
+
+        for (case_index, (failure, persistence_fails)) in [
+            (Failure::Seal, false),
+            (Failure::Write, false),
+            (Failure::Seal, true),
+            (Failure::Write, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "ccp-matrix-finalization-journal-{case_index}-{}-{stamp}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("temporary journal root");
+            let store = RunJournalStore::initialize(&root).expect("journal store");
+            let run_id = format!("{case_index:064x}");
+            let clock = FixedJournalClock;
+            store
+                .create_run(&run_id, "2026-08-27T12:00:00Z")
+                .expect("created journal");
+            store
+                .transition(
+                    &run_id,
+                    RunJournalStateV1::Admitted,
+                    "2026-08-27T12:00:00Z",
+                    None,
+                )
+                .expect("admitted journal");
+            let lifecycle = RefCell::new(JournalLifecycleObserver {
+                store: &store,
+                run_id: &run_id,
+                clock: &clock,
+            });
+            lifecycle
+                .borrow_mut()
+                .transition(RunLifecyclePhase::Prepared)
+                .expect("prepared journal");
+            lifecycle
+                .borrow_mut()
+                .transition(RunLifecyclePhase::Executing)
+                .expect("executing journal");
+            let run_path = root.join("run-journal-v1").join("runs").join(&run_id);
+            let persistence_target = run_path.clone();
+
+            let result: Result<&str, CliError> =
+                orchestrate_matrix_terminal_lifecycle(MatrixTerminalLifecyclePorts {
+                    validate_before_admission: || Ok(()),
+                    acquire: || Ok(()),
+                    execute: || Ok("material"),
+                    complete: std::convert::identity,
+                    release: |_| Ok(()),
+                    journal: |event| match event {
+                        RunTerminalJournalEvent::PrimaryFailure(kind) => {
+                            lifecycle.borrow_mut().fail(kind)
+                        }
+                        RunTerminalJournalEvent::ReleaseFailure => lifecycle
+                            .borrow_mut()
+                            .transition_state(RunJournalStateV1::CleanupPending, None),
+                        RunTerminalJournalEvent::ReleaseFailureAfterAdmissionAcquired => lifecycle
+                            .borrow_mut()
+                            .cleanup_pending_after_admission_acquired(),
+                    },
+                    cleanup_snapshot: || Ok(()),
+                    seal: |material| {
+                        lifecycle
+                            .borrow_mut()
+                            .transition(RunLifecyclePhase::Finalizing)
+                            .map_err(CliError::Run)?;
+                        if matches!(failure, Failure::Seal) {
+                            if persistence_fails {
+                                fs::remove_dir_all(&persistence_target)
+                                    .map_err(CliError::internal)?;
+                            }
+                            Err(CliError::Matrix(MatrixError::InvalidReceipt))
+                        } else {
+                            Ok(material)
+                        }
+                    },
+                    write: |sealed| {
+                        if matches!(failure, Failure::Write) {
+                            if persistence_fails {
+                                fs::remove_dir_all(&persistence_target)
+                                    .map_err(CliError::internal)?;
+                            }
+                            Err(CliError::Matrix(MatrixError::Run(
+                                RunError::UnsafeReceiptPath,
+                            )))
+                        } else {
+                            Ok(sealed)
+                        }
+                    },
+                });
+
+            if persistence_fails {
+                assert!(matches!(
+                    result,
+                    Err(CliError::RunJournal(RunJournalError::OwnershipMismatch))
+                ));
+                assert!(
+                    !persistence_target.exists(),
+                    "the injected temporary-store removal must make persistence fail"
+                );
+            } else {
+                match failure {
+                    Failure::Seal => assert!(matches!(
+                        result,
+                        Err(CliError::Matrix(MatrixError::InvalidReceipt))
+                    )),
+                    Failure::Write => assert!(matches!(
+                        result,
+                        Err(CliError::Matrix(MatrixError::Run(
+                            RunError::UnsafeReceiptPath
+                        )))
+                    )),
+                }
+                let status = store.status().expect("durable journal status");
+                assert_eq!(status.runs.len(), 1);
+                assert_eq!(status.runs[0].state, Some(RunJournalStateV1::Failed));
+                assert_eq!(
+                    status.runs[0].classification,
+                    RecoveryClassificationV1::Terminal
+                );
+                let final_entry: RunJournalEntryV1 = serde_json::from_slice(
+                    &fs::read(run_path.join("00000000000000000005-failed.json"))
+                        .expect("durable failed journal entry"),
+                )
+                .expect("decode failed journal entry");
+                assert_eq!(final_entry.state, RunJournalStateV1::Failed);
+                assert_eq!(
+                    final_entry.failure_kind,
+                    Some(RunFailureKindV1::FinalizationFailed)
+                );
+                assert!(
+                    !fs::read_dir(&run_path)
+                        .expect("journal entries")
+                        .any(|entry| {
+                            entry
+                                .expect("journal entry")
+                                .file_name()
+                                .to_string_lossy()
+                                .ends_with("-sealed.json")
+                        }),
+                    "failed sealing or writing must not persist a sealed journal state"
+                );
+            }
+
+            fs::remove_dir_all(root).expect("remove temporary journal root");
+        }
     }
 
     #[test]

@@ -14,6 +14,8 @@ Semantic Versioning after its first public release.
   exactly-once admission release, and fail-closed release-error precedence.
   Deterministic coverage includes watchdog, journal, and cache-pin ordering;
   native guard-exec qualification remains separate and NOT_RUN.
+- Documented the Matrix-only `matrix-v2-legacy-v1` compatibility profile;
+  default operation remains `current-v2`.
 - Matrix v2 `doctor` and `dry-run` now inspect every declared runtime using
   lexically ordered, digest-labeled reports. Doctor performs one bounded
   runtime probe per entry; dry-run renders each explicit workspace and command

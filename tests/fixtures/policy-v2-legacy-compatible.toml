@@ -1,0 +1,32 @@
+schema_version = "2.0"
+project = "example/legacy-matrix"
+configuration_digest = "sha256:3248c763ccc37fecac1e29727007232d274f561e0943fc2e5a1996a38526fe13"
+max_age_seconds = 300
+
+[[required_checks]]
+id = "python311-version"
+runtime_id = "python311"
+
+[[required_checks]]
+id = "python312-version"
+runtime_id = "python312"
+
+[[runtimes]]
+id = "python311"
+configuration_digest = "sha256:755f77f6815b1ed7b4415b3312c48a6528e2d752270775916efa6c10f1ffe192"
+image_reference = "example.invalid/python311@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[[runtimes.platforms]]
+host_os = "macos"
+host_arch = "aarch64"
+runtime_kind = "docker_compatible"
+
+[[runtimes]]
+id = "python312"
+configuration_digest = "sha256:be2eb7d200946e9f1dc84cebd8c0cca8739e424163f91c86063bbe4caed936f9"
+image_reference = "example.invalid/python312@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[[runtimes.platforms]]
+host_os = "macos"
+host_arch = "aarch64"
+runtime_kind = "docker_compatible"

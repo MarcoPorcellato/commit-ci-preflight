@@ -16,7 +16,7 @@ deterministic source evidence from native qualification still pending.
 
 | Invariant | Implemented evidence | Residual gap | Proof artifact | Gate |
 | --- | --- | --- | --- | --- |
-| Exact commit bytes are isolated from the user's mutable working tree | `SourceSnapshot::materialize` reads the committed tree and blobs through Git, writes a CCP-owned tree, and `PreparedWorkspace::prepare_snapshot` mounts only that tree | Native runtime observation remains pending | `src/source_snapshot.rs`, `src/workspace.rs`, and the snapshot-backed run test | Deterministic isolation PASS; native qualification PENDING |
+| Exact commit bytes are isolated from the user's mutable working tree | `SourceSnapshot::materialize` reads the committed tree and blobs through Git, writes a CCP-owned tree, and `PreparedWorkspace::prepare_snapshot` mounts only that tree; source blobs use a dedicated 64 MiB ceiling while ordinary process output remains limited to 1 MiB | Native runtime observation remains pending | `src/source_snapshot.rs`, `src/process.rs`, and the real-Git large-blob snapshot test | Deterministic isolation PASS; native qualification PENDING |
 | Source identity is canonical and reproducible | `SourceManifestV1` sorts entries and binds commit, path, mode, object kind and object ID; canonical SHA-256 produces `manifest_digest` | Cross-platform native vectors remain pending | Source-snapshot unit tests and receipt v2 golden fixture | Repeated supported manifests have identical digest: PASS |
 | Unsupported Git states fail closed | Submodules, symlinks and LFS pointers are rejected; unsupported modes fail; executable entries are supported on Unix and rejected on unsupported platforms. Sparse working-tree shape is ignored because materialization reads the full committed tree; unavailable objects fail as Git errors | Windows-native executable-mode behavior is not qualified | Typed `SourceSnapshotError` variants and deterministic rejection tests | Deterministic policy PASS; Windows-native qualification PENDING |
 | Receipt evidence binds source identity | Snapshot-backed runs publish strict receipt v2 with strategy, manifest digest and entry count; historical v1 remains readable without implied snapshot assurance | Trusted producer identity and signing are later tranches | `schema/receipt-v2.schema.json`, `tests/fixtures/receipt-v2-pass.json`, and dual-version verifier dispatch | Tampered snapshot digest fails integrity: PASS |
@@ -39,3 +39,18 @@ The implemented source boundary is explicit:
 
 This closes T2 in deterministic source evidence. Native platform,
 crash/power-loss and release qualification remain separate gates.
+## Task 8 documentation evidence matrix
+
+| Invariant | Focused evidence |
+|---|---|
+| Projection reproducibility | `tests/matrix_contract.rs::legacy_profile_reproduces_historical_plan` |
+| Representability rejection | `tests/matrix_contract.rs::legacy_profile_rejects_each_non_representable_current_field` |
+| Command parity | `tests/plan_cli.rs::matrix_plan_profile_flag_is_exposed_only_by_configuration_commands` |
+| Cache separation | `tests/runtime_cli.rs::legacy_profile_uses_distinct_plan_cache_identity` |
+| Producer uniformity | `tests/matrix_contract.rs::legacy_receipt_provenance_is_uniform` |
+| Historical verifier acceptance | `tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations` (`#[ignore]`, `--ignored`, external verifier required) |
+| Mutation rejection | `tests/verification_contract.rs::current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations` and historical verifier test |
+| Zero pre-admission mutation | `tests/runtime_cli.rs::legacy_profile_rejection_precedes_shared_state` and `tests/runtime_cli.rs::legacy_profile_rejects_current_only_matrix_syntax_before_shared_state` |
+
+All entries are Matrix-only evidence for `matrix-v2-legacy-v1`; they do not infer
+policy or establish general trust. Rollback target is `current-v2`.

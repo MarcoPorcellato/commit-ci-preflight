@@ -329,3 +329,13 @@ remote jobs. Preserve receipts and configurations for incident analysis. See
 - [ ] GitHub status is observed on the latest PR head.
 - [ ] Review, secrets, deployments, and uncovered native gates remain remote.
 - [ ] Rollback path is documented and tested.
+## Matrix V2 legacy adoption boundary
+
+This boundary does not perform policy inference; it records Matrix-only evidence.
+
+Adopters using the Matrix-only `matrix-v2-legacy-v1` profile must preserve the
+producer suffix and command parity (`plan`, `doctor`, `dry-run`, `run`). The
+operator copies reviewed digests into Matrix policy v2, never from a completed
+receipt. Legacy and current cache namespaces are separate; `verify` has no
+profile flag. Require acceptance by an old trusted historical verifier before
+policy migration. This guidance does not infer policy or general trust.

@@ -147,3 +147,24 @@ trusted configuration validation.
 6. Record platform-native evidence separately from deterministic tests.
 7. Keep fault fixtures free of secrets, personal data, network access, and the
    operator's real cache or repository state.
+## Matrix V2 compatibility test matrix
+
+Focused tests cover the Matrix-only `matrix-v2-legacy-v1` profile: projection
+`tests/matrix_contract.rs::legacy_profile_reproduces_historical_plan`,
+representability `tests/matrix_contract.rs::legacy_profile_rejects_each_non_representable_current_field`,
+command parity
+`tests/plan_cli.rs::matrix_plan_profile_flag_is_exposed_only_by_configuration_commands`,
+producer uniformity `tests/matrix_contract.rs::legacy_receipt_provenance_is_uniform`,
+mutation rejection
+`tests/verification_contract.rs::current_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`,
+and zero pre-admission mutation
+`tests/runtime_cli.rs::legacy_profile_rejection_precedes_shared_state` and
+`tests/runtime_cli.rs::legacy_profile_rejects_current_only_matrix_syntax_before_shared_state`.
+The historical verifier is
+`tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations`,
+marked `#[ignore]` and run with `--ignored` only when
+`CCP_HISTORICAL_VERIFIER_044697` points to the retained verifier binary with
+SHA-256 `5321ff4d291ec24db6a7a5919bc08fc00a9d63767b630a3469fc39318c400277`,
+The ordinary suite does not prove historical acceptance. The retained binary
+was built from commit `044697dee9a0d678d30a4847d62ddf9b4970505b`. `verify` has no profile flag.
+Tests do not infer policy or general trust; rollback target is `current-v2`.

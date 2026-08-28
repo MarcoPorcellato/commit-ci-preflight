@@ -33,6 +33,7 @@ use crate::config::{
     ExecutionPlanV1, NormalizedCache, NormalizedEnvironment, NormalizedReceipt, NormalizedRuntime,
     ReceiptConfig, RuntimeConfig, RuntimeKind, validate_identifier,
 };
+use crate::matrix_legacy::{LegacyMatrixDigestBasisV1, project_legacy_basis};
 use crate::process::{CancellationToken, SupervisorPort};
 use crate::receipt::{
     EvidenceStatus, ProducerEvidence, ReceiptEnvelopeV1, ReceiptError, ReceiptV1,
@@ -44,6 +45,7 @@ use crate::run::{
     write_canonical_receipt_bytes_atomic,
 };
 use crate::runtime::runtime_for;
+use crate::source_snapshot::SourceSnapshot;
 use crate::verify::{
     AcceptedPlatformV1, VerificationDecision, VerificationFindingV1, VerificationPolicyV1,
     VerificationReportV1, VerificationStatus, finding, parse_utc_seconds, validate_commit,
@@ -148,6 +150,26 @@ impl MatrixCheckConfigV2 {
 pub struct MatrixPlanEnvelopeV2 {
     pub plan_digest: String,
     pub plan: MatrixPlanV2,
+    #[serde(skip)]
+    profile: MatrixPlanProfile,
+    #[serde(skip)]
+    legacy_basis: Option<LegacyMatrixDigestBasisV1>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MatrixPlanProfile {
+    #[default]
+    CurrentV2,
+    LegacyV1,
+}
+
+impl MatrixPlanProfile {
+    pub const fn producer_version(self) -> &'static str {
+        match self {
+            Self::CurrentV2 => env!("CARGO_PKG_VERSION"),
+            Self::LegacyV1 => concat!(env!("CARGO_PKG_VERSION"), "+matrix-v2-legacy-v1"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -186,6 +208,22 @@ impl MatrixConfigV2 {
     }
 
     pub fn into_plan(self) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
+        build_matrix_plan(self, MatrixPlanProfile::default())
+    }
+}
+
+pub fn build_matrix_plan(
+    config: MatrixConfigV2,
+    profile: MatrixPlanProfile,
+) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
+    config.build_plan_with_profile(profile)
+}
+
+impl MatrixConfigV2 {
+    fn build_plan_with_profile(
+        self,
+        profile: MatrixPlanProfile,
+    ) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
         if self.schema_version != MATRIX_CONFIG_SCHEMA_VERSION {
             return Err(MatrixError::UnsupportedSchemaVersion(self.schema_version));
         }
@@ -264,7 +302,7 @@ impl MatrixConfigV2 {
                 checks: group.plan.checks,
             });
         }
-        let plan = MatrixPlanV2 {
+        let mut plan = MatrixPlanV2 {
             schema_version: MATRIX_CONFIG_SCHEMA_VERSION.to_owned(),
             project: self.project,
             receipt: shared_receipt.expect("at least two runtimes"),
@@ -272,21 +310,111 @@ impl MatrixConfigV2 {
             caches: shared_caches.expect("at least two runtimes"),
             runtimes: runtime_plans,
         };
-        let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
-        Ok(MatrixPlanEnvelopeV2 { plan_digest, plan })
+        match profile {
+            MatrixPlanProfile::CurrentV2 => {
+                let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
+                Ok(MatrixPlanEnvelopeV2 {
+                    plan_digest,
+                    plan,
+                    profile,
+                    legacy_basis: None,
+                })
+            }
+            MatrixPlanProfile::LegacyV1 => {
+                let legacy_basis = project_legacy_basis(&plan)?;
+                for runtime in &mut plan.runtimes {
+                    runtime.configuration_digest =
+                        legacy_basis.runtime_digest(&runtime.id)?.to_owned();
+                }
+                let plan_digest = legacy_basis.outer_digest()?;
+                Ok(MatrixPlanEnvelopeV2 {
+                    plan_digest,
+                    plan,
+                    profile,
+                    legacy_basis: Some(legacy_basis),
+                })
+            }
+        }
     }
 }
 
 impl MatrixPlanEnvelopeV2 {
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixError> {
-        let expected = canonical_digest(&self.plan).map_err(MatrixError::Receipt)?;
-        if expected != self.plan_digest {
-            return Err(MatrixError::PlanDigestMismatch);
+    pub fn profile(&self) -> MatrixPlanProfile {
+        self.profile
+    }
+
+    pub fn plan_digest(&self) -> Result<&str, MatrixError> {
+        self.validate_profile_binding()?;
+        Ok(&self.plan_digest)
+    }
+
+    pub fn runtime_configuration_digest(&self, id: &str) -> Result<&str, MatrixError> {
+        self.validate_profile_binding()?;
+        match self.profile {
+            MatrixPlanProfile::LegacyV1 => self
+                .legacy_basis
+                .as_ref()
+                .ok_or(MatrixError::PlanDigestMismatch)?
+                .runtime_digest(id),
+            MatrixPlanProfile::CurrentV2 => self
+                .plan
+                .runtimes
+                .iter()
+                .find(|runtime| runtime.id == id)
+                .map(|runtime| runtime.configuration_digest.as_str())
+                .ok_or_else(|| MatrixError::UnknownRuntime(id.to_owned())),
         }
+    }
+
+    pub fn legacy_digest_basis_value(&self) -> Result<Option<serde_json::Value>, MatrixError> {
+        self.validate_profile_binding()?;
+        match self.profile {
+            MatrixPlanProfile::CurrentV2 => Ok(None),
+            MatrixPlanProfile::LegacyV1 => self
+                .legacy_basis
+                .as_ref()
+                .ok_or(MatrixError::PlanDigestMismatch)?
+                .report_value()
+                .map(Some),
+        }
+    }
+
+    pub fn validate_profile_binding(&self) -> Result<(), MatrixError> {
+        match self.profile {
+            MatrixPlanProfile::CurrentV2 => {
+                if self.legacy_basis.is_some()
+                    || canonical_digest(&self.plan).map_err(MatrixError::Receipt)?
+                        != self.plan_digest
+                {
+                    return Err(MatrixError::PlanDigestMismatch);
+                }
+            }
+            MatrixPlanProfile::LegacyV1 => {
+                let basis = self
+                    .legacy_basis
+                    .as_ref()
+                    .ok_or(MatrixError::PlanDigestMismatch)?;
+                let projected = project_legacy_basis(&self.plan)?;
+                if &projected != basis || projected.outer_digest()? != self.plan_digest {
+                    return Err(MatrixError::PlanDigestMismatch);
+                }
+                for runtime in &self.plan.runtimes {
+                    if projected.runtime_digest(&runtime.id)? != runtime.configuration_digest {
+                        return Err(MatrixError::PlanDigestMismatch);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixError> {
+        self.validate_profile_binding()?;
         canonical_json(self).map_err(MatrixError::Receipt)
     }
 
     pub fn runtime_envelopes(&self) -> Result<Vec<(String, ExecutionPlanEnvelopeV1)>, MatrixError> {
+        self.validate_profile_binding()?;
         let mut result = Vec::with_capacity(self.plan.runtimes.len());
         for runtime in &self.plan.runtimes {
             let plan = ExecutionPlanV1 {
@@ -299,10 +427,18 @@ impl MatrixPlanEnvelopeV2 {
                 storage: None,
                 checks: runtime.checks.clone(),
             };
-            let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
-            if plan_digest != runtime.configuration_digest {
-                return Err(MatrixError::PlanDigestMismatch);
-            }
+            let plan_digest = match self.profile {
+                MatrixPlanProfile::CurrentV2 => {
+                    let digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
+                    if digest != runtime.configuration_digest {
+                        return Err(MatrixError::PlanDigestMismatch);
+                    }
+                    digest
+                }
+                MatrixPlanProfile::LegacyV1 => {
+                    self.runtime_configuration_digest(&runtime.id)?.to_owned()
+                }
+            };
             result.push((
                 runtime.id.clone(),
                 ExecutionPlanEnvelopeV1 {
@@ -314,12 +450,50 @@ impl MatrixPlanEnvelopeV2 {
         }
         Ok(result)
     }
+
+    /// Prepare the one source-snapshot overlay shared by every Matrix runtime.
+    /// Cache, environment, storage, and fixed-environment fields must be
+    /// identical because the overlay is materialized once before admission.
+    pub fn prepare_source_snapshot_overlay(
+        &self,
+        snapshot: &mut SourceSnapshot,
+    ) -> Result<(), MatrixError> {
+        self.validate_profile_binding()?;
+        let runtime_envelopes = self.runtime_envelopes()?;
+        let (_, first) = runtime_envelopes
+            .first()
+            .ok_or(MatrixError::InvalidReceipt)?;
+        let mut overlay = first.clone();
+        overlay.plan.checks.clear();
+        for (_, runtime) in runtime_envelopes {
+            if runtime.plan.caches != overlay.plan.caches
+                || runtime.plan.environment != overlay.plan.environment
+                || runtime.plan.storage != overlay.plan.storage
+                || runtime.fixed_environment != overlay.fixed_environment
+            {
+                return Err(MatrixError::PlanDigestMismatch);
+            }
+            overlay.plan.checks.extend(runtime.plan.checks);
+        }
+        snapshot
+            .prepare_mount_overlay(&overlay)
+            .map_err(RunError::SourceSnapshot)
+            .map_err(MatrixError::Run)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixRunOutcomeV2 {
     pub receipt: MatrixReceiptEnvelopeV2,
     pub receipt_path: PathBuf,
+}
+
+/// Unsealed, unpublished Matrix receipt material collected while the caller
+/// owns admission and source-snapshot lifecycle. It must be revalidated and
+/// sealed only after terminal admission finalization and snapshot cleanup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixRunMaterialV2 {
+    receipt: MatrixReceiptV2,
 }
 
 /// Inputs that are fixed for the complete matrix execution. Grouping these
@@ -330,23 +504,35 @@ pub struct MatrixRunRequestV2<'a> {
     pub repository: &'a Path,
     pub cache: &'a ManagedCache,
     pub generation: u64,
+    pub source_snapshot: &'a SourceSnapshot,
 }
 
 /// Execute every independently pinned runtime sequentially under one caller
-/// owned admission/watchdog session, then publish exactly one outer receipt.
-/// The inner v1 receipts stay in memory: no intermediate source-tree mutation
-/// can make a later runtime observe a different Git state.
+/// owned admission/watchdog session and return unsealed receipt material. The
+/// caller must finalize admission, clean the source snapshot, then seal and
+/// publish the outer receipt. The inner v1 receipts stay in memory: no
+/// intermediate source-tree mutation can make a later runtime observe a
+/// different Git state.
 pub fn execute_matrix_run_v2(
     request: &MatrixRunRequestV2<'_>,
     supervisor: &dyn SupervisorPort,
     cancellation: &CancellationToken,
     clock: &dyn Clock,
     barrier: &mut dyn CompletionBarrier,
-) -> Result<MatrixRunOutcomeV2, MatrixError> {
+) -> Result<MatrixRunMaterialV2, MatrixError> {
+    request.envelope.validate_profile_binding()?;
     let started_at_utc = clock.now_utc().map_err(MatrixError::Run)?;
     let mut runtime_receipts = Vec::new();
     let mut checks = Vec::new();
     for (runtime_id, runtime_envelope) in request.envelope.runtime_envelopes()? {
+        request.envelope.validate_profile_binding()?;
+        let expected_configuration_digest = request
+            .envelope
+            .runtime_configuration_digest(&runtime_id)?
+            .to_owned();
+        if runtime_envelope.plan_digest != expected_configuration_digest {
+            return Err(MatrixError::PlanDigestMismatch);
+        }
         let runtime =
             runtime_for(runtime_envelope.plan.runtime.kind).map_err(MatrixError::Runtime)?;
         let mut inner_barrier = NoopCompletionBarrier;
@@ -356,8 +542,9 @@ pub fn execute_matrix_run_v2(
                 envelope: &runtime_envelope,
                 repository: request.repository,
                 cache: request.cache,
+                producer_version: request.envelope.profile().producer_version(),
                 generation: request.generation,
-                source_snapshot: None,
+                source_snapshot: Some(request.source_snapshot),
             },
             runtime.as_ref(),
             supervisor,
@@ -377,7 +564,8 @@ pub fn execute_matrix_run_v2(
     let first = runtime_receipts
         .first()
         .ok_or(MatrixError::InvalidReceipt)?;
-    let producer = first.receipt.receipt.producer.clone();
+    request.envelope.validate_profile_binding()?;
+    let configuration_digest = request.envelope.plan_digest()?.to_owned();
     let repository_evidence = first.receipt.receipt.repository.clone();
     let redaction_policy_version = first.receipt.receipt.redaction_policy_version.clone();
     let statuses: Vec<_> = checks
@@ -391,14 +579,14 @@ pub fn execute_matrix_run_v2(
         schema_version: MATRIX_RECEIPT_SCHEMA_VERSION,
         project: &request.envelope.plan.project,
         commit: &repository_evidence.commit_sha,
-        configuration_digest: &request.envelope.plan_digest,
+        configuration_digest: &configuration_digest,
         generation: request.generation,
         started_at_utc: &started_at_utc,
     })
     .map_err(MatrixError::Receipt)?;
-    let receipt = MatrixReceiptEnvelopeV2::seal(MatrixReceiptV2 {
+    let receipt = MatrixReceiptV2 {
         schema_version: MATRIX_RECEIPT_SCHEMA_VERSION.to_owned(),
-        producer,
+        producer: first.receipt.receipt.producer.clone(),
         repository: repository_evidence,
         run: RunEvidence {
             run_id,
@@ -406,24 +594,63 @@ pub fn execute_matrix_run_v2(
             started_at_utc,
             finished_at_utc,
         },
-        configuration_digest: request.envelope.plan_digest.clone(),
+        configuration_digest,
         runtime_receipts,
         overall_status,
         incomplete_reason: (overall_status == EvidenceStatus::Pending)
             .then(|| "one or more required checks were not run".to_owned()),
         redaction_policy_version,
-    })?;
+    };
+    Ok(MatrixRunMaterialV2 { receipt })
+}
+
+/// Revalidate the selected profile and every inner receipt immediately before
+/// sealing the outer Matrix receipt.
+pub fn seal_matrix_run_material(
+    envelope: &MatrixPlanEnvelopeV2,
+    material: MatrixRunMaterialV2,
+) -> Result<MatrixReceiptEnvelopeV2, MatrixError> {
+    validate_matrix_receipts_for_seal(envelope, &material.receipt.runtime_receipts)?;
+    MatrixReceiptEnvelopeV2::seal(material.receipt)
+}
+
+/// Atomically publish a previously sealed Matrix receipt. Callers must invoke
+/// this only after caller-owned terminal and source-snapshot lifecycle steps.
+pub fn write_matrix_receipt(
+    repository: &Path,
+    output: &str,
+    receipt: &MatrixReceiptEnvelopeV2,
+) -> Result<PathBuf, MatrixError> {
     let bytes = receipt.canonical_bytes()?;
-    let receipt_path = write_canonical_receipt_bytes_atomic(
-        request.repository,
-        &request.envelope.plan.receipt.output,
-        &bytes,
-    )
-    .map_err(MatrixError::Run)?;
-    Ok(MatrixRunOutcomeV2 {
-        receipt,
-        receipt_path,
-    })
+    write_canonical_receipt_bytes_atomic(repository, output, &bytes).map_err(MatrixError::Run)
+}
+
+fn validate_matrix_receipts_for_seal(
+    envelope: &MatrixPlanEnvelopeV2,
+    runtime_receipts: &[MatrixRuntimeReceiptV2],
+) -> Result<ProducerEvidence, MatrixError> {
+    envelope.validate_profile_binding()?;
+    let expected_producer = ProducerEvidence {
+        name: env!("CARGO_PKG_NAME").to_owned(),
+        version: envelope.profile().producer_version().to_owned(),
+    };
+    let first = runtime_receipts
+        .first()
+        .ok_or(MatrixError::InvalidReceipt)?;
+    if first.receipt.receipt.producer != expected_producer {
+        return Err(MatrixError::InvalidReceipt);
+    }
+    for runtime in runtime_receipts {
+        let expected_configuration_digest =
+            envelope.runtime_configuration_digest(&runtime.runtime_id)?;
+        if runtime.receipt.receipt.producer != first.receipt.receipt.producer
+            || runtime.receipt.receipt.producer != expected_producer
+            || runtime.receipt.receipt.configuration_digest != expected_configuration_digest
+        {
+            return Err(MatrixError::InvalidReceipt);
+        }
+    }
+    Ok(expected_producer)
 }
 
 fn derive_status(required: &[EvidenceStatus]) -> EvidenceStatus {
@@ -896,6 +1123,542 @@ fn equal(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    use crate::cache::{CacheRootOptions, PlatformFamily, ResolvedCacheRoot};
+    use crate::process::{
+        CapturedStream, CleanupStatus, ExitOutcome, GenerationGuard, ProcessError, ProcessRequest,
+        ProcessResult, ProcessTermination, RunIdentity,
+    };
+    use crate::receipt::{CheckEvidence, PlatformEvidence};
+    use crate::run::SystemClock;
+    use crate::source_snapshot::SourceSnapshot;
+
+    const IMAGE_311: &str = "example.invalid/python311@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const IMAGE_312: &str = "example.invalid/python312@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const OUTPUT_DIGEST: &str =
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    #[test]
+    fn matrix_fixture_root_is_nested_under_selected_test_root() {
+        assert_eq!(
+            matrix_fixture_root(Path::new("/private-test-root"), "snapshot", 7),
+            PathBuf::from("/private-test-root/.ccp-matrix-snapshot-7")
+        );
+    }
+
+    fn matrix_fixture_root(base: &Path, name: &str, process_id: u32) -> PathBuf {
+        base.join(format!(".ccp-matrix-{name}-{process_id}"))
+    }
+
+    fn matrix_test_root(name: &str) -> PathBuf {
+        let base = std::env::var_os("CCP_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .expect("current directory")
+                    .parent()
+                    .expect("repository parent")
+                    .to_path_buf()
+            });
+        matrix_fixture_root(&base, name, std::process::id())
+    }
+
+    fn envelope(profile: MatrixPlanProfile) -> MatrixPlanEnvelopeV2 {
+        build_matrix_plan(
+            MatrixConfigV2::parse(&format!(
+                r#"
+schema_version = "2.0"
+project = "owner/repository"
+
+[receipt]
+output = ".ccp/receipt.json"
+
+[[checks]]
+id = "python311-check"
+runtime_id = "python311"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 60
+
+[[checks]]
+id = "python312-check"
+runtime_id = "python312"
+required = true
+argv = ["python", "-V"]
+working_directory = "."
+timeout_seconds = 60
+
+[[runtimes]]
+id = "python311"
+kind = "docker_compatible"
+image = "{IMAGE_311}"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+
+[[runtimes]]
+id = "python312"
+kind = "docker_compatible"
+image = "{IMAGE_312}"
+cpu_count = 1
+memory_mib = 128
+pids_limit = 16
+"#
+            ))
+            .expect("matrix config"),
+            profile,
+        )
+        .expect("matrix plan")
+    }
+
+    fn synthetic_runtime_receipts(envelope: &MatrixPlanEnvelopeV2) -> Vec<MatrixRuntimeReceiptV2> {
+        let producer = ProducerEvidence {
+            name: env!("CARGO_PKG_NAME").to_owned(),
+            version: envelope.profile().producer_version().to_owned(),
+        };
+        envelope
+            .plan
+            .runtimes
+            .iter()
+            .map(|runtime| {
+                let image_digest = runtime
+                    .runtime
+                    .image
+                    .rsplit_once('@')
+                    .expect("pinned image")
+                    .1
+                    .to_owned();
+                let receipt = ReceiptEnvelopeV1::seal(ReceiptV1 {
+                    schema_version: crate::receipt::RECEIPT_SCHEMA_VERSION.to_owned(),
+                    producer: producer.clone(),
+                    repository: RepositoryEvidence {
+                        repository: envelope.plan.project.clone(),
+                        commit_sha: "a".repeat(40),
+                        dirty: false,
+                    },
+                    run: RunEvidence {
+                        run_id: format!("run-{}", runtime.id),
+                        generation: 7,
+                        started_at_utc: "2026-08-25T01:00:00Z".to_owned(),
+                        finished_at_utc: "2026-08-25T01:00:01Z".to_owned(),
+                    },
+                    platform: PlatformEvidence {
+                        host_os: "macos".to_owned(),
+                        host_arch: "aarch64".to_owned(),
+                        runtime_kind: "docker_compatible".to_owned(),
+                        runtime_version: "test".to_owned(),
+                        image_reference: runtime.runtime.image.clone(),
+                        image_digest,
+                    },
+                    configuration_digest: envelope
+                        .runtime_configuration_digest(&runtime.id)
+                        .expect("runtime digest")
+                        .to_owned(),
+                    checks: vec![CheckEvidence {
+                        id: format!("{}-check", runtime.id),
+                        required: true,
+                        argv: vec!["python".to_owned(), "-V".to_owned()],
+                        working_directory: ".".to_owned(),
+                        status: EvidenceStatus::Pass,
+                        exit_code: Some(0),
+                        duration_ms: 1,
+                        timed_out: false,
+                        cancelled: false,
+                        output_digest: Some(OUTPUT_DIGEST.to_owned()),
+                        incomplete_reason: None,
+                    }],
+                    overall_status: EvidenceStatus::Pass,
+                    incomplete_reason: None,
+                    redaction_policy_version: "ccp-redaction-v1".to_owned(),
+                })
+                .expect("seal inner receipt");
+                MatrixRuntimeReceiptV2 {
+                    runtime_id: runtime.id.clone(),
+                    receipt,
+                }
+            })
+            .collect()
+    }
+
+    fn reseal(runtime: &mut MatrixRuntimeReceiptV2) {
+        let inner = runtime.receipt.receipt.clone();
+        runtime.receipt = ReceiptEnvelopeV1::seal(inner).expect("reseal inner receipt");
+    }
+
+    #[test]
+    fn preseal_receipt_validation_accepts_current_and_legacy_profile_provenance() {
+        for profile in [MatrixPlanProfile::CurrentV2, MatrixPlanProfile::LegacyV1] {
+            let envelope = envelope(profile);
+            let receipts = synthetic_runtime_receipts(&envelope);
+
+            let producer = validate_matrix_receipts_for_seal(&envelope, &receipts)
+                .expect("profile-bound inner receipts");
+            assert_eq!(producer.version, profile.producer_version());
+        }
+    }
+
+    #[test]
+    fn preseal_receipt_validation_rejects_mutated_producer_and_runtime_digest() {
+        let envelope = envelope(MatrixPlanProfile::LegacyV1);
+
+        let mut mixed_producer = synthetic_runtime_receipts(&envelope);
+        mixed_producer[1].receipt.receipt.producer.version = env!("CARGO_PKG_VERSION").to_owned();
+        reseal(&mut mixed_producer[1]);
+        assert!(matches!(
+            validate_matrix_receipts_for_seal(&envelope, &mixed_producer),
+            Err(MatrixError::InvalidReceipt)
+        ));
+
+        let mut changed_digest = synthetic_runtime_receipts(&envelope);
+        changed_digest[1].receipt.receipt.configuration_digest = OUTPUT_DIGEST.to_owned();
+        reseal(&mut changed_digest[1]);
+        assert!(matches!(
+            validate_matrix_receipts_for_seal(&envelope, &changed_digest),
+            Err(MatrixError::InvalidReceipt)
+        ));
+    }
+
+    #[derive(Default)]
+    struct CountingSupervisor {
+        calls: AtomicUsize,
+    }
+
+    impl SupervisorPort for CountingSupervisor {
+        fn execute(
+            &self,
+            _request: &ProcessRequest,
+            _cancellation: &CancellationToken,
+            _generation: &GenerationGuard,
+        ) -> Result<ProcessResult, ProcessError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            panic!("tampered Matrix plan must fail before supervisor execution")
+        }
+    }
+
+    struct SnapshotMatrixSupervisor {
+        repository: PathBuf,
+        execution_roots: Mutex<Vec<PathBuf>>,
+        containers: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+        removals: AtomicU64,
+    }
+
+    impl SnapshotMatrixSupervisor {
+        fn new(repository: PathBuf) -> Self {
+            Self {
+                repository,
+                execution_roots: Mutex::new(Vec::new()),
+                containers: Mutex::new(BTreeMap::new()),
+                removals: AtomicU64::new(0),
+            }
+        }
+
+        fn completed(request: &ProcessRequest, stdout: Vec<u8>, success: bool) -> ProcessResult {
+            ProcessResult {
+                identity: request.identity.clone(),
+                termination: ProcessTermination::Completed,
+                cleanup: CleanupStatus::Verified,
+                exit: Some(ExitOutcome {
+                    success,
+                    code: Some(if success { 0 } else { 1 }),
+                }),
+                stdout: CapturedStream::from_captured(stdout, false),
+                stderr: CapturedStream::from_captured(Vec::new(), false),
+                elapsed_millis: 1,
+            }
+        }
+
+        fn workspace_source(request: &ProcessRequest) -> Option<PathBuf> {
+            request.argv.iter().find_map(|argument| {
+                let argument = argument.to_str()?;
+                let source = argument.strip_prefix("type=bind,src=")?;
+                let (source, target) = source.split_once(",dst=")?;
+                (target == "/workspace,readonly").then(|| PathBuf::from(source))
+            })
+        }
+    }
+
+    impl SupervisorPort for SnapshotMatrixSupervisor {
+        fn execute(
+            &self,
+            request: &ProcessRequest,
+            _cancellation: &CancellationToken,
+            generation: &GenerationGuard,
+        ) -> Result<ProcessResult, ProcessError> {
+            generation.ensure_current(&request.identity)?;
+            if request.program == "git" {
+                let command = request.argv.first().and_then(|argument| argument.to_str());
+                let stdout = match command {
+                    Some("ls-tree") => {
+                        format!("100644 blob {}\tREADME.md\0", "c".repeat(40)).into_bytes()
+                    }
+                    Some("cat-file")
+                        if request.argv.get(1).is_some_and(|argument| argument == "-s") =>
+                    {
+                        b"16\n".to_vec()
+                    }
+                    Some("cat-file") => b"snapshot source\n".to_vec(),
+                    Some("hash-object") => format!("{}\n", "c".repeat(40)).into_bytes(),
+                    Some("status") => Vec::new(),
+                    Some("rev-parse") => format!("{}\n", "a".repeat(40)).into_bytes(),
+                    _ => Vec::new(),
+                };
+                return Ok(Self::completed(request, stdout, true));
+            }
+
+            let command = request.argv.first().and_then(|argument| argument.to_str());
+            match command {
+                Some("info") => Ok(Self::completed(
+                    request,
+                    br#"{"ServerVersion":"29.4.0","OperatingSystem":"fixture","OSType":"linux","Name":"private"}"#.to_vec(),
+                    true,
+                )),
+                Some("create") => {
+                    let source = Self::workspace_source(request).expect("read-only workspace mount");
+                    assert_eq!(
+                        fs::read(source.join("README.md")).expect("snapshot source"),
+                        b"snapshot source\n"
+                    );
+                    assert!(
+                        !source.join("ignored-live.txt").exists(),
+                        "live-only mutation leaked into snapshot execution root"
+                    );
+                    self.execution_roots.lock().expect("execution roots").push(source);
+                    let mut name = None;
+                    let mut labels = BTreeMap::new();
+                    let mut arguments = request.argv.iter();
+                    while let Some(argument) = arguments.next() {
+                        match argument.to_str() {
+                            Some("--name") => name = arguments.next().and_then(|value| value.to_str()),
+                            Some("--label") => {
+                                if let Some((key, value)) = arguments
+                                    .next()
+                                    .and_then(|value| value.to_str())
+                                    .and_then(|value| value.split_once('='))
+                                {
+                                    labels.insert(key.to_owned(), value.to_owned());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.containers
+                        .lock()
+                        .expect("containers")
+                        .insert(name.expect("container name").to_owned(), labels);
+                    Ok(Self::completed(
+                        request,
+                        format!("{}\n", "d".repeat(64)).into_bytes(),
+                        true,
+                    ))
+                }
+                Some("inspect") => {
+                    let name = request
+                        .argv
+                        .last()
+                        .and_then(|argument| argument.to_str())
+                        .expect("container name");
+                    if let Some(labels) = self
+                        .containers
+                        .lock()
+                        .expect("containers")
+                        .get(name)
+                        .cloned()
+                    {
+                        Ok(Self::completed(
+                            request,
+                            serde_json::to_vec(&serde_json::json!({
+                                "Name": format!("/{name}"),
+                                "Config": {"Labels": labels},
+                                "State": {"Status": "running"},
+                            }))
+                            .expect("inspect JSON"),
+                            true,
+                        ))
+                    } else {
+                        Ok(Self::completed(request, b"No such container\n".to_vec(), false))
+                    }
+                }
+                Some("rm") => {
+                    let name = request
+                        .argv
+                        .last()
+                        .and_then(|argument| argument.to_str())
+                        .expect("container name");
+                    self.containers.lock().expect("containers").remove(name);
+                    if self.removals.fetch_add(1, Ordering::SeqCst) == 0 {
+                        fs::write(self.repository.join("ignored-live.txt"), b"live mutation\n")
+                            .expect("mutate live repository between runtimes");
+                    }
+                    Ok(Self::completed(request, Vec::new(), true))
+                }
+                Some("wait") => Ok(Self::completed(request, b"0\n".to_vec(), true)),
+                Some("attach" | "start" | "stop" | "kill") => {
+                    Ok(Self::completed(request, b"fixture\n".to_vec(), true))
+                }
+                _ => Ok(Self::completed(request, b"fixture\n".to_vec(), true)),
+            }
+        }
+    }
+
+    #[test]
+    fn matrix_runtimes_share_one_immutable_source_snapshot() {
+        let root = matrix_test_root("source-snapshot");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("clean fixture root");
+        }
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).expect("repository root");
+        fs::write(repository.join("README.md"), b"live source\n").expect("live source");
+        let cache = ManagedCache::initialize(
+            ResolvedCacheRoot::resolve(
+                &repository,
+                &CacheRootOptions {
+                    explicit: Some(root.join("cache")),
+                    environment: None,
+                    home: None,
+                    xdg_cache_home: None,
+                    local_app_data: None,
+                    platform: PlatformFamily::Unix,
+                },
+            )
+            .expect("cache root"),
+        )
+        .expect("cache");
+        let envelope = envelope(MatrixPlanProfile::LegacyV1);
+        let supervisor = SnapshotMatrixSupervisor::new(repository.clone());
+        let commit = "a".repeat(40);
+        let identity = RunIdentity {
+            project: envelope.plan.project.clone(),
+            commit: Some(commit.clone()),
+            config_digest: envelope.plan_digest.clone(),
+            generation: "7".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let mut snapshot = SourceSnapshot::materialize(
+            &repository,
+            &commit,
+            &root.join("source-snapshot"),
+            &supervisor,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("source snapshot");
+        envelope
+            .prepare_source_snapshot_overlay(&mut snapshot)
+            .expect("matrix snapshot overlay");
+        let mut barrier = NoopCompletionBarrier;
+
+        let outcome = execute_matrix_run_v2(
+            &MatrixRunRequestV2 {
+                envelope: &envelope,
+                repository: &repository,
+                cache: &cache,
+                generation: 7,
+                source_snapshot: &snapshot,
+            },
+            &supervisor,
+            &CancellationToken::default(),
+            &SystemClock,
+            &mut barrier,
+        )
+        .expect("matrix run");
+
+        assert_eq!(outcome.receipt.runtime_receipts.len(), 2);
+        assert!(
+            !repository.join(&envelope.plan.receipt.output).exists(),
+            "matrix execution must return unsealed, unpublished material"
+        );
+        let roots = supervisor.execution_roots.lock().expect("execution roots");
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0], roots[1]);
+        assert_eq!(roots[0], snapshot.root());
+        assert!(repository.join("ignored-live.txt").is_file());
+        assert!(!snapshot.root().join("ignored-live.txt").exists());
+        drop(roots);
+        snapshot.cleanup().expect("snapshot cleanup");
+        drop(cache);
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+
+    #[test]
+    fn executor_rejects_tampered_legacy_plan_before_supervisor_execution() {
+        let root = matrix_test_root("provenance-test");
+        if root.exists() {
+            fs::remove_dir_all(&root).expect("clean fixture root");
+        }
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).expect("repository root");
+        let cache = ManagedCache::initialize(
+            ResolvedCacheRoot::resolve(
+                &repository,
+                &CacheRootOptions {
+                    explicit: Some(root.join("cache")),
+                    environment: None,
+                    home: None,
+                    xdg_cache_home: None,
+                    local_app_data: None,
+                    platform: PlatformFamily::Unix,
+                },
+            )
+            .expect("cache root"),
+        )
+        .expect("cache");
+        let mut envelope = envelope(MatrixPlanProfile::LegacyV1);
+        let snapshot_supervisor = SnapshotMatrixSupervisor::new(repository.clone());
+        let commit = "a".repeat(40);
+        let identity = RunIdentity {
+            project: envelope.plan.project.clone(),
+            commit: Some(commit.clone()),
+            config_digest: envelope.plan_digest.clone(),
+            generation: "7".to_owned(),
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let mut snapshot = SourceSnapshot::materialize(
+            &repository,
+            &commit,
+            &root.join("source-snapshot"),
+            &snapshot_supervisor,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("source snapshot");
+        envelope
+            .prepare_source_snapshot_overlay(&mut snapshot)
+            .expect("matrix snapshot overlay");
+        envelope.plan.project = "owner/tampered".to_owned();
+        let supervisor = CountingSupervisor::default();
+        let mut barrier = NoopCompletionBarrier;
+
+        let result = execute_matrix_run_v2(
+            &MatrixRunRequestV2 {
+                envelope: &envelope,
+                repository: &repository,
+                cache: &cache,
+                generation: 7,
+                source_snapshot: &snapshot,
+            },
+            &supervisor,
+            &CancellationToken::default(),
+            &SystemClock,
+            &mut barrier,
+        );
+
+        assert!(matches!(result, Err(MatrixError::PlanDigestMismatch)));
+        assert_eq!(supervisor.calls.load(Ordering::SeqCst), 0);
+        snapshot.cleanup().expect("snapshot cleanup");
+        drop(cache);
+        fs::remove_dir_all(root).expect("remove fixture root");
+    }
+}
+
 #[derive(Debug)]
 pub enum MatrixError {
     Io(std::io::Error),
@@ -914,6 +1677,7 @@ pub enum MatrixError {
     UnknownRuntime(String),
     RuntimeWithoutRequiredCheck(String),
     CrossRuntimeDependency { check: String, dependency: String },
+    LegacyPlanNotRepresentable(&'static str),
     PlanDigestMismatch,
     ReceiptIdMismatch,
     InvalidReceipt,
@@ -951,6 +1715,9 @@ impl fmt::Display for MatrixError {
                 formatter,
                 "matrix cross-runtime dependency is unsupported: {check} -> {dependency}"
             ),
+            Self::LegacyPlanNotRepresentable(field) => {
+                write!(formatter, "matrix legacy plan cannot represent: {field}")
+            }
             Self::PlanDigestMismatch => write!(formatter, "matrix plan digest mismatch"),
             Self::ReceiptIdMismatch => write!(formatter, "matrix receipt identifier mismatch"),
             Self::InvalidReceipt => {

@@ -12,7 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Component, Path},
+};
 
 use saphyr::{LoadableYamlNode, MappingOwned, YamlOwned};
 
@@ -23,6 +26,185 @@ const ISSUE_CONFIG: &str = include_str!("../.github/ISSUE_TEMPLATE/config.yml");
 const PR_TEMPLATE: &str = include_str!("../.github/PULL_REQUEST_TEMPLATE.md");
 const ROADMAP: &str = include_str!("../ROADMAP.md");
 const SOCIAL_PREVIEW: &str = include_str!("../docs/assets/social-preview.svg");
+
+#[test]
+fn matrix_legacy_profile_is_documented_without_production_digest_constants() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for path in ["docs/CONFIGURATION.md", "docs/LOCAL_RUN.md"] {
+        let text = fs::read_to_string(root.join(path)).expect("read operator docs");
+        for command in [
+            "plan --matrix-plan-profile matrix-v2-legacy-v1 --json",
+            "doctor --matrix-plan-profile matrix-v2-legacy-v1 --json",
+            "dry-run --matrix-plan-profile matrix-v2-legacy-v1 --json",
+            "run --matrix-plan-profile matrix-v2-legacy-v1 --generation N --json",
+        ] {
+            assert!(text.contains(command), "{path} missing {command}");
+        }
+    }
+    for (path, snippets) in [
+        (
+            "docs/RECEIPT_SPEC.md",
+            &[
+                "0.1.0+matrix-v2-legacy-v1",
+                "outer Matrix schema 2.0",
+                "inner runtime schema 1.0",
+                "never from a completed receipt",
+            ] as &[&str],
+        ),
+        (
+            "docs/MULTI_RUNTIME_RECEIPTS.md",
+            &[
+                "outer-v2",
+                "inner-v1",
+                "producer suffix",
+                "historical verifier",
+                "tests/verification_contract.rs::historical_matrix_verifier_accepts_legacy_profile_receipt_and_rejects_mutations",
+                "#[ignore]",
+                "--ignored",
+                "CCP_HISTORICAL_VERIFIER_044697",
+                "provenance-pinned",
+            ],
+        ),
+        (
+            "docs/GITHUB_GATE.md",
+            &["append-once", "`verify` has no profile flag", "current-v2"],
+        ),
+    ] {
+        let text = fs::read_to_string(root.join(path)).expect("read contract docs");
+        for snippet in snippets {
+            assert!(text.contains(snippet), "{path} missing {snippet}");
+        }
+    }
+    for (path, snippets) in [
+        (
+            "docs/ADOPTION_GUIDE.md",
+            &["Matrix-only", "policy inference", "cache namespaces"] as &[&str],
+        ),
+        (
+            "docs/CACHE_AND_WORKSPACE.md",
+            &["Matrix-only", "separate legacy cache", "policy inference"],
+        ),
+        (
+            "docs/TROUBLESHOOTING.md",
+            &["Matrix-only", "policy migration", "policy inference"],
+        ),
+        (
+            "docs/INVARIANT_EVIDENCE_MATRIX.md",
+            &[
+                "tests/matrix_contract.rs::legacy_profile_reproduces_historical_plan",
+                "current-v2",
+            ],
+        ),
+        (
+            "docs/TESTING_AND_FAULT_INJECTION.md",
+            &[
+                "CCP_HISTORICAL_VERIFIER_044697",
+                "ordinary suite does not prove",
+                "tests/plan_cli.rs::matrix_plan_profile_flag_is_exposed_only_by_configuration_commands",
+                "tests/runtime_cli.rs::legacy_profile_rejection_precedes_shared_state",
+                "tests/runtime_cli.rs::legacy_profile_rejects_current_only_matrix_syntax_before_shared_state",
+            ],
+        ),
+    ] {
+        let text = fs::read_to_string(root.join(path)).expect("read boundary docs");
+        for snippet in snippets {
+            assert!(text.contains(snippet), "{path} missing {snippet}");
+        }
+    }
+    assert_documented_test_references_are_valid(
+        root,
+        [
+            "docs/INVARIANT_EVIDENCE_MATRIX.md",
+            "docs/TESTING_AND_FAULT_INJECTION.md",
+        ],
+    );
+    let mut sources = Vec::new();
+    collect_rust_sources(&root.join("src"), &mut sources);
+    for path in sources {
+        let text = fs::read_to_string(path).expect("read source");
+        for digest in [
+            "25b35b942a6ff9b6237ebed7cefbdbc96b968bbe8954a38b606942f36b8df4b2",
+            "b3d8beef1542566d9d925bfee77d2244995dc74adcd879128ef65e82ed1d354b",
+            "d446c4ca0602c09eee61c796ad2972f58ab0eebe84a39f928fd90aac5bfb535c",
+            "13f4cb39b7e1a8ed31cae64502cc8e4d80d040230d3fb410a6afc3bad3b76178",
+            "eff5b7d55bb0220890dbfb050bb68a1e0fbba8f9a30a69e2f66085354fcc8562",
+            "7afb3e6dd435d9d5a317e4d9d85e80527431044312bbe299e9a70b6ba9e994c8",
+        ] {
+            assert!(
+                !text.contains(digest),
+                "production source embeds adopter digest {digest}"
+            );
+        }
+    }
+}
+
+fn assert_documented_test_references_are_valid<'a>(
+    root: &Path,
+    documents: impl IntoIterator<Item = &'a str>,
+) {
+    for document in documents {
+        let text = fs::read_to_string(root.join(document)).expect("read evidence document");
+        for reference in backticked_test_references(&text) {
+            assert_documented_test_reference_is_safe_and_defined(root, document, reference);
+        }
+    }
+}
+
+fn backticked_test_references(document: &str) -> impl Iterator<Item = &str> {
+    document
+        .split('`')
+        .enumerate()
+        .filter_map(|(index, reference)| {
+            (index % 2 == 1 && reference.starts_with("tests/") && reference.contains(".rs::"))
+                .then_some(reference)
+        })
+}
+
+fn assert_documented_test_reference_is_safe_and_defined(
+    root: &Path,
+    document: &str,
+    reference: &str,
+) {
+    let (relative_path, name) = reference
+        .split_once("::")
+        .unwrap_or_else(|| panic!("{document} has invalid test reference {reference}"));
+    assert!(
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric()),
+        "{document} has unsafe test function name {name}"
+    );
+
+    let path = Path::new(relative_path);
+    let components: Vec<_> = path.components().collect();
+    assert!(
+        matches!(
+            components.as_slice(),
+            [Component::Normal(directory), Component::Normal(file)]
+                if *directory == "tests" && file.to_string_lossy().ends_with(".rs")
+        ),
+        "{document} has unsafe or non-tests path {relative_path}"
+    );
+
+    let source = fs::read_to_string(root.join(path))
+        .unwrap_or_else(|_| panic!("{document} references missing test source {relative_path}"));
+    assert!(
+        source.contains(&format!("fn {name}(")),
+        "{document} references missing test {reference}"
+    );
+}
+
+fn collect_rust_sources(dir: &Path, output: &mut Vec<std::path::PathBuf>) {
+    for entry in fs::read_dir(dir).expect("read src").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_sources(&path, output);
+        } else if path.extension().and_then(|v| v.to_str()) == Some("rs") {
+            output.push(path);
+        }
+    }
+}
 
 #[test]
 fn issue_template_yaml_is_present_and_safe() {

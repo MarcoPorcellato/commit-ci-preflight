@@ -20,6 +20,7 @@ pub mod config;
 pub mod durable_fs;
 pub mod github_actions;
 pub mod matrix;
+mod matrix_legacy;
 pub mod process;
 pub mod receipt;
 pub mod resource;
