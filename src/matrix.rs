@@ -1143,6 +1143,31 @@ mod tests {
     const OUTPUT_DIGEST: &str =
         "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
+    #[test]
+    fn matrix_fixture_root_is_nested_under_selected_test_root() {
+        assert_eq!(
+            matrix_fixture_root(Path::new("/private-test-root"), "snapshot", 7),
+            PathBuf::from("/private-test-root/.ccp-matrix-snapshot-7")
+        );
+    }
+
+    fn matrix_fixture_root(base: &Path, name: &str, process_id: u32) -> PathBuf {
+        base.join(format!(".ccp-matrix-{name}-{process_id}"))
+    }
+
+    fn matrix_test_root(name: &str) -> PathBuf {
+        let base = std::env::var_os("CCP_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .expect("current directory")
+                    .parent()
+                    .expect("repository parent")
+                    .to_path_buf()
+            });
+        matrix_fixture_root(&base, name, std::process::id())
+    }
+
     fn envelope(profile: MatrixPlanProfile) -> MatrixPlanEnvelopeV2 {
         build_matrix_plan(
             MatrixConfigV2::parse(&format!(
@@ -1478,14 +1503,7 @@ pids_limit = 16
 
     #[test]
     fn matrix_runtimes_share_one_immutable_source_snapshot() {
-        let root = std::env::current_dir()
-            .expect("current directory")
-            .parent()
-            .expect("repository parent")
-            .join(format!(
-                ".ccp-matrix-source-snapshot-{}",
-                std::process::id()
-            ));
+        let root = matrix_test_root("source-snapshot");
         if root.exists() {
             fs::remove_dir_all(&root).expect("clean fixture root");
         }
@@ -1566,14 +1584,7 @@ pids_limit = 16
 
     #[test]
     fn executor_rejects_tampered_legacy_plan_before_supervisor_execution() {
-        let root = std::env::current_dir()
-            .expect("current directory")
-            .parent()
-            .expect("repository parent")
-            .join(format!(
-                ".ccp-matrix-provenance-test-{}",
-                std::process::id()
-            ));
+        let root = matrix_test_root("provenance-test");
         if root.exists() {
             fs::remove_dir_all(&root).expect("clean fixture root");
         }
