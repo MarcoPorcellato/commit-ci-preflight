@@ -36,6 +36,7 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const DEFAULT_GRACE_PERIOD: Duration = Duration::from_millis(500);
 const GROUP_EXIT_POLL: Duration = Duration::from_millis(5);
 const MAX_CAPTURE_BYTES: usize = 1_048_576;
+pub(crate) const MAX_SOURCE_BLOB_CAPTURE_BYTES: usize = 64 * 1_048_576;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunIdentity {
@@ -137,6 +138,13 @@ pub enum OutputMode {
 
 impl ProcessRequest {
     pub fn validate(&self) -> Result<(), ProcessError> {
+        self.validate_with_capture_ceiling(MAX_CAPTURE_BYTES)
+    }
+
+    fn validate_with_capture_ceiling(
+        &self,
+        max_allowed_capture_bytes: usize,
+    ) -> Result<(), ProcessError> {
         if self.program.is_empty() {
             return Err(ProcessError::InvalidRequest("program must not be empty"));
         }
@@ -145,7 +153,7 @@ impl ProcessRequest {
                 "timeout must be greater than zero",
             ));
         }
-        if self.max_capture_bytes == 0 || self.max_capture_bytes > MAX_CAPTURE_BYTES {
+        if self.max_capture_bytes == 0 || self.max_capture_bytes > max_allowed_capture_bytes {
             return Err(ProcessError::InvalidRequest(
                 "max_capture_bytes must be between 1 and 1048576",
             ));
@@ -232,6 +240,15 @@ pub trait SupervisorPort: Send + Sync {
         cancellation: &CancellationToken,
         generation: &GenerationGuard,
     ) -> Result<ProcessResult, ProcessError>;
+
+    fn execute_source_blob(
+        &self,
+        request: &ProcessRequest,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+    ) -> Result<ProcessResult, ProcessError> {
+        self.execute(request, cancellation, generation)
+    }
 }
 
 pub trait ProcessSpawner: Send + Sync {
@@ -389,6 +406,21 @@ impl<S: ProcessSpawner> SupervisorPort for ProcessSupervisor<S> {
     ) -> Result<ProcessResult, ProcessError> {
         self.execute_with_output(request, cancellation, generation, OutputMode::Capture)
     }
+
+    fn execute_source_blob(
+        &self,
+        request: &ProcessRequest,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+    ) -> Result<ProcessResult, ProcessError> {
+        self.execute_with_output_and_capture_ceiling(
+            request,
+            cancellation,
+            generation,
+            OutputMode::Capture,
+            MAX_SOURCE_BLOB_CAPTURE_BYTES,
+        )
+    }
 }
 
 impl<S: ProcessSpawner> ProcessSupervisor<S> {
@@ -399,7 +431,24 @@ impl<S: ProcessSpawner> ProcessSupervisor<S> {
         generation: &GenerationGuard,
         output_mode: OutputMode,
     ) -> Result<ProcessResult, ProcessError> {
-        request.validate()?;
+        self.execute_with_output_and_capture_ceiling(
+            request,
+            cancellation,
+            generation,
+            output_mode,
+            MAX_CAPTURE_BYTES,
+        )
+    }
+
+    fn execute_with_output_and_capture_ceiling(
+        &self,
+        request: &ProcessRequest,
+        cancellation: &CancellationToken,
+        generation: &GenerationGuard,
+        output_mode: OutputMode,
+        max_allowed_capture_bytes: usize,
+    ) -> Result<ProcessResult, ProcessError> {
+        request.validate_with_capture_ceiling(max_allowed_capture_bytes)?;
         generation.ensure_current(&request.identity)?;
         let started = Instant::now();
         let deadline = ProcessDeadline::new(started, request.timeout, self.grace_period);
@@ -1189,6 +1238,20 @@ mod tests {
         let (supervisor, state, _) = supervisor(FakeBehavior::Complete);
         let mut request = request();
         request.timeout = Duration::ZERO;
+        let guard = GenerationGuard::new(request.identity.clone());
+
+        assert!(matches!(
+            supervisor.execute(&request, &CancellationToken::default(), &guard),
+            Err(ProcessError::InvalidRequest(_))
+        ));
+        assert_eq!(state.lock().expect("state").spawned, 0);
+    }
+
+    #[test]
+    fn ordinary_process_capture_remains_limited_to_one_mib() {
+        let (supervisor, state, _) = supervisor(FakeBehavior::Complete);
+        let mut request = request();
+        request.max_capture_bytes = 1_048_577;
         let guard = GenerationGuard::new(request.identity.clone());
 
         assert!(matches!(

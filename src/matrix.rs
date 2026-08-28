@@ -1397,6 +1397,11 @@ pids_limit = 16
                     Some("ls-tree") => {
                         format!("100644 blob {}\tREADME.md\0", "c".repeat(40)).into_bytes()
                     }
+                    Some("cat-file")
+                        if request.argv.get(1).is_some_and(|argument| argument == "-s") =>
+                    {
+                        b"16\n".to_vec()
+                    }
                     Some("cat-file") => b"snapshot source\n".to_vec(),
                     Some("hash-object") => format!("{}\n", "c".repeat(40)).into_bytes(),
                     Some("status") => Vec::new(),

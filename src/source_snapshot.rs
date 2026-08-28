@@ -16,19 +16,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{ArtifactKind, ExecutionPlanEnvelopeV1, NormalizedCheck};
 use crate::process::{
-    CancellationToken, CleanupStatus, GenerationGuard, ProcessRequest, ProcessTermination,
-    RunIdentity, SupervisorPort,
+    CancellationToken, CleanupStatus, GenerationGuard, MAX_SOURCE_BLOB_CAPTURE_BYTES,
+    ProcessRequest, ProcessTermination, RunIdentity, SupervisorPort,
 };
 use crate::receipt::canonical_digest;
 
 pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: &str = "1.0";
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
-// ProcessSupervisor deliberately caps every captured child stream at one MiB.
-// Snapshot materialization uses the same bound so oversized Git objects fail
-// closed instead of bypassing the supervisor's capture contract.
 const GIT_CAPTURE_LIMIT: usize = 1_048_576;
 const TREE_CAPTURE_LIMIT: usize = GIT_CAPTURE_LIMIT;
-const BLOB_CAPTURE_LIMIT: usize = GIT_CAPTURE_LIMIT;
+const BLOB_CAPTURE_LIMIT: usize = MAX_SOURCE_BLOB_CAPTURE_BYTES;
 const MAX_ENTRIES: usize = 50_000;
 const LFS_HEADER: &[u8] = b"version https://git-lfs.github.com/spec/v1\n";
 
@@ -133,10 +130,30 @@ impl SourceSnapshot {
                     .blob_oid
                     .as_deref()
                     .ok_or(SourceSnapshotError::InvalidTree)?;
-                let bytes = execute_git(
+                let size_bytes = execute_git(
+                    &repository,
+                    &["cat-file", "-s", oid],
+                    GIT_CAPTURE_LIMIT,
+                    supervisor,
+                    cancellation,
+                    generation,
+                    identity,
+                )?;
+                let size = std::str::from_utf8(&size_bytes)
+                    .map_err(|_| SourceSnapshotError::InvalidTree)?
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|_| SourceSnapshotError::InvalidTree)?;
+                if size > BLOB_CAPTURE_LIMIT as u64 {
+                    return Err(SourceSnapshotError::BlobTooLarge {
+                        path: entry.path.clone(),
+                        size,
+                        limit: BLOB_CAPTURE_LIMIT as u64,
+                    });
+                }
+                let bytes = execute_git_blob(
                     &repository,
                     &["cat-file", "blob", oid],
-                    BLOB_CAPTURE_LIMIT,
                     supervisor,
                     cancellation,
                     generation,
@@ -528,6 +545,37 @@ fn execute_git(
     Ok(result.stdout.bytes)
 }
 
+fn execute_git_blob(
+    repository: &Path,
+    argv: &[&str],
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    generation: &GenerationGuard,
+    identity: &RunIdentity,
+) -> Result<Vec<u8>, SourceSnapshotError> {
+    let request = ProcessRequest {
+        identity: identity.clone(),
+        program: OsString::from("git"),
+        argv: argv.iter().map(OsString::from).collect(),
+        current_dir: repository.to_path_buf(),
+        environment: git_environment(),
+        timeout: GIT_TIMEOUT,
+        max_capture_bytes: BLOB_CAPTURE_LIMIT,
+    };
+    let result = supervisor
+        .execute_source_blob(&request, cancellation, generation)
+        .map_err(|_| SourceSnapshotError::GitFailure)?;
+    if result.termination != ProcessTermination::Completed
+        || result.cleanup != CleanupStatus::Verified
+        || result.exit.map(|status| status.success) != Some(true)
+        || result.stdout.truncated
+        || result.stderr.truncated
+    {
+        return Err(SourceSnapshotError::GitFailure);
+    }
+    Ok(result.stdout.bytes)
+}
+
 fn git_environment() -> BTreeMap<OsString, OsString> {
     [
         "PATH",
@@ -581,6 +629,7 @@ pub enum SourceSnapshotError {
     TooManyEntries,
     DestinationExists,
     GitFailure,
+    BlobTooLarge { path: String, size: u64, limit: u64 },
     UnsupportedMode(String),
     UnsupportedSubmodule(String),
     UnsupportedSymlink(String),
@@ -602,6 +651,12 @@ impl fmt::Display for SourceSnapshotError {
             Self::TooManyEntries => formatter.write_str("source tree exceeds the entry limit"),
             Self::DestinationExists => formatter.write_str("source snapshot destination exists"),
             Self::GitFailure => formatter.write_str("bounded Git snapshot command failed"),
+            Self::BlobTooLarge { path, size, limit } => {
+                write!(
+                    formatter,
+                    "source blob exceeds the {limit} byte limit: {path} is {size} bytes"
+                )
+            }
             Self::UnsupportedMode(mode) => write!(formatter, "unsupported Git mode: {mode}"),
             Self::UnsupportedSubmodule(path) => {
                 write!(formatter, "submodule is unsupported: {path}")
@@ -632,10 +687,13 @@ impl std::error::Error for SourceSnapshotError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::config::ConfigV1;
-    use crate::process::{CapturedStream, ExitOutcome, ProcessError, ProcessResult};
+    use crate::process::{
+        CapturedStream, ExitOutcome, ProcessError, ProcessResult, ProcessSupervisor,
+    };
 
     static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     const COMMIT: &str = "1111111111111111111111111111111111111111";
@@ -657,6 +715,10 @@ mod tests {
                 .collect();
             let stdout = if argv.first().is_some_and(|part| part == "ls-tree") {
                 format!("100644 blob {OID}\tREADME.md\0").into_bytes()
+            } else if argv.first().is_some_and(|part| part == "cat-file")
+                && argv.get(1).is_some_and(|part| part == "-s")
+            {
+                b"6\n".to_vec()
             } else if argv.first().is_some_and(|part| part == "cat-file") {
                 b"hello\n".to_vec()
             } else if argv.first().is_some_and(|part| part == "hash-object") {
@@ -681,6 +743,49 @@ mod tests {
         }
     }
 
+    struct OversizedGit;
+
+    impl SupervisorPort for OversizedGit {
+        fn execute(
+            &self,
+            request: &ProcessRequest,
+            _cancellation: &CancellationToken,
+            _generation: &GenerationGuard,
+        ) -> Result<ProcessResult, ProcessError> {
+            let argv: Vec<_> = request
+                .argv
+                .iter()
+                .map(|part| part.to_string_lossy())
+                .collect();
+            let (stdout, truncated) = if argv.first().is_some_and(|part| part == "ls-tree") {
+                (
+                    format!("100644 blob {OID}\tlarge.bin\0").into_bytes(),
+                    false,
+                )
+            } else if argv.first().is_some_and(|part| part == "cat-file")
+                && argv.get(1).is_some_and(|part| part == "-s")
+            {
+                (format!("{}\n", BLOB_CAPTURE_LIMIT + 1).into_bytes(), false)
+            } else if argv.first().is_some_and(|part| part == "cat-file") {
+                (vec![b'x'; 16], true)
+            } else {
+                (Vec::new(), false)
+            };
+            Ok(ProcessResult {
+                identity: request.identity.clone(),
+                termination: ProcessTermination::Completed,
+                cleanup: CleanupStatus::Verified,
+                exit: Some(ExitOutcome {
+                    success: true,
+                    code: Some(0),
+                }),
+                stdout: CapturedStream::from_captured(stdout, truncated),
+                stderr: CapturedStream::from_captured(Vec::new(), false),
+                elapsed_millis: 1,
+            })
+        }
+    }
+
     fn fixture_root(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "ccp-source-snapshot-{label}-{}-{}",
@@ -696,6 +801,103 @@ mod tests {
             config_digest: format!("sha256:{}", "3".repeat(64)),
             generation: "1".to_owned(),
         }
+    }
+
+    fn run_git(repository: &Path, argv: &[&str]) -> Vec<u8> {
+        let output = Command::new("git")
+            .args(argv)
+            .current_dir(repository)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git fixture command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    #[test]
+    fn materialization_accepts_regular_git_blobs_larger_than_one_mib() {
+        let root = fixture_root("large-blob");
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).expect("fixture repository");
+        run_git(&repository, &["init", "--quiet"]);
+        let expected = vec![b'x'; 1_200_000];
+        fs::write(repository.join("large.bin"), &expected).expect("large fixture blob");
+        run_git(&repository, &["add", "large.bin"]);
+        run_git(
+            &repository,
+            &[
+                "-c",
+                "user.name=CCP fixture",
+                "-c",
+                "user.email=ccp-fixture@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "large blob fixture",
+            ],
+        );
+        let commit = String::from_utf8(run_git(&repository, &["rev-parse", "HEAD"]))
+            .expect("commit is UTF-8")
+            .trim()
+            .to_owned();
+        let identity = RunIdentity {
+            commit: Some(commit.clone()),
+            ..identity()
+        };
+        let generation = GenerationGuard::new(identity.clone());
+        let resource = root.join("resource");
+
+        let mut snapshot = SourceSnapshot::materialize(
+            &repository,
+            &commit,
+            &resource,
+            &ProcessSupervisor::standard(),
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect("large tracked blobs below the source snapshot limit should materialize");
+
+        assert_eq!(
+            fs::read(snapshot.root().join("large.bin")).unwrap(),
+            expected
+        );
+        snapshot.cleanup().expect("snapshot cleanup");
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn oversized_blob_reports_path_size_and_limit_before_materialization() {
+        let root = fixture_root("oversized-blob");
+        fs::create_dir(&root).expect("fixture root");
+        let resource = root.join("resource");
+        let identity = identity();
+        let generation = GenerationGuard::new(identity.clone());
+
+        let error = SourceSnapshot::materialize(
+            &root,
+            COMMIT,
+            &resource,
+            &OversizedGit,
+            &CancellationToken::default(),
+            &generation,
+            &identity,
+        )
+        .expect_err("oversized source blob must fail closed");
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "source blob exceeds the {} byte limit: large.bin is {} bytes",
+                BLOB_CAPTURE_LIMIT,
+                BLOB_CAPTURE_LIMIT + 1
+            )
+        );
+        assert!(!resource.exists(), "failed snapshot must be cleaned up");
+        fs::remove_dir(root).expect("fixture cleanup");
     }
 
     #[test]

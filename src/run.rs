@@ -1238,6 +1238,10 @@ mod tests {
                 }
                 let stdout = if git_command == Some("ls-tree") {
                     format!("100644 blob {}\tREADME.md\0", "c".repeat(40)).into_bytes()
+                } else if git_command == Some("cat-file")
+                    && request.argv.get(1).is_some_and(|argument| argument == "-s")
+                {
+                    b"16\n".to_vec()
                 } else if git_command == Some("cat-file") {
                     b"snapshot source\n".to_vec()
                 } else if git_command == Some("hash-object") {

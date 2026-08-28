@@ -100,6 +100,27 @@ commit-ci-preflight dry-run --config .commit-ci-preflight.toml --repository . --
 Reproduce only the failing explicit check in a deliberate diagnostic context.
 Do not synthesize a receipt or reinterpret an absent receipt as PASS.
 
+## Source snapshot fails before project checks
+
+Snapshot materialization reads the exact committed Git blobs before project
+checks start. Regular blobs up to 64 MiB are accepted by this producer through
+a snapshot-only capture path. The ordinary process stdout and stderr limit
+remains 1 MiB. A larger source blob fails closed before its contents are read
+and reports the path, observed size, and 64 MiB limit; the partial snapshot is
+removed.
+
+Older producers used the ordinary 1 MiB process limit for source blobs as well.
+They can therefore stop with code `70` and the generic message `bounded Git
+snapshot command failed` when an otherwise valid tracked file is only slightly
+larger than 1 MiB. `plan`, `doctor`, and `dry-run` do not materialize Git blobs,
+so their success does not establish compatibility with that older ceiling.
+
+Preserve the exact producer hash, source commit, failing repository commit, and
+terminal output. Inspect tracked blob sizes without changing the repository,
+then use a reviewed and qualified producer that supports the required bounded
+snapshot size. Do not delete scientific evidence, rewrite history, synthesize
+a receipt, or retry a consumed run authorization merely to bypass this failure.
+
 ## First Rust check fails only inside the read-only container
 
 The repository's own `.commit-ci-preflight.toml` uses schema `1.1` and derives
