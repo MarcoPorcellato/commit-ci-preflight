@@ -68,3 +68,27 @@ fn cache_pin_documentation_contract() {
         assert!(text.contains(required), "{path} missing {required}");
     }
 }
+
+#[test]
+fn local_run_documentation_does_not_present_dry_run_argv_as_a_replay_bundle() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let local_run =
+        fs::read_to_string(root.join("docs/LOCAL_RUN.md")).expect("read local run contract");
+    let normalized = local_run.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for required in [
+        "planning and mount-review surface",
+        "does not create cache directories",
+        "entries/sha256-<key>/data",
+        "private per-generation staging sources",
+        "must be independently proven to exist",
+        "owns its writable lifecycle",
+    ] {
+        assert!(normalized.contains(required), "missing {required}");
+    }
+
+    assert!(
+        !normalized.contains("reproduce a failing command deliberately"),
+        "dry-run argv must not be presented as a self-contained replay bundle"
+    );
+}
