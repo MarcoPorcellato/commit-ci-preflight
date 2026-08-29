@@ -16,6 +16,10 @@
 - Work only in `/Users/marco1/Documents/CODICE con VS CODE/ccp-worktrees/independent-verifier-v1`, based on exact source `6ff736b1e2a1dfde8778330efdd4b82c845d45e7`.
 - Use TDD for every behavior or boundary change: focused RED, minimal GREEN, focused review, then proportional validation.
 - Preserve all existing receipt, policy, report, schema, canonical-byte, public-error, root-CLI, and exit-code behavior.
+- Approved Task 4 exception: pure Matrix methods change their pre-1.0 Rust
+  error return from root `MatrixError` to core `MatrixContractError`. Root
+  `MatrixError` variants/displays, CLI output/exit codes, and all wire/schema
+  bytes remain unchanged through an exhaustive root adapter.
 - Define every protocol type once. Compatibility uses `pub use`, never duplicated look-alike structs or enums.
 - `ccp-core` direct dependencies are limited to `schemars`, `serde`, `serde_json`, `sha2`, and `toml`.
 - `ccp-verifier` normal dependencies are limited to `ccp-core` and narrowly
@@ -248,8 +252,10 @@
   `cache`, `process`, `run`, `runtime`, `source_snapshot`, `workspace`, Docker,
   or admission. Require cross-path identity for `MatrixConfigV2`,
   `MatrixPlanEnvelopeV2`, `MatrixReceiptEnvelopeV2`, `MatrixReceiptV2`,
-  `MatrixVerificationPolicyV2`, `MatrixError`, and the shared verification
-  model types.
+  `MatrixVerificationPolicyV2`, and the shared verification model types.
+  Separately require exhaustive construction and conversion of every
+  `MatrixContractError` variant into the existing root `MatrixError`; the two
+  error types must not be nominally identical.
 
 - [ ] **Step 2: Verify RED**
 
@@ -261,6 +267,10 @@
   Move `AcceptedPlatformV1`, `VerificationStatus`, `VerificationDecision`,
   `VerificationFindingV1`, `VerificationReportV1`, `finding`,
   `parse_utc_seconds`, and `validate_commit` into core `verification_model`.
+  Also move the nominal `PolicyError`, `TrustedPlanError`, and
+  `VerificationError` enums into core `errors` now, because pure Matrix
+  verification needs `VerificationError` without a core-to-root dependency;
+  Task 5 still owns moving their policy/dispatcher implementations.
   Re-export the currently public model types from root `verify` immediately;
   keep `finding`, `parse_utc_seconds`, and `validate_commit` `pub(crate)` inside
   `ccp-core` because only core Matrix verification consumes them. This gives
@@ -271,13 +281,17 @@
 
   Move config normalization, plan sealing, receipt sealing, policy parsing,
   legacy digest compatibility, Matrix receipt verification, and schema
-  assembly into core. The root Matrix module retains
+  assembly into core. These pure APIs return `MatrixContractError`, which
+  contains no `RuntimeError` or `RunError`. The root Matrix module retains the
+  existing public `MatrixError` and
   `MatrixRunOutcomeV2`, `MatrixRunMaterialV2`, `MatrixRunRequestV2`,
   `execute_matrix_run_v2`, `seal_matrix_run_material`, and
   `write_matrix_receipt`, plus source snapshots, cache, process execution,
-  runtime probes, receipt writing, and run lifecycle. In the same GREEN slice,
-  change those root execution functions to import the new core contract and
-  verification-model paths; no import of the old root verifier remains.
+  runtime probes, receipt writing, and run lifecycle. Add one exhaustive
+  `From<MatrixContractError> for MatrixError` adapter preserving exact root
+  `Display` behavior. In the same GREEN slice, change those root execution
+  functions to import the new core contract and verification-model paths; no
+  import of the old root verifier remains.
 
 - [ ] **Step 5: Prove Matrix and schema parity**
 
@@ -286,8 +300,10 @@
   ```
 
   Expected: PASS; Matrix mutation/ordering/legacy fixtures and combined receipt
-  schema remain byte-identical. Add a schema dependency assertion proving that
-  core schema generation cannot import runner Matrix execution code.
+  schema remain byte-identical; root CLI/exit behavior is unchanged. Add a
+  schema dependency assertion proving that core schema generation cannot import
+  runner Matrix execution code, plus exhaustive adapter tests proving every
+  pure core error maps to the intended unchanged root error variant.
 
 - [ ] **Step 6: Request the local commit gate**
 

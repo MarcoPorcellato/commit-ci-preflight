@@ -116,13 +116,13 @@ dependency closure is the controlling evidence.
 
 | Core module | Owns | Must not own |
 |---|---|---|
-| `errors` | the single nominal `ReceiptError` definition used by canonical/config/receipt code | runner or CLI errors |
+| `errors` | the single nominal `ReceiptError`, `PolicyError`, `TrustedPlanError`, and `VerificationError` definitions used by pure core code | runner or CLI execution errors |
 | `canonical` | canonical JSON recursion, byte encoding, SHA-256 digest using core `ReceiptError` | files, clocks, runner state |
 | `config` | V1 config contract, normalized execution-plan types, pure parse/validate/normalize | Docker probing or execution |
 | `runtime_evidence` | `RuntimeCapabilityEvidenceV1` wire type | runtime adapters or commands |
 | `receipt` | receipt V1/V2 and shared evidence types, validation, sealing | receipt writing or atomic filesystem operations |
 | `verification_model` | accepted-platform, status, decision, finding, report, and the pure validation/time helpers required by Matrix verification | policy dispatch or CLI rendering |
-| `matrix` | pure Matrix config/plan/receipt/policy types, legacy digest compatibility, Matrix verification | cache, process, run, runtime, source materialization |
+| `matrix` | pure Matrix config/plan/receipt/policy types, legacy digest compatibility, Matrix verification, and `MatrixContractError` | cache, process, `RunError`, `RuntimeError`, source materialization |
 | `verify` | bounded policy/receipt loading, V1/V1.1/Matrix V2 dispatch, trusted-plan reconstruction | runner commands or publication |
 | `schema` | receipt, policy, report, and combined Matrix schema generation | runner configuration schema unrelated to verification |
 
@@ -131,6 +131,15 @@ facades. The root `matrix` module re-exports core contract types while retaining
 only execution composition. The root `runtime` module re-exports
 `RuntimeCapabilityEvidenceV1` from the core so its old public path remains
 valid.
+
+`MatrixError` is the deliberate exception to cross-crate nominal identity. It
+remains root-owned because its public `Runtime(RuntimeError)` and
+`Run(RunError)` variants belong to the runner dependency graph. Pure Matrix
+methods on core-owned contract types return the new
+`ccp_core::matrix::MatrixContractError`; the root execution adapter implements
+an explicit, exhaustive conversion into the existing root `MatrixError` for
+all pure variants. Moving runner errors into `ccp-core`, duplicating Matrix
+wire types, or hiding the dependency behind features is prohibited.
 
 ## Compatibility contract
 
@@ -151,11 +160,19 @@ stability:
 - checked-in schema bytes and historical verifier compatibility fixtures.
 
 A compile-time consumer matrix imports every frozen receipt, config/plan,
-policy, report, Matrix, and error family through both the root facade and
+policy, report, and Matrix wire family through both the root facade and
 `ccp_core`, then assigns values across the two paths. This proves re-exports
-preserve type identity rather than merely providing look-alike types. A public
-surface review also checks all `pub use` paths because dependency graph evidence
-alone cannot prove public API compatibility.
+preserve type identity rather than merely providing look-alike types. Root
+`MatrixError` and core `MatrixContractError` are instead checked by exhaustive
+conversion and exact `Display`/source tests. A public surface review also
+checks all `pub use` paths because dependency graph evidence alone cannot prove
+public API compatibility.
+
+This is an approved narrow pre-1.0 Rust API change: pure methods on re-exported
+Matrix contract types return `MatrixContractError` rather than root
+`MatrixError`. Explicitly typed Rust callers may need to use `?`/`From` or name
+the new error. Root CLI output, exit codes, receipt and schema bytes, and the
+existing root `MatrixError` variants and displays remain unchanged.
 
 Rust layout and enum discriminants are not wire-format guarantees. Byte
 compatibility comes only from the existing canonical encoder and is proven by
