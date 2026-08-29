@@ -227,7 +227,7 @@ rtk cargo fmt --all -- --check
 rtk cargo test --locked --workspace --all-targets --all-features
 rtk cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 rtk cargo doc --locked --workspace --no-deps
-rtk cargo tree -p ccp-verifier --edges normal,no-dev,no-build
+rtk cargo tree --locked -p ccp-verifier --edges normal
 rtk cargo metadata --locked --format-version 1
 rtk cargo run --locked --quiet --example generate_release_metadata -- --check
 ```
