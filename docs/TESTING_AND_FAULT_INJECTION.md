@@ -93,6 +93,12 @@ containment boundaries only; they do not prove a real admission root, host
 cleanup, a published receipt, or another platform. Process lists do not prove
 release.
 
+## Opaque cache-payload symbolic links
+
+Deterministic coverage includes `src/cache.rs::complete_payload_symlinks_are_preserved_across_generation_reuse`, `src/cache.rs::failed_payload_preflight_removes_the_new_staging_generation`, and `src/cache.rs::staging_cleanup_unlinks_payload_links_without_touching_targets`. Payload measurement is covered by `src/cache_payload.rs::payload_measurement_counts_links_without_following_targets`; fallback semantics by `src/cache_payload.rs::fallback_copy_preserves_each_link_target_and_external_sentinel`.
+
+On macOS, clone-based reuse preserves ordinary opaque payload links; Unix fallback copy preserves each link target without following it. Windows link-bearing payload reuse remains fail-closed and unsupported. These are deterministic source tests, not a native CCP receipt or native qualification.
+
 ## Managed-cache pin contract
 
 The managed-cache pin tests are deterministic contract tests over an owned

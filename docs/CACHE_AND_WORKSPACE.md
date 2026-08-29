@@ -104,6 +104,20 @@ The default reporting budget is 20 GiB and can be overridden with
 `--disk-budget-bytes`. Exceeding the budget is reported; it does not trigger
 automatic eviction.
 
+## Control plane and opaque payload links
+
+The cache has a strict control plane and an opaque payload plane. Control-plane
+paths remain link-free and fail closed. Inventory counts a link's stored target
+length as bytes, never target content, never follows a payload link target on
+the host, and retains the 100,000-node bound. Payload inspection covers
+relative, absolute, broken, recursive, and outside-root links. CCP never follows a payload link target on the host.
+
+Unix reuse preserves these opaque links. Windows link-bearing payload reuse remains unsupported and fails closed. A payload link is counted as one node and one non-directory object. Cache payloads remain mutable, unattested performance
+state, not trusted content. Standard-library path traversal is qualified under
+CCP's cooperative entry-lock/trusted-local-actor model; a non-cooperative local
+actor concurrently replacing a checked path remains unsupported and is not
+claimed prevented.
+
 ## Schema 1.2 capacity preflight
 
 The inventory budget remains reporting-only. A schema `1.2` `[storage]` policy

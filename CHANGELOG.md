@@ -9,6 +9,8 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Unix cache generations now preserve ordinary opaque payload links during inventory and reuse; strict control paths remain link-free, failed preparation owns cleanup before reuse, and native candidate qualification remains pending.
+
 - Shared terminal owned-resource finalization now routes historical and matrix
   runs, benchmarks, and guarded execution through completion-before-release,
   exactly-once admission release, and fail-closed release-error precedence.
