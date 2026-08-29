@@ -36,7 +36,7 @@ fn markdown_heading_anchors(markdown: &str) -> HashSet<String> {
     markdown
         .lines()
         .filter_map(|line| line.strip_prefix('#'))
-        .filter(|line| line.starts_with(|c: char| c == ' ' || c == '\t'))
+        .filter(|line| line.starts_with([' ', '\t']))
         .map(|line| {
             line.trim()
                 .trim_end_matches('#')
