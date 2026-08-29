@@ -57,6 +57,14 @@ const LEGACY_MATRIX_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const LEGACY_MATRIX_EVALUATED_AT: &str = "2026-08-16T10:01:00Z";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn verification_contract_types_are_thread_safe() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<VerificationPolicyV1>();
+    assert_send_sync::<VerificationPolicyV1_1>();
+    assert_send_sync::<VerificationReportV1>();
+}
+
 fn policy() -> VerificationPolicyV1 {
     VerificationPolicyV1::parse(POLICY).expect("policy")
 }

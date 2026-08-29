@@ -22,6 +22,13 @@ const PASS_V2_FIXTURE: &[u8] = include_bytes!("fixtures/receipt-v2-pass.json");
 const PINNED_V2_SCHEMA: &str = include_str!("../schema/receipt-v2.schema.json");
 
 #[test]
+fn receipt_contract_types_are_thread_safe() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ReceiptEnvelopeV1>();
+    assert_send_sync::<ReceiptEnvelopeV2>();
+}
+
+#[test]
 fn pinned_pass_fixture_round_trips_byte_for_byte() {
     let envelope: ReceiptEnvelopeV1 =
         serde_json::from_slice(PASS_FIXTURE).expect("pinned fixture parses");

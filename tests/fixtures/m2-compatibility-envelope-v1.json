@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "source_head": "6ff736b1e2a1dfde8778330efdd4b82c845d45e7",
+  "files": {
+    "tests/fixtures/receipt-v1-pass.json": "f6824b28ded398d26620f5cc53c8e891997f909ff83b6ff7e17eef2ca821b017",
+    "tests/fixtures/receipt-v2-pass.json": "35d15b81c281f13fe07a49cf20a1aa942ab07f3e8b2ddbd400d9747e37eba8fe",
+    "tests/fixtures/policy-v1.toml": "21d0f45765ba8bc4ea1f443ad0fa76093cf5edeb7b98f181e50e34052ca8bac3",
+    "tests/fixtures/policy-v1_1-trusted-plan.toml": "f9c3293ba7ddeb100a85680d1b931b2246621fcc62314dffd06c4a4e16d8ca79",
+    "tests/fixtures/policy-v1_1-trusted-plan-altered.toml": "39798543fa24b779b415472188d588f3901f142b216424af4f340275bd4e36d3",
+    "tests/fixtures/policy-v1_1-missing-config.toml": "f30f7caea1cd37bd3bcd206abfbc70b8041df2ff7a0b437d17d01f7cfd9fffa1",
+    "tests/fixtures/policy-v2-legacy-compatible.toml": "846a94bd6b298ca1a35a4c0f39bed31ae08d1b94e448fa82fc058ea16550afec",
+    "tests/fixtures/plan-v2-current-default.stdout.json": "6c86ecad1b7c213945656282aa1f2844909302a13e1a585c3a2c93be6081458a",
+    "tests/fixtures/historical-verifier-044697.provenance.json": "cd75dea3593307e6dbf72abe5773e3031056a3c61033caeba6c7bea2a4a79838",
+    "tests/fixtures/matrix-v2-legacy-plan-044697.provenance.json": "dc6f4f409fe31003cf1f50fe895ca7a114a614ca4eb3c7f526da02981abd9e1f",
+    "schema/receipt-v1.schema.json": "684b81b685a6013181e3fdd4bcf29573c01959da5e510bc158d5f94b8aeb8abc",
+    "schema/receipt-v2.schema.json": "bf315a2609366adc94520f5e8966d3048529e86759e66701a544be10eca9adbf",
+    "schema/policy-v1.schema.json": "e76d92f8a328c714ace3aab8c7c88e1ef58c4092ca48961fd2e57ca347b53d79",
+    "schema/policy-v1_1.schema.json": "b06ee6753cab21db0a4cca5bfbdbd90ec2cdeccd2a7d2eaaed68b826d0944b00",
+    "schema/policy-v2.schema.json": "2cc87c4bbfdbe787144a4ff96ff2a20dd004525f704f9f1cbd80117225426316",
+    "schema/verification-report-v1.schema.json": "67ec9524749d471d6a23e22ba0f9d52377273448f5c25ef318fbbd1a9f8f9b23"
+  }
+}
