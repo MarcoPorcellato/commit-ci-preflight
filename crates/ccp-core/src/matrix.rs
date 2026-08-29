@@ -18,7 +18,10 @@ use crate::config::{
     RuntimeConfig, RuntimeKind, validate_identifier,
 };
 use crate::errors::{EvidenceStatus, ReceiptError};
-use crate::verification_model::{AcceptedPlatformV1, VerificationDecision, VerificationReportV1, VerificationStatus, finding, parse_utc_seconds, validate_commit};
+use crate::verification_model::{
+    AcceptedPlatformV1, VerificationDecision, VerificationReportV1, VerificationStatus, finding,
+    parse_utc_seconds, validate_commit,
+};
 
 pub const MATRIX_RECEIPT_SCHEMA_VERSION: &str = "2.0";
 pub const MATRIX_POLICY_SCHEMA_VERSION: &str = "2.0";
@@ -327,7 +330,9 @@ impl fmt::Display for MatrixContractError {
             Self::InvalidReceipt => f.write_str("matrix receipt violates semantic invariants"),
             Self::ReceiptIdMismatch => f.write_str("matrix receipt ID mismatch"),
             Self::Verification(e) => write!(f, "matrix verification failed: {e}"),
-            Self::InvalidEvaluationTime => f.write_str("verification time is not representable as strict UTC"),
+            Self::InvalidEvaluationTime => {
+                f.write_str("verification time is not representable as strict UTC")
+            }
         }
     }
 }
@@ -347,7 +352,10 @@ impl std::error::Error for MatrixContractError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MatrixReceiptEnvelopeV2 { pub receipt_id: String, pub receipt: MatrixReceiptV2 }
+pub struct MatrixReceiptEnvelopeV2 {
+    pub receipt_id: String,
+    pub receipt: MatrixReceiptV2,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MatrixReceiptV2 {
@@ -363,34 +371,242 @@ pub struct MatrixReceiptV2 {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MatrixRuntimeReceiptV2 { pub runtime_id: String, pub receipt: crate::receipt::ReceiptEnvelopeV1 }
+pub struct MatrixRuntimeReceiptV2 {
+    pub runtime_id: String,
+    pub receipt: crate::receipt::ReceiptEnvelopeV1,
+}
 
 impl MatrixReceiptEnvelopeV2 {
-    pub fn seal(receipt: MatrixReceiptV2) -> Result<Self, MatrixContractError> { receipt.validate()?; let receipt_id = canonical_digest(&receipt).map_err(MatrixContractError::Receipt)?; Ok(Self { receipt_id, receipt }) }
-    pub fn verify(&self) -> Result<(), MatrixContractError> { self.receipt.validate()?; let expected = canonical_digest(&self.receipt).map_err(MatrixContractError::Receipt)?; if expected != self.receipt_id { return Err(MatrixContractError::ReceiptIdMismatch); } Ok(()) }
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixContractError> { self.verify()?; canonical_json(self).map_err(MatrixContractError::Receipt) }
+    pub fn seal(receipt: MatrixReceiptV2) -> Result<Self, MatrixContractError> {
+        receipt.validate()?;
+        let receipt_id = canonical_digest(&receipt).map_err(MatrixContractError::Receipt)?;
+        Ok(Self {
+            receipt_id,
+            receipt,
+        })
+    }
+    pub fn verify(&self) -> Result<(), MatrixContractError> {
+        self.receipt.validate()?;
+        let expected = canonical_digest(&self.receipt).map_err(MatrixContractError::Receipt)?;
+        if expected != self.receipt_id {
+            return Err(MatrixContractError::ReceiptIdMismatch);
+        }
+        Ok(())
+    }
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixContractError> {
+        self.verify()?;
+        canonical_json(self).map_err(MatrixContractError::Receipt)
+    }
 }
 impl MatrixReceiptV2 {
     pub fn validate(&self) -> Result<(), MatrixContractError> {
-        if self.schema_version != MATRIX_RECEIPT_SCHEMA_VERSION { return Err(MatrixContractError::UnsupportedSchemaVersion(self.schema_version.clone())); }
-        if self.repository.dirty || self.runtime_receipts.len() < 2 { return Err(MatrixContractError::InvalidReceipt); }
-        let mut runtime_ids = BTreeSet::new(); let mut check_ids = BTreeSet::new(); let mut checks = Vec::new();
-        for group in &self.runtime_receipts { validate_identifier("runtime_receipts.runtime_id", &group.runtime_id).map_err(MatrixContractError::Config)?; if !runtime_ids.insert(group.runtime_id.as_str()) { return Err(MatrixContractError::DuplicateValue("runtime_receipts.runtime_id")); } group.receipt.verify().map_err(MatrixContractError::Receipt)?; let receipt = &group.receipt.receipt; if receipt.repository != self.repository || receipt.producer != self.producer { return Err(MatrixContractError::InvalidReceipt); } for check in &receipt.checks { if !check_ids.insert(check.id.as_str()) { return Err(MatrixContractError::DuplicateValue("runtime_receipts.checks.id")); } checks.push(check.clone()); } }
-        if checks.is_empty() { return Err(MatrixContractError::InvalidReceipt); }
-        crate::receipt::ReceiptV1 { schema_version: crate::receipt::RECEIPT_SCHEMA_VERSION.to_owned(), producer: self.producer.clone(), repository: self.repository.clone(), run: self.run.clone(), platform: self.runtime_receipts[0].receipt.receipt.platform.clone(), configuration_digest: self.configuration_digest.clone(), checks, overall_status: self.overall_status, incomplete_reason: self.incomplete_reason.clone(), redaction_policy_version: self.redaction_policy_version.clone() }.validate().map_err(MatrixContractError::Receipt)
+        if self.schema_version != MATRIX_RECEIPT_SCHEMA_VERSION {
+            return Err(MatrixContractError::UnsupportedSchemaVersion(
+                self.schema_version.clone(),
+            ));
+        }
+        if self.repository.dirty || self.runtime_receipts.len() < 2 {
+            return Err(MatrixContractError::InvalidReceipt);
+        }
+        let mut runtime_ids = BTreeSet::new();
+        let mut check_ids = BTreeSet::new();
+        let mut checks = Vec::new();
+        for group in &self.runtime_receipts {
+            validate_identifier("runtime_receipts.runtime_id", &group.runtime_id)
+                .map_err(MatrixContractError::Config)?;
+            if !runtime_ids.insert(group.runtime_id.as_str()) {
+                return Err(MatrixContractError::DuplicateValue(
+                    "runtime_receipts.runtime_id",
+                ));
+            }
+            group
+                .receipt
+                .verify()
+                .map_err(MatrixContractError::Receipt)?;
+            let receipt = &group.receipt.receipt;
+            if receipt.repository != self.repository || receipt.producer != self.producer {
+                return Err(MatrixContractError::InvalidReceipt);
+            }
+            for check in &receipt.checks {
+                if !check_ids.insert(check.id.as_str()) {
+                    return Err(MatrixContractError::DuplicateValue(
+                        "runtime_receipts.checks.id",
+                    ));
+                }
+                checks.push(check.clone());
+            }
+        }
+        if checks.is_empty() {
+            return Err(MatrixContractError::InvalidReceipt);
+        }
+        crate::receipt::ReceiptV1 {
+            schema_version: crate::receipt::RECEIPT_SCHEMA_VERSION.to_owned(),
+            producer: self.producer.clone(),
+            repository: self.repository.clone(),
+            run: self.run.clone(),
+            platform: self.runtime_receipts[0].receipt.receipt.platform.clone(),
+            configuration_digest: self.configuration_digest.clone(),
+            checks,
+            overall_status: self.overall_status,
+            incomplete_reason: self.incomplete_reason.clone(),
+            redaction_policy_version: self.redaction_policy_version.clone(),
+        }
+        .validate()
+        .map_err(MatrixContractError::Receipt)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MatrixVerificationPolicyV2 { pub schema_version: String, pub project: String, pub configuration_digest: String, pub required_checks: Vec<MatrixRequiredCheckV2>, pub max_age_seconds: u64, pub runtimes: Vec<MatrixRuntimePolicyV2> }
+pub struct MatrixVerificationPolicyV2 {
+    pub schema_version: String,
+    pub project: String,
+    pub configuration_digest: String,
+    pub required_checks: Vec<MatrixRequiredCheckV2>,
+    pub max_age_seconds: u64,
+    pub runtimes: Vec<MatrixRuntimePolicyV2>,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MatrixRequiredCheckV2 { pub id: String, pub runtime_id: String }
+pub struct MatrixRequiredCheckV2 {
+    pub id: String,
+    pub runtime_id: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MatrixRuntimePolicyV2 { pub id: String, pub configuration_digest: String, pub image_reference: String, pub platforms: Vec<AcceptedPlatformV1> }
+pub struct MatrixRuntimePolicyV2 {
+    pub id: String,
+    pub configuration_digest: String,
+    pub image_reference: String,
+    pub platforms: Vec<AcceptedPlatformV1>,
+}
 
-impl MatrixVerificationPolicyV2 { pub fn parse(source: &str) -> Result<Self, MatrixContractError> { if source.len() > MAX_MATRIX_BYTES { return Err(MatrixContractError::ConfigTooLarge); } let value: Self = toml::from_str(source).map_err(MatrixContractError::Parse)?; value.validate()?; Ok(value) } pub fn load(path: &Path) -> Result<Self, MatrixContractError> { Self::parse(&fs::read_to_string(path).map_err(MatrixContractError::Io)?) } pub fn validate(&self) -> Result<(), MatrixContractError> { if self.schema_version != MATRIX_POLICY_SCHEMA_VERSION { return Err(MatrixContractError::UnsupportedSchemaVersion(self.schema_version.clone())); } if !(2..=MAX_MATRIX_RUNTIMES).contains(&self.runtimes.len()) || self.required_checks.is_empty() { return Err(MatrixContractError::InvalidField("runtimes_or_required_checks")); } let mut ids=BTreeSet::new(); for r in &self.runtimes { validate_identifier("runtimes.id", &r.id).map_err(MatrixContractError::Config)?; if !ids.insert(r.id.as_str()) { return Err(MatrixContractError::DuplicateValue("runtimes.id")); } } let mut checks=BTreeSet::new(); for c in &self.required_checks { validate_identifier("required_checks.id", &c.id).map_err(MatrixContractError::Config)?; validate_identifier("required_checks.runtime_id", &c.runtime_id).map_err(MatrixContractError::Config)?; if !ids.contains(c.runtime_id.as_str()) { return Err(MatrixContractError::UnknownRuntime(c.runtime_id.clone())); } if !checks.insert(c.id.as_str()) { return Err(MatrixContractError::DuplicateValue("required_checks.id")); } } Ok(()) } }
+impl MatrixVerificationPolicyV2 {
+    pub fn parse(source: &str) -> Result<Self, MatrixContractError> {
+        if source.len() > MAX_MATRIX_BYTES {
+            return Err(MatrixContractError::ConfigTooLarge);
+        }
+        let value: Self = toml::from_str(source).map_err(MatrixContractError::Parse)?;
+        value.validate()?;
+        Ok(value)
+    }
+    pub fn load(path: &Path) -> Result<Self, MatrixContractError> {
+        Self::parse(&fs::read_to_string(path).map_err(MatrixContractError::Io)?)
+    }
+    pub fn validate(&self) -> Result<(), MatrixContractError> {
+        if self.schema_version != MATRIX_POLICY_SCHEMA_VERSION {
+            return Err(MatrixContractError::UnsupportedSchemaVersion(
+                self.schema_version.clone(),
+            ));
+        }
+        if !(2..=MAX_MATRIX_RUNTIMES).contains(&self.runtimes.len())
+            || self.required_checks.is_empty()
+        {
+            return Err(MatrixContractError::InvalidField(
+                "runtimes_or_required_checks",
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        for r in &self.runtimes {
+            validate_identifier("runtimes.id", &r.id).map_err(MatrixContractError::Config)?;
+            if !ids.insert(r.id.as_str()) {
+                return Err(MatrixContractError::DuplicateValue("runtimes.id"));
+            }
+        }
+        let mut checks = BTreeSet::new();
+        for c in &self.required_checks {
+            validate_identifier("required_checks.id", &c.id)
+                .map_err(MatrixContractError::Config)?;
+            validate_identifier("required_checks.runtime_id", &c.runtime_id)
+                .map_err(MatrixContractError::Config)?;
+            if !ids.contains(c.runtime_id.as_str()) {
+                return Err(MatrixContractError::UnknownRuntime(c.runtime_id.clone()));
+            }
+            if !checks.insert(c.id.as_str()) {
+                return Err(MatrixContractError::DuplicateValue("required_checks.id"));
+            }
+        }
+        Ok(())
+    }
+}
 
-pub fn verify_matrix_receipt_document(bytes: &[u8], policy: &MatrixVerificationPolicyV2, expected_commit: &str, evaluated_at_utc: &str) -> Result<VerificationReportV1, MatrixContractError> { policy.validate()?; validate_commit(expected_commit).map_err(MatrixContractError::Verification)?; if parse_utc_seconds(evaluated_at_utc).is_none() { return Err(MatrixContractError::InvalidEvaluationTime); } let mut report=VerificationReportV1 { schema_version:"1.0".into(), assurance_scope:"integrity_and_repository_policy_only".into(), evaluated_at_utc:evaluated_at_utc.into(), expected_commit:expected_commit.into(), receipt_id:None, integrity_status:VerificationStatus::Fail, policy_status:VerificationStatus::NotRun, decision:VerificationDecision::Fail, findings:Vec::new() }; let envelope: MatrixReceiptEnvelopeV2 = match serde_json::from_slice(bytes) { Ok(v)=>v, Err(_)=>{ report.findings.push(finding("receipt.parse_or_shape","receipt","receipt is not valid strict schema v2 JSON")); return Ok(report); } }; if envelope.verify().is_err() { report.findings.push(finding("receipt.semantic_or_digest_invalid","receipt","receipt violates v2 integrity invariants")); return Ok(report); } report.receipt_id=Some(envelope.receipt_id.clone()); report.integrity_status=VerificationStatus::Pass; report.policy_status=VerificationStatus::Pass; let r=&envelope.receipt; if r.repository.repository != policy.project { report.findings.push(finding("policy.repository","repository.repository","receipt project does not match repository policy")); } if r.repository.commit_sha != expected_commit { report.findings.push(finding("policy.commit","repository.commit_sha","receipt commit does not match externally supplied commit")); } if r.configuration_digest != policy.configuration_digest { report.findings.push(finding("policy.configuration","configuration_digest","receipt configuration digest does not match repository policy")); } if r.overall_status != EvidenceStatus::Pass { report.findings.push(finding("policy.overall_status","overall_status","repository policy requires an overall PASS receipt")); } if report.findings.is_empty() { report.decision=VerificationDecision::Pass; } else { report.policy_status=VerificationStatus::Fail; } Ok(report) }
+pub fn verify_matrix_receipt_document(
+    bytes: &[u8],
+    policy: &MatrixVerificationPolicyV2,
+    expected_commit: &str,
+    evaluated_at_utc: &str,
+) -> Result<VerificationReportV1, MatrixContractError> {
+    policy.validate()?;
+    validate_commit(expected_commit).map_err(MatrixContractError::Verification)?;
+    if parse_utc_seconds(evaluated_at_utc).is_none() {
+        return Err(MatrixContractError::InvalidEvaluationTime);
+    }
+    let mut report = VerificationReportV1 {
+        schema_version: "1.0".into(),
+        assurance_scope: "integrity_and_repository_policy_only".into(),
+        evaluated_at_utc: evaluated_at_utc.into(),
+        expected_commit: expected_commit.into(),
+        receipt_id: None,
+        integrity_status: VerificationStatus::Fail,
+        policy_status: VerificationStatus::NotRun,
+        decision: VerificationDecision::Fail,
+        findings: Vec::new(),
+    };
+    let envelope: MatrixReceiptEnvelopeV2 = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            report.findings.push(finding(
+                "receipt.parse_or_shape",
+                "receipt",
+                "receipt is not valid strict schema v2 JSON",
+            ));
+            return Ok(report);
+        }
+    };
+    if envelope.verify().is_err() {
+        report.findings.push(finding(
+            "receipt.semantic_or_digest_invalid",
+            "receipt",
+            "receipt violates v2 integrity invariants",
+        ));
+        return Ok(report);
+    }
+    report.receipt_id = Some(envelope.receipt_id.clone());
+    report.integrity_status = VerificationStatus::Pass;
+    report.policy_status = VerificationStatus::Pass;
+    let r = &envelope.receipt;
+    if r.repository.repository != policy.project {
+        report.findings.push(finding(
+            "policy.repository",
+            "repository.repository",
+            "receipt project does not match repository policy",
+        ));
+    }
+    if r.repository.commit_sha != expected_commit {
+        report.findings.push(finding(
+            "policy.commit",
+            "repository.commit_sha",
+            "receipt commit does not match externally supplied commit",
+        ));
+    }
+    if r.configuration_digest != policy.configuration_digest {
+        report.findings.push(finding(
+            "policy.configuration",
+            "configuration_digest",
+            "receipt configuration digest does not match repository policy",
+        ));
+    }
+    if r.overall_status != EvidenceStatus::Pass {
+        report.findings.push(finding(
+            "policy.overall_status",
+            "overall_status",
+            "repository policy requires an overall PASS receipt",
+        ));
+    }
+    if report.findings.is_empty() {
+        report.decision = VerificationDecision::Pass;
+    } else {
+        report.policy_status = VerificationStatus::Fail;
+    }
+    Ok(report)
+}
