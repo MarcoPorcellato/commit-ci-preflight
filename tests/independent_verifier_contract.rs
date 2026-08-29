@@ -99,3 +99,64 @@ fn duplicate_manifest_keys_are_rejected_by_contract_fixture() {
     let duplicate = r#"{"schema_version":"1.0","source_head":"x","files":{"a":"1","a":"2"}}"#;
     assert!(reject_duplicate_keys(duplicate).is_err());
 }
+
+#[test]
+fn workspace_members_are_explicit_and_verifier_dependencies_are_bounded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let value: toml::Value = toml::from_str(&manifest).unwrap();
+    let workspace = value.get("workspace").unwrap().as_table().unwrap();
+    assert_eq!(
+        workspace["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![".", "crates/ccp-core", "crates/ccp-verifier"]
+    );
+    assert_eq!(
+        workspace["default-members"].as_array().unwrap()[0]
+            .as_str()
+            .unwrap(),
+        "."
+    );
+    assert_eq!(workspace["resolver"].as_str(), Some("3"));
+
+    for (path, allowed) in [
+        (
+            "crates/ccp-core/Cargo.toml",
+            ["schemars", "serde", "serde_json", "sha2", "toml"].as_slice(),
+        ),
+        (
+            "crates/ccp-verifier/Cargo.toml",
+            ["ccp-core", "clap"].as_slice(),
+        ),
+    ] {
+        let package: toml::Value =
+            toml::from_str(&fs::read_to_string(root.join(path)).unwrap()).unwrap();
+        let deps = package
+            .get("dependencies")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert!(
+            deps.keys().all(|name| allowed.contains(&name.as_str())),
+            "unexpected dependency in {path}"
+        );
+    }
+    let verifier_source = fs::read_to_string(root.join("crates/ccp-verifier/src/main.rs")).unwrap();
+    for forbidden in [
+        "commit_ci_preflight",
+        "docker",
+        "cache",
+        "admission",
+        "resource",
+        "benchmark",
+        "github",
+    ] {
+        assert!(
+            !verifier_source.to_ascii_lowercase().contains(forbidden),
+            "forbidden source import/token: {forbidden}"
+        );
+    }
+}

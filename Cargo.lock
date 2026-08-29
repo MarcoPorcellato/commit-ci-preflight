@@ -45,6 +45,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ccp-core"
+version = "0.1.0"
+dependencies = [
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+]
+
+[[package]]
+name = "ccp-verifier"
+version = "0.1.0"
+dependencies = [
+ "ccp-core",
+ "clap",
+ "serde_json",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -98,6 +118,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 name = "commit-ci-preflight"
 version = "0.1.0"
 dependencies = [
+ "ccp-core",
  "clap",
  "ctrlc",
  "fs2",
