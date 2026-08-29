@@ -1617,6 +1617,17 @@ fn bounded_entry_size_at(
     path: &Path,
     nodes: &mut usize,
 ) -> Result<(u64, u64), CacheError> {
+    if is_payload_root(entry_root, path) {
+        let metadata = fs::symlink_metadata(path).map_err(CacheError::Io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()));
+        }
+        if !metadata.is_dir() {
+            return Err(CacheError::UnexpectedEntry(path.to_path_buf()));
+        }
+        let stats = crate::cache_payload::measure_payload_tree(path, nodes, MAX_INVENTORY_NODES)?;
+        return Ok((stats.bytes, stats.files));
+    }
     *nodes = nodes.checked_add(1).ok_or(CacheError::SizeOverflow)?;
     if *nodes > MAX_INVENTORY_NODES {
         return Err(CacheError::InventoryLimitExceeded);
@@ -1630,10 +1641,6 @@ fn bounded_entry_size_at(
     }
     if !metadata.is_dir() {
         return Err(CacheError::UnexpectedEntry(path.to_path_buf()));
-    }
-    if is_payload_root(entry_root, path) {
-        let stats = crate::cache_payload::measure_payload_tree(path, nodes, MAX_INVENTORY_NODES)?;
-        return Ok((stats.bytes, stats.files));
     }
     let mut bytes = 0_u64;
     let mut files = 0_u64;
@@ -2189,6 +2196,19 @@ timeout_seconds = 60
         );
         assert_eq!(fs::read(&outside).unwrap(), b"sentinel");
         finish_fixture(fixture);
+    }
+
+    #[test]
+    fn inventory_counts_each_payload_root_once() {
+        let (_repo, resolved) = resolved_fixture("inventory-node-count");
+        let entry = resolved.path.join(ENTRIES_DIR).join("entry");
+        fs::create_dir_all(entry.join("data")).unwrap();
+        fs::write(entry.join("data/payload"), b"payload").unwrap();
+        let mut nodes = 0;
+        let stats = bounded_entry_size(&entry, &mut nodes).unwrap();
+        assert_eq!(nodes, 3);
+        assert_eq!(stats, (7, 1));
+        clean(&resolved.path);
     }
 
     #[cfg(unix)]
