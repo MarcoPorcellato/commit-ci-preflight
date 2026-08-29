@@ -134,6 +134,7 @@ fn verification_error_exit_code(error: &ccp_core::verify::VerificationError) -> 
 mod tests {
     #[test]
     fn verification_exit_code_preserves_root_mapping() {
+        use ccp_core::errors::{PolicyError, TrustedPlanError};
         use ccp_core::verify::VerificationError;
         assert_eq!(
             super::verification_error_exit_code(&VerificationError::Receipt(
@@ -141,14 +142,17 @@ mod tests {
             )),
             70
         );
-        assert_eq!(
-            super::verification_error_exit_code(&VerificationError::InvalidExpectedCommit),
-            2
-        );
-        assert_eq!(
-            super::verification_error_exit_code(&VerificationError::Matrix("x".into())),
-            2
-        );
+        for error in [
+            VerificationError::Policy(PolicyError::TooLarge),
+            VerificationError::PolicyDocument("x".into()),
+            VerificationError::TrustedPlan(TrustedPlanError::PolicyPath),
+            VerificationError::TrustedPolicyPathRequired,
+            VerificationError::InvalidExpectedCommit,
+            VerificationError::InvalidEvaluationTime,
+            VerificationError::Matrix("x".into()),
+        ] {
+            assert_eq!(super::verification_error_exit_code(&error), 2);
+        }
     }
 }
 

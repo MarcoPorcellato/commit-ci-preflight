@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
-use std::path::PathBuf;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const RECEIPT: &str = "tests/fixtures/receipt-v1-pass.json";
@@ -24,6 +25,35 @@ const INVALID_TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-missing-co
 const LEGACY_MATRIX_POLICY: &str = "tests/fixtures/policy-v2-legacy-compatible.toml";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
+
+struct TempReceipt(PathBuf);
+impl TempReceipt {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "ccp-verifier-malformed-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create unique malformed receipt");
+        file.write_all(b"{").expect("write malformed receipt");
+        Self(path)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TempReceipt {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 fn build_verifier_candidate() -> PathBuf {
     let output = Command::new(env!("CARGO"))
@@ -178,12 +208,8 @@ fn independent_verifier_matches_root_for_representative_outcomes() {
         ],
     );
 
-    let malformed = std::env::temp_dir().join(format!(
-        "ccp-verifier-malformed-receipt-{}.json",
-        std::process::id()
-    ));
-    std::fs::write(&malformed, b"{").expect("write malformed receipt fixture");
-    let malformed_path = malformed.to_str().expect("temporary path UTF-8");
+    let malformed = TempReceipt::new();
+    let malformed_path = malformed.path().to_str().expect("temporary path UTF-8");
     verifier_parity(
         &verifier,
         &[
@@ -199,7 +225,6 @@ fn independent_verifier_matches_root_for_representative_outcomes() {
             "--json",
         ],
     );
-    std::fs::remove_file(&malformed).expect("remove malformed receipt fixture");
 }
 
 fn verify_command(expected_commit: &str) -> Command {
