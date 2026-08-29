@@ -45,7 +45,7 @@ GitHub state, native receipts, released artifacts, and user-visible instructions
 | Current public release | `v0.1.0-rc.1` | unsigned macOS arm64 archive plus checksum |
 | Current release drift | public tag is 39 commits behind `main` at programme creation | GitHub compare API |
 | Active global producer | source `faf587890e4f899803f027660bc66452623f405e`, binary SHA-256 `7cde4c2888721d72fbb8c86b4fdcc75f992050979c5175a5bf10b0cecfa7c6f8` | live global CCP operator contract, reverified 2026-08-29 |
-| Current programme milestone | M1 product slice locally qualified at `51882b100732d528ad31c3ae1d3139787d51c0be`; external publication pending | focused local gates, structured editorial acceptance, and broad branch review on 2026-08-29 |
+| Current programme milestone | M1 product slice locally qualified through `94b424da6f3c36bc99da1ede98b87ea903eecf92`; external publication pending | full locked workspace tests, all-target/all-feature Clippy with warnings denied, docs, release metadata, structured editorial acceptance, and broad branch review on 2026-08-29 |
 
 Every drift-prone anchor must be reverified before a commit, push, CCP
 qualification, evidence publication, repository-setting mutation, release, or
@@ -166,7 +166,7 @@ implementation. This avoids inventing stale code signatures months in advance.
 | Reliability foundation | managed-cache pins and terminal resource release merged | PR #68 and PR #69 | installed global producer remains older |
 | Dry-run boundary | planning/replay distinction documented and contract-tested | PR #71, head `f3fb14a...`, receipt gate SUCCESS, merge `820a7fa...` | documentation does not add runtime behavior |
 | Marketing audit | live GitHub, README, release, community, traffic, and competitor surfaces reviewed | 2026-08-29 read-only audit | no repository or setting mutation |
-| M1 conversion surface | benefit-led README, bounded PR #71 case study, support intake, metadata proposal, and uploadable preview candidate are locally qualified | public-document tests 5/5, repository-hygiene tests 7/7, release-hardening tests 7/7, release metadata current, preview SHA-256 `3b4aa8fe0cd8f0122065990133d64f03cf86089dab383b4bd90ec11d4e49ff4a`, editorial PASS, broad review ready | not pushed, PR-opened, CCP-qualified, evidence-published, merged, or activated as live GitHub metadata/preview; issue-form rendering remains unverified |
+| M1 conversion surface | benefit-led README, bounded PR #71 case study, support intake, metadata proposal, uploadable preview candidate, and concise agent-safety copy are locally qualified through `94b424da6f3c36bc99da1ede98b87ea903eecf92` | full locked workspace tests PASS, all-target/all-feature Clippy with warnings denied PASS, docs PASS, release metadata current, preview SHA-256 `3b4aa8fe0cd8f0122065990133d64f03cf86089dab383b4bd90ec11d4e49ff4a`, editorial PASS, broad review ready | not pushed, PR-opened, CCP-qualified, evidence-published, merged, or activated as live GitHub metadata/preview; issue-form rendering remains unverified |
 
 ## Ordered milestones
 
