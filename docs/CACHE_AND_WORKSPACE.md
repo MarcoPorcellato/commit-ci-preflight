@@ -98,16 +98,16 @@ markers are reported as incomplete; they are never silently promoted.
 commit-ci-preflight cache inventory --json
 ```
 
-Inventory validates ownership again, rejects symlinks and unexpected entry
-names, walks at most 100,000 nodes, and emits a deterministically sorted report.
+Inventory validates ownership again, rejects control-plane and payload-root
+symlinks and unexpected entry names, walks at most 100,000 nodes, and emits a
+deterministically sorted report.
 The default reporting budget is 20 GiB and can be overridden with
 `--disk-budget-bytes`. Exceeding the budget is reported; it does not trigger
 automatic eviction.
 
 ## Control plane and opaque payload links
 
-The cache has a strict control plane and an opaque payload plane. Control-plane
-paths remain link-free and fail closed. Inventory counts a link's stored target
+The cache has a strict control plane and an opaque payload plane. Control-plane and payload-root links still fail closed; permitted payload-descendant links remain opaque. In other words, control-plane and payload-root links still fail closed. Inventory counts a link's stored target
 length as bytes, never target content, never follows a payload link target on
 the host, and retains the 100,000-node bound. Payload inspection covers
 relative, absolute, broken, recursive, and outside-root links. CCP never follows a payload link target on the host.

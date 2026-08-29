@@ -27,11 +27,10 @@ const PR_TEMPLATE: &str = include_str!("../.github/PULL_REQUEST_TEMPLATE.md");
 const ROADMAP: &str = include_str!("../ROADMAP.md");
 const SOCIAL_PREVIEW: &str = include_str!("../docs/assets/social-preview.svg");
 const CACHE_AND_WORKSPACE: &str = include_str!("../docs/CACHE_AND_WORKSPACE.md");
-const TESTING_AND_FAULT_INJECTION: &str =
-    include_str!("../docs/TESTING_AND_FAULT_INJECTION.md");
+const TESTING_AND_FAULT_INJECTION: &str = include_str!("../docs/TESTING_AND_FAULT_INJECTION.md");
 
 #[test]
-fn cache_payload_symlinks_are_documented_as_opaque_unattested_state() {
+fn cache_payload_documentation_contract() {
     for phrase in [
         "control plane",
         "payload plane",
@@ -39,6 +38,7 @@ fn cache_payload_symlinks_are_documented_as_opaque_unattested_state() {
         "relative, absolute, broken, recursive, and outside-root",
         "Windows link-bearing payload reuse remains unsupported",
         "one node and one non-directory object",
+        "control-plane and payload-root links still fail closed",
     ] {
         assert!(CACHE_AND_WORKSPACE.contains(phrase), "missing {phrase}");
     }
