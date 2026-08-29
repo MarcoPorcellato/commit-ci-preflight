@@ -23,7 +23,6 @@ pub use ccp_core::verification_model::{
     AcceptedPlatformV1, VerificationDecision, VerificationFindingV1, VerificationReportV1,
     VerificationStatus,
 };
-pub(crate) use ccp_core::verification_model::{finding, parse_utc_seconds, validate_commit};
 pub use ccp_core::verify::{
     POLICY_SCHEMA_VERSION, ProducerContractV1_1, TRUSTED_PLAN_POLICY_SCHEMA_VERSION,
     VERIFICATION_REPORT_SCHEMA_VERSION, VerificationPolicyDocument, VerificationPolicyV1,

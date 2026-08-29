@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 const RECEIPT: &str = "tests/fixtures/receipt-v1-pass.json";
@@ -22,6 +23,116 @@ const INVALID_TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-missing-co
 const LEGACY_MATRIX_POLICY: &str = "tests/fixtures/policy-v2-legacy-compatible.toml";
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
+
+fn verifier_parity(args: &[&str]) {
+    let root = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
+        .args(args)
+        .output()
+        .expect("root verify");
+    let verifier_path =
+        PathBuf::from(env!("CARGO_BIN_EXE_commit-ci-preflight")).with_file_name("ccp-verifier");
+    let verifier = Command::new(verifier_path)
+        .args(args)
+        .output()
+        .expect("independent verifier");
+    assert_eq!(root.status.code(), verifier.status.code());
+    assert_eq!(root.stdout, verifier.stdout);
+    if root.stderr != verifier.stderr {
+        let root_text = String::from_utf8_lossy(&root.stderr);
+        let verifier_text = String::from_utf8_lossy(&verifier.stderr);
+        assert!(root_text.contains("Usage:") && verifier_text.contains("Usage:"));
+        let root_stderr = root_text.replace("commit-ci-preflight", "VERIFIER");
+        let verifier_stderr = verifier_text.replace("ccp-verifier", "VERIFIER");
+        assert_eq!(root_stderr, verifier_stderr);
+    }
+}
+
+#[test]
+fn independent_verifier_matches_root_for_representative_outcomes() {
+    verifier_parity(&[
+        "verify",
+        "--receipt",
+        RECEIPT,
+        "--policy",
+        POLICY,
+        "--expected-commit",
+        COMMIT,
+        "--evaluated-at-utc",
+        EVALUATED_AT,
+        "--json",
+    ]);
+    verifier_parity(&[
+        "verify",
+        "--receipt",
+        RECEIPT,
+        "--policy",
+        POLICY,
+        "--expected-commit",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "--evaluated-at-utc",
+        EVALUATED_AT,
+        "--json",
+    ]);
+    verifier_parity(&[
+        "verify",
+        "--receipt",
+        "tests/fixtures/does-not-exist.json",
+        "--policy",
+        POLICY,
+        "--expected-commit",
+        COMMIT,
+        "--evaluated-at-utc",
+        EVALUATED_AT,
+        "--json",
+    ]);
+    verifier_parity(&[
+        "verify",
+        "--receipt",
+        RECEIPT,
+        "--policy",
+        POLICY,
+        "--expected-commit",
+        "HEAD",
+        "--evaluated-at-utc",
+        EVALUATED_AT,
+    ]);
+    verifier_parity(&[
+        "verify",
+        "--receipt",
+        RECEIPT_V2,
+        "--policy",
+        TRUSTED_PLAN_POLICY,
+        "--expected-commit",
+        COMMIT,
+        "--evaluated-at-utc",
+        EVALUATED_AT,
+        "--json",
+    ]);
+    verifier_parity(&[
+        "verify",
+        "--receipt",
+        "tests/fixtures/does-not-exist.json",
+        "--policy",
+        LEGACY_MATRIX_POLICY,
+        "--expected-commit",
+        COMMIT,
+        "--evaluated-at-utc",
+        EVALUATED_AT,
+        "--json",
+    ]);
+    verifier_parity(&[
+        "verify",
+        "--receipt",
+        "tests/fixtures/does-not-exist.json",
+        "--policy",
+        INVALID_TRUSTED_PLAN_POLICY,
+        "--expected-commit",
+        COMMIT,
+        "--evaluated-at-utc",
+        EVALUATED_AT,
+        "--json",
+    ]);
+}
 
 fn verify_command(expected_commit: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"));

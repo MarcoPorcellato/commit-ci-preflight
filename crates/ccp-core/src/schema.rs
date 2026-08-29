@@ -13,6 +13,9 @@ pub fn matrix_receipt_schema() -> Value {
 pub fn matrix_policy_schema() -> Value {
     serde_json::to_value(schema_for!(MatrixVerificationPolicyV2)).expect("schema serialization")
 }
+pub fn matrix_policy_schema_json() -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&schema_for!(MatrixVerificationPolicyV2))
+}
 
 /// Return the canonical combined v2 schema shared by single-runtime and
 /// matrix receipts.

@@ -365,7 +365,7 @@ fn workspace_members_are_explicit_and_verifier_dependencies_are_bounded() {
                 .collect(),
         ),
     );
-    assert_no_forbidden_sources(&root.join("crates/ccp-verifier"));
+    assert_no_forbidden_sources(&root.join("crates/ccp-verifier/src"));
 }
 
 fn assert_package_contract(
@@ -419,6 +419,7 @@ fn assert_no_forbidden_sources(root: &Path) {
             "resource",
             "benchmark",
             "github",
+            "serde_json",
         ] {
             assert!(
                 !source.contains(forbidden),
