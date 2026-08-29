@@ -72,6 +72,21 @@ impl LegacyMatrixDigestBasisV1 {
 pub fn project_legacy_basis(
     plan: &MatrixPlanV2,
 ) -> Result<LegacyMatrixDigestBasisV1, MatrixContractError> {
+    if !plan.environment.fixed.is_empty() {
+        return Err(MatrixContractError::LegacyPlanNotRepresentable(
+            "environment.fixed",
+        ));
+    }
+    if !plan.environment.runtime_internal.is_empty() {
+        return Err(MatrixContractError::LegacyPlanNotRepresentable(
+            "environment.runtime_internal",
+        ));
+    }
+    if !plan.environment.remote_secret_only.is_empty() {
+        return Err(MatrixContractError::LegacyPlanNotRepresentable(
+            "environment.remote_secret_only",
+        ));
+    }
     let mut runtimes = Vec::new();
     let mut digests = BTreeMap::new();
     let receipt = LegacyNormalizedReceipt {
@@ -87,6 +102,16 @@ pub fn project_legacy_basis(
         })
         .collect::<Vec<_>>();
     for r in &plan.runtimes {
+        if r.runtime.pull_policy.is_some() {
+            return Err(MatrixContractError::LegacyPlanNotRepresentable(
+                "runtime.pull_policy",
+            ));
+        }
+        if r.runtime.swap_mode.is_some() {
+            return Err(MatrixContractError::LegacyPlanNotRepresentable(
+                "runtime.swap_mode",
+            ));
+        }
         let runtime = LegacyNormalizedRuntime {
             kind: r.runtime.kind,
             image: r.runtime.image.clone(),
@@ -98,6 +123,16 @@ pub fn project_legacy_basis(
         let checks = r
             .checks
             .iter()
+            .map(|c| {
+                if !c.artifact_contracts.is_empty() {
+                    return Err(MatrixContractError::LegacyPlanNotRepresentable(
+                        "checks.artifact_contracts",
+                    ));
+                }
+                Ok(c)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .map(|c| LegacyNormalizedCheck {
                 id: c.id.clone(),
                 required: c.required,

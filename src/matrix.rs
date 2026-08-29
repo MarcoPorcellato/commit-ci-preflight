@@ -28,12 +28,7 @@ use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
 use crate::cache::ManagedCache;
-use crate::config::{
-    CacheConfig, CheckConfig, ConfigError, ConfigV1, EnvironmentConfig, ExecutionPlanEnvelopeV1,
-    ExecutionPlanV1, NormalizedCache, NormalizedEnvironment, NormalizedReceipt, NormalizedRuntime,
-    ReceiptConfig, RuntimeConfig, RuntimeKind, validate_identifier,
-};
-use crate::matrix_legacy::{LegacyMatrixDigestBasisV1, project_legacy_basis};
+use crate::config::{ConfigError, validate_identifier};
 use crate::process::{CancellationToken, SupervisorPort};
 use crate::receipt::{
     EvidenceStatus, ProducerEvidence, ReceiptEnvelopeV1, ReceiptError, ReceiptV1,
@@ -51,438 +46,50 @@ use crate::verify::{
     VerificationReportV1, VerificationStatus, finding, parse_utc_seconds, validate_commit,
 };
 
-pub const MATRIX_CONFIG_SCHEMA_VERSION: &str = "2.0";
-pub const MATRIX_RECEIPT_SCHEMA_VERSION: &str = "2.0";
-pub const MATRIX_POLICY_SCHEMA_VERSION: &str = "2.0";
+pub use ccp_core::matrix::{
+    MATRIX_CONFIG_SCHEMA_VERSION, MATRIX_POLICY_SCHEMA_VERSION, MATRIX_RECEIPT_SCHEMA_VERSION,
+    MatrixCheckConfigV2, MatrixConfigV2, MatrixEnvironmentConfigV2, MatrixPlanEnvelopeV2,
+    MatrixPlanProfile, MatrixPlanV2, MatrixRuntimeConfigV2, MatrixRuntimePlanV2,
+};
 const MAX_MATRIX_RUNTIMES: usize = 32;
 const MAX_MATRIX_BYTES: usize = 1_048_576;
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixConfigV2 {
-    pub schema_version: String,
-    pub project: String,
-    pub runtimes: Vec<MatrixRuntimeConfigV2>,
-    #[serde(default)]
-    pub receipt: ReceiptConfig,
-    #[serde(default)]
-    pub environment: MatrixEnvironmentConfigV2,
-    #[serde(default)]
-    pub caches: Vec<CacheConfig>,
-    pub checks: Vec<MatrixCheckConfigV2>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-#[schemars(rename = "EnvironmentConfig")]
-pub struct MatrixEnvironmentConfigV2 {
-    pub allow: Vec<String>,
-}
-
-impl MatrixEnvironmentConfigV2 {
-    fn as_v1(&self) -> EnvironmentConfig {
-        EnvironmentConfig {
-            allow: self.allow.clone(),
-            ..EnvironmentConfig::default()
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixRuntimeConfigV2 {
-    pub id: String,
-    pub kind: RuntimeKind,
-    pub image: String,
-    pub cpu_count: u16,
-    pub memory_mib: u64,
-    pub pids_limit: u32,
-    #[serde(default)]
-    pub network: bool,
-}
-
-impl MatrixRuntimeConfigV2 {
-    fn as_runtime(&self) -> RuntimeConfig {
-        RuntimeConfig {
-            kind: self.kind,
-            image: self.image.clone(),
-            cpu_count: self.cpu_count,
-            memory_mib: self.memory_mib,
-            pids_limit: self.pids_limit,
-            network: self.network,
-            pull_policy: None,
-            swap_mode: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixCheckConfigV2 {
-    pub id: String,
-    pub runtime_id: String,
-    pub required: bool,
-    pub argv: Vec<String>,
-    pub working_directory: String,
-    pub timeout_seconds: u64,
-    #[serde(default)]
-    pub depends_on: Vec<String>,
-    #[serde(default)]
-    pub artifacts: Vec<String>,
-}
-
-impl MatrixCheckConfigV2 {
-    fn as_v1(&self) -> CheckConfig {
-        CheckConfig {
-            id: self.id.clone(),
-            required: self.required,
-            argv: self.argv.clone(),
-            working_directory: self.working_directory.clone(),
-            timeout_seconds: self.timeout_seconds,
-            depends_on: self.depends_on.clone(),
-            artifacts: self.artifacts.clone(),
-            artifact_contracts: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MatrixPlanEnvelopeV2 {
-    pub plan_digest: String,
-    pub plan: MatrixPlanV2,
-    #[serde(skip)]
-    profile: MatrixPlanProfile,
-    #[serde(skip)]
-    legacy_basis: Option<LegacyMatrixDigestBasisV1>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum MatrixPlanProfile {
-    #[default]
-    CurrentV2,
-    LegacyV1,
-}
-
-impl MatrixPlanProfile {
-    pub const fn producer_version(self) -> &'static str {
-        match self {
-            Self::CurrentV2 => env!("CARGO_PKG_VERSION"),
-            Self::LegacyV1 => concat!(env!("CARGO_PKG_VERSION"), "+matrix-v2-legacy-v1"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MatrixPlanV2 {
-    pub schema_version: String,
-    pub project: String,
-    pub receipt: NormalizedReceipt,
-    pub environment: NormalizedEnvironment,
-    pub caches: Vec<NormalizedCache>,
-    pub runtimes: Vec<MatrixRuntimePlanV2>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct MatrixRuntimePlanV2 {
-    pub id: String,
-    pub configuration_digest: String,
-    pub runtime: NormalizedRuntime,
-    pub checks: Vec<crate::config::NormalizedCheck>,
-}
-
-impl MatrixConfigV2 {
-    pub fn parse(input: &str) -> Result<Self, MatrixError> {
-        if input.len() > MAX_MATRIX_BYTES {
-            return Err(MatrixError::ConfigTooLarge);
-        }
-        toml::from_str(input).map_err(MatrixError::Parse)
-    }
-
-    pub fn load(path: &Path) -> Result<Self, MatrixError> {
-        let metadata = fs::metadata(path).map_err(MatrixError::Io)?;
-        if metadata.len() > MAX_MATRIX_BYTES as u64 {
-            return Err(MatrixError::ConfigTooLarge);
-        }
-        let source = fs::read_to_string(path).map_err(MatrixError::Io)?;
-        Self::parse(&source)
-    }
-
-    pub fn into_plan(self) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
-        build_matrix_plan(self, MatrixPlanProfile::default())
-    }
-}
 
 pub fn build_matrix_plan(
     config: MatrixConfigV2,
     profile: MatrixPlanProfile,
 ) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
-    config.build_plan_with_profile(profile)
+    ccp_core::matrix::build_matrix_plan_with_profile(config, profile).map_err(MatrixError::from)
 }
 
-impl MatrixConfigV2 {
-    fn build_plan_with_profile(
-        self,
-        profile: MatrixPlanProfile,
-    ) -> Result<MatrixPlanEnvelopeV2, MatrixError> {
-        if self.schema_version != MATRIX_CONFIG_SCHEMA_VERSION {
-            return Err(MatrixError::UnsupportedSchemaVersion(self.schema_version));
+pub fn prepare_source_snapshot_overlay(
+    envelope: &MatrixPlanEnvelopeV2,
+    snapshot: &mut SourceSnapshot,
+) -> Result<(), MatrixError> {
+    envelope
+        .validate_profile_binding()
+        .map_err(MatrixError::from)?;
+    let runtime_envelopes = envelope.runtime_envelopes().map_err(MatrixError::from)?;
+    let (_, first) = runtime_envelopes
+        .first()
+        .ok_or(MatrixError::InvalidReceipt)?;
+    let mut overlay = first.clone();
+    overlay.plan.checks.clear();
+    for (_, runtime) in runtime_envelopes {
+        if runtime.plan.caches != overlay.plan.caches
+            || runtime.plan.environment != overlay.plan.environment
+            || runtime.plan.storage != overlay.plan.storage
+            || runtime.fixed_environment != overlay.fixed_environment
+        {
+            return Err(MatrixError::PlanDigestMismatch);
         }
-        if !(2..=MAX_MATRIX_RUNTIMES).contains(&self.runtimes.len()) {
-            return Err(MatrixError::InvalidField("runtimes"));
-        }
-        let mut runtime_by_id = BTreeMap::new();
-        for runtime in self.runtimes {
-            validate_identifier("runtimes.id", &runtime.id).map_err(MatrixError::Config)?;
-            if runtime_by_id.insert(runtime.id.clone(), runtime).is_some() {
-                return Err(MatrixError::DuplicateValue("runtimes.id"));
-            }
-        }
-        let mut check_runtime = BTreeMap::new();
-        let mut checks_by_runtime: BTreeMap<String, Vec<CheckConfig>> = BTreeMap::new();
-        for check in &self.checks {
-            validate_identifier("checks.runtime_id", &check.runtime_id)
-                .map_err(MatrixError::Config)?;
-            if !runtime_by_id.contains_key(&check.runtime_id) {
-                return Err(MatrixError::UnknownRuntime(check.runtime_id.clone()));
-            }
-            if check_runtime
-                .insert(check.id.clone(), check.runtime_id.clone())
-                .is_some()
-            {
-                return Err(MatrixError::DuplicateValue("checks.id"));
-            }
-            checks_by_runtime
-                .entry(check.runtime_id.clone())
-                .or_default()
-                .push(check.as_v1());
-        }
-        for check in &self.checks {
-            for dependency in &check.depends_on {
-                if let Some(runtime) = check_runtime.get(dependency)
-                    && runtime != &check.runtime_id
-                {
-                    return Err(MatrixError::CrossRuntimeDependency {
-                        check: check.id.clone(),
-                        dependency: dependency.clone(),
-                    });
-                }
-            }
-        }
-
-        let mut runtime_plans = Vec::with_capacity(runtime_by_id.len());
-        let mut shared_receipt = None;
-        let mut shared_environment = None;
-        let mut shared_caches = None;
-        for (id, runtime) in runtime_by_id {
-            let group_checks = checks_by_runtime.remove(&id).unwrap_or_default();
-            if !group_checks.iter().any(|check| check.required) {
-                return Err(MatrixError::RuntimeWithoutRequiredCheck(id));
-            }
-            let group = ConfigV1 {
-                schema_version: "1.0".to_owned(),
-                project: self.project.clone(),
-                runtime: runtime.as_runtime(),
-                receipt: self.receipt.clone(),
-                environment: self.environment.as_v1(),
-                caches: self.caches.clone(),
-                storage: None,
-                checks: group_checks,
-            }
-            .into_plan()
-            .map_err(MatrixError::Config)?;
-            if shared_environment.is_none() {
-                shared_receipt = Some(group.plan.receipt.clone());
-                shared_environment = Some(group.plan.environment.clone());
-                shared_caches = Some(group.plan.caches.clone());
-            }
-            runtime_plans.push(MatrixRuntimePlanV2 {
-                id,
-                configuration_digest: group.plan_digest,
-                runtime: group.plan.runtime,
-                checks: group.plan.checks,
-            });
-        }
-        let mut plan = MatrixPlanV2 {
-            schema_version: MATRIX_CONFIG_SCHEMA_VERSION.to_owned(),
-            project: self.project,
-            receipt: shared_receipt.expect("at least two runtimes"),
-            environment: shared_environment.expect("at least two runtimes"),
-            caches: shared_caches.expect("at least two runtimes"),
-            runtimes: runtime_plans,
-        };
-        match profile {
-            MatrixPlanProfile::CurrentV2 => {
-                let plan_digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
-                Ok(MatrixPlanEnvelopeV2 {
-                    plan_digest,
-                    plan,
-                    profile,
-                    legacy_basis: None,
-                })
-            }
-            MatrixPlanProfile::LegacyV1 => {
-                let legacy_basis = project_legacy_basis(&plan)?;
-                for runtime in &mut plan.runtimes {
-                    runtime.configuration_digest =
-                        legacy_basis.runtime_digest(&runtime.id)?.to_owned();
-                }
-                let plan_digest = legacy_basis.outer_digest()?;
-                Ok(MatrixPlanEnvelopeV2 {
-                    plan_digest,
-                    plan,
-                    profile,
-                    legacy_basis: Some(legacy_basis),
-                })
-            }
-        }
+        overlay.plan.checks.extend(runtime.plan.checks);
     }
+    snapshot
+        .prepare_mount_overlay(&overlay)
+        .map_err(RunError::SourceSnapshot)
+        .map_err(MatrixError::Run)
 }
 
-impl MatrixPlanEnvelopeV2 {
-    pub fn profile(&self) -> MatrixPlanProfile {
-        self.profile
-    }
-
-    pub fn plan_digest(&self) -> Result<&str, MatrixError> {
-        self.validate_profile_binding()?;
-        Ok(&self.plan_digest)
-    }
-
-    pub fn runtime_configuration_digest(&self, id: &str) -> Result<&str, MatrixError> {
-        self.validate_profile_binding()?;
-        match self.profile {
-            MatrixPlanProfile::LegacyV1 => self
-                .legacy_basis
-                .as_ref()
-                .ok_or(MatrixError::PlanDigestMismatch)?
-                .runtime_digest(id),
-            MatrixPlanProfile::CurrentV2 => self
-                .plan
-                .runtimes
-                .iter()
-                .find(|runtime| runtime.id == id)
-                .map(|runtime| runtime.configuration_digest.as_str())
-                .ok_or_else(|| MatrixError::UnknownRuntime(id.to_owned())),
-        }
-    }
-
-    pub fn legacy_digest_basis_value(&self) -> Result<Option<serde_json::Value>, MatrixError> {
-        self.validate_profile_binding()?;
-        match self.profile {
-            MatrixPlanProfile::CurrentV2 => Ok(None),
-            MatrixPlanProfile::LegacyV1 => self
-                .legacy_basis
-                .as_ref()
-                .ok_or(MatrixError::PlanDigestMismatch)?
-                .report_value()
-                .map(Some),
-        }
-    }
-
-    pub fn validate_profile_binding(&self) -> Result<(), MatrixError> {
-        match self.profile {
-            MatrixPlanProfile::CurrentV2 => {
-                if self.legacy_basis.is_some()
-                    || canonical_digest(&self.plan).map_err(MatrixError::Receipt)?
-                        != self.plan_digest
-                {
-                    return Err(MatrixError::PlanDigestMismatch);
-                }
-            }
-            MatrixPlanProfile::LegacyV1 => {
-                let basis = self
-                    .legacy_basis
-                    .as_ref()
-                    .ok_or(MatrixError::PlanDigestMismatch)?;
-                let projected = project_legacy_basis(&self.plan)?;
-                if &projected != basis || projected.outer_digest()? != self.plan_digest {
-                    return Err(MatrixError::PlanDigestMismatch);
-                }
-                for runtime in &self.plan.runtimes {
-                    if projected.runtime_digest(&runtime.id)? != runtime.configuration_digest {
-                        return Err(MatrixError::PlanDigestMismatch);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixError> {
-        self.validate_profile_binding()?;
-        canonical_json(self).map_err(MatrixError::Receipt)
-    }
-
-    pub fn runtime_envelopes(&self) -> Result<Vec<(String, ExecutionPlanEnvelopeV1)>, MatrixError> {
-        self.validate_profile_binding()?;
-        let mut result = Vec::with_capacity(self.plan.runtimes.len());
-        for runtime in &self.plan.runtimes {
-            let plan = ExecutionPlanV1 {
-                schema_version: "1.0".to_owned(),
-                project: self.plan.project.clone(),
-                runtime: runtime.runtime.clone(),
-                receipt: self.plan.receipt.clone(),
-                environment: self.plan.environment.clone(),
-                caches: self.plan.caches.clone(),
-                storage: None,
-                checks: runtime.checks.clone(),
-            };
-            let plan_digest = match self.profile {
-                MatrixPlanProfile::CurrentV2 => {
-                    let digest = canonical_digest(&plan).map_err(MatrixError::Receipt)?;
-                    if digest != runtime.configuration_digest {
-                        return Err(MatrixError::PlanDigestMismatch);
-                    }
-                    digest
-                }
-                MatrixPlanProfile::LegacyV1 => {
-                    self.runtime_configuration_digest(&runtime.id)?.to_owned()
-                }
-            };
-            result.push((
-                runtime.id.clone(),
-                ExecutionPlanEnvelopeV1 {
-                    plan_digest,
-                    plan,
-                    fixed_environment: BTreeMap::new(),
-                },
-            ));
-        }
-        Ok(result)
-    }
-
-    /// Prepare the one source-snapshot overlay shared by every Matrix runtime.
-    /// Cache, environment, storage, and fixed-environment fields must be
-    /// identical because the overlay is materialized once before admission.
-    pub fn prepare_source_snapshot_overlay(
-        &self,
-        snapshot: &mut SourceSnapshot,
-    ) -> Result<(), MatrixError> {
-        self.validate_profile_binding()?;
-        let runtime_envelopes = self.runtime_envelopes()?;
-        let (_, first) = runtime_envelopes
-            .first()
-            .ok_or(MatrixError::InvalidReceipt)?;
-        let mut overlay = first.clone();
-        overlay.plan.checks.clear();
-        for (_, runtime) in runtime_envelopes {
-            if runtime.plan.caches != overlay.plan.caches
-                || runtime.plan.environment != overlay.plan.environment
-                || runtime.plan.storage != overlay.plan.storage
-                || runtime.fixed_environment != overlay.fixed_environment
-            {
-                return Err(MatrixError::PlanDigestMismatch);
-            }
-            overlay.plan.checks.extend(runtime.plan.checks);
-        }
-        snapshot
-            .prepare_mount_overlay(&overlay)
-            .map_err(RunError::SourceSnapshot)
-            .map_err(MatrixError::Run)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MatrixRunOutcomeV2 {
     pub receipt: MatrixReceiptEnvelopeV2,
     pub receipt_path: PathBuf,
@@ -1550,9 +1157,7 @@ pids_limit = 16
             &identity,
         )
         .expect("source snapshot");
-        envelope
-            .prepare_source_snapshot_overlay(&mut snapshot)
-            .expect("matrix snapshot overlay");
+        prepare_source_snapshot_overlay(&envelope, &mut snapshot).expect("matrix snapshot overlay");
         let mut barrier = NoopCompletionBarrier;
 
         let outcome = execute_matrix_run_v2(
@@ -1630,9 +1235,7 @@ pids_limit = 16
             &identity,
         )
         .expect("source snapshot");
-        envelope
-            .prepare_source_snapshot_overlay(&mut snapshot)
-            .expect("matrix snapshot overlay");
+        prepare_source_snapshot_overlay(&envelope, &mut snapshot).expect("matrix snapshot overlay");
         envelope.plan.project = "owner/tampered".to_owned();
         let supervisor = CountingSupervisor::default();
         let mut barrier = NoopCompletionBarrier;
@@ -1751,6 +1354,7 @@ impl From<ccp_core::matrix::MatrixContractError> for MatrixError {
             Core::CrossRuntimeDependency { check, dependency } => {
                 Self::CrossRuntimeDependency { check, dependency }
             }
+            Core::LegacyPlanNotRepresentable(field) => Self::LegacyPlanNotRepresentable(field),
             Core::PlanDigestMismatch => Self::PlanDigestMismatch,
             Core::InvalidReceipt => Self::InvalidReceipt,
             Core::ReceiptIdMismatch => Self::ReceiptIdMismatch,

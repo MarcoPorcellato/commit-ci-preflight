@@ -47,6 +47,7 @@ pub struct MatrixConfigV2 {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
+#[schemars(rename = "EnvironmentConfig")]
 pub struct MatrixEnvironmentConfigV2 {
     pub allow: Vec<String>,
 }
@@ -306,17 +307,25 @@ impl MatrixPlanEnvelopeV2 {
         self.profile
     }
     pub fn plan_digest(&self) -> Result<&str, MatrixContractError> {
-        self.validate()?;
+        self.validate_profile_binding()?;
         Ok(&self.plan_digest)
     }
     pub fn runtime_configuration_digest(&self, id: &str) -> Result<&str, MatrixContractError> {
-        self.validate()?;
-        self.plan
-            .runtimes
-            .iter()
-            .find(|r| r.id == id)
-            .map(|r| r.configuration_digest.as_str())
-            .ok_or_else(|| MatrixContractError::UnknownRuntime(id.into()))
+        self.validate_profile_binding()?;
+        match self.profile {
+            MatrixPlanProfile::LegacyV1 => self
+                .legacy_basis
+                .as_ref()
+                .ok_or(MatrixContractError::PlanDigestMismatch)?
+                .runtime_digest(id),
+            MatrixPlanProfile::CurrentV2 => self
+                .plan
+                .runtimes
+                .iter()
+                .find(|r| r.id == id)
+                .map(|r| r.configuration_digest.as_str())
+                .ok_or_else(|| MatrixContractError::UnknownRuntime(id.into())),
+        }
     }
     pub fn validate(&self) -> Result<(), MatrixContractError> {
         if canonical_digest(&self.plan).map_err(MatrixContractError::Receipt)? != self.plan_digest {
@@ -378,10 +387,16 @@ impl MatrixPlanEnvelopeV2 {
     pub fn legacy_digest_basis_value(
         &self,
     ) -> Result<Option<serde_json::Value>, MatrixContractError> {
-        self.legacy_basis
-            .as_ref()
-            .map(|basis| basis.report_value())
-            .transpose()
+        self.validate_profile_binding()?;
+        match self.profile {
+            MatrixPlanProfile::CurrentV2 => Ok(None),
+            MatrixPlanProfile::LegacyV1 => self
+                .legacy_basis
+                .as_ref()
+                .ok_or(MatrixContractError::PlanDigestMismatch)?
+                .report_value()
+                .map(Some),
+        }
     }
 
     pub fn validate_profile_binding(&self) -> Result<(), MatrixContractError> {
@@ -427,6 +442,7 @@ pub enum MatrixContractError {
     ReceiptIdMismatch,
     Verification(crate::errors::VerificationError),
     InvalidEvaluationTime,
+    LegacyPlanNotRepresentable(&'static str),
 }
 impl fmt::Display for MatrixContractError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -458,6 +474,9 @@ impl fmt::Display for MatrixContractError {
             Self::Verification(e) => write!(f, "matrix verification failed: {e}"),
             Self::InvalidEvaluationTime => {
                 f.write_str("verification time is not representable as strict UTC")
+            }
+            Self::LegacyPlanNotRepresentable(field) => {
+                write!(f, "legacy matrix plan cannot represent field: {field}")
             }
         }
     }

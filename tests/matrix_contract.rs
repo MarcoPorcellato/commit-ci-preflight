@@ -3,6 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
+use ccp_core::matrix::MatrixContractError;
 use commit_ci_preflight::config::{
     ArtifactKind, NormalizedArtifactContract, NormalizedFixedEnvironment,
     NormalizedRuntimeInternalEnvironment, RuntimePullPolicy, RuntimeSwapMode,
@@ -304,7 +305,7 @@ fn legacy_profile_reproduces_historical_plan() {
     }
     assert!(matches!(
         envelope.runtime_configuration_digest("unknown"),
-        Err(MatrixError::UnknownRuntime(id)) if id == "unknown"
+        Err(MatrixContractError::UnknownRuntime(id)) if id == "unknown"
     ));
 }
 
@@ -499,15 +500,15 @@ fn legacy_profile_accessors_reject_mutated_public_plan() {
 
     assert!(matches!(
         envelope.plan_digest(),
-        Err(MatrixError::PlanDigestMismatch)
+        Err(MatrixContractError::PlanDigestMismatch)
     ));
     assert!(matches!(
         envelope.runtime_configuration_digest("python311"),
-        Err(MatrixError::PlanDigestMismatch)
+        Err(MatrixContractError::PlanDigestMismatch)
     ));
     assert!(matches!(
         envelope.canonical_bytes(),
-        Err(MatrixError::PlanDigestMismatch)
+        Err(MatrixContractError::PlanDigestMismatch)
     ));
 }
 
@@ -525,7 +526,7 @@ fn cli_boundary_can_validate_profile_binding_before_mutation() {
     envelope.plan.project = "example/mutated-before-run".to_owned();
     assert!(matches!(
         envelope.validate_profile_binding(),
-        Err(MatrixError::PlanDigestMismatch)
+        Err(MatrixContractError::PlanDigestMismatch)
     ));
 }
 
@@ -580,7 +581,8 @@ fn legacy_runtime_envelopes_recheck_projection() {
         assert!(
             matches!(
                 envelope.runtime_envelopes(),
-                Err(MatrixError::PlanDigestMismatch | MatrixError::LegacyPlanNotRepresentable(_))
+                Err(MatrixContractError::PlanDigestMismatch
+                    | MatrixContractError::LegacyPlanNotRepresentable(_))
             ),
             "runtime conversion must reject mutated {field}"
         );
@@ -645,7 +647,7 @@ fn legacy_profile_rejects_each_non_representable_current_field() {
         mutate(&mut envelope);
         assert!(matches!(
             envelope.plan_digest(),
-            Err(MatrixError::LegacyPlanNotRepresentable(actual)) if actual == field
+            Err(MatrixContractError::LegacyPlanNotRepresentable(actual)) if actual == field
         ));
     }
 }
