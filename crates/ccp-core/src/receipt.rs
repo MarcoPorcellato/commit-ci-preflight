@@ -14,10 +14,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use schemars::{JsonSchema, schema_for};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 use crate::config::{ArtifactKind, ExecutionPlanV1, RuntimePullPolicy, RuntimeSwapMode};
 use crate::errors::ReceiptError;
@@ -157,14 +155,7 @@ pub struct CheckEvidence {
     pub incomplete_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum EvidenceStatus {
-    Pass,
-    Fail,
-    Pending,
-    NotRun,
-}
+pub use crate::errors::EvidenceStatus;
 
 impl ReceiptEnvelopeV1 {
     pub fn seal(receipt: ReceiptV1) -> Result<Self, ReceiptError> {
@@ -520,45 +511,11 @@ impl ReceiptCommon<'_> {
     }
 }
 
-pub fn canonical_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ReceiptError> {
-    let value = serde_json::to_value(value).map_err(ReceiptError::Serialization)?;
-    let normalized = normalize_json(value);
-    serde_json::to_vec(&normalized).map_err(ReceiptError::Serialization)
-}
+pub use crate::canonical::{canonical_digest, canonical_json};
 
 pub fn receipt_schema_json() -> Result<String, ReceiptError> {
-    let schema = schema_for!(ReceiptEnvelopeV1);
+    let schema = schemars::schema_for!(ReceiptEnvelopeV1);
     serde_json::to_string_pretty(&schema).map_err(ReceiptError::Serialization)
-}
-
-pub fn canonical_digest<T: Serialize>(value: &T) -> Result<String, ReceiptError> {
-    let bytes = canonical_json(value)?;
-    let digest = Sha256::digest(bytes);
-    Ok(format!("{RECEIPT_ID_PREFIX}{}", encode_hex(&digest)))
-}
-
-fn normalize_json(value: Value) -> Value {
-    match value {
-        Value::Array(items) => Value::Array(items.into_iter().map(normalize_json).collect()),
-        Value::Object(items) => {
-            let sorted: BTreeMap<_, _> = items
-                .into_iter()
-                .map(|(key, value)| (key, normalize_json(value)))
-                .collect();
-            Value::Object(sorted.into_iter().collect())
-        }
-        scalar => scalar,
-    }
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 fn derive_overall_status(statuses: &[EvidenceStatus]) -> EvidenceStatus {

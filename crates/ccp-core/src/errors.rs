@@ -1,6 +1,16 @@
 use std::fmt;
 
-use crate::receipt::EvidenceStatus;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EvidenceStatus {
+    Pass,
+    Fail,
+    Pending,
+    NotRun,
+}
 
 #[derive(Debug)]
 pub enum ReceiptError {

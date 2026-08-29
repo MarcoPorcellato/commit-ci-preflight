@@ -45,6 +45,20 @@ fn protocol_types_are_nominally_identical_across_root_and_core_paths() {
     ) -> commit_ci_preflight::runtime::RuntimeCapabilityEvidenceV1 = core_runtime_to_root;
 }
 
+#[test]
+fn core_protocol_module_dag_has_no_back_edges_or_duplicate_evidence_status() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let canonical = fs::read_to_string(root.join("crates/ccp-core/src/canonical.rs")).unwrap();
+    let errors = fs::read_to_string(root.join("crates/ccp-core/src/errors.rs")).unwrap();
+    let config = fs::read_to_string(root.join("crates/ccp-core/src/config.rs")).unwrap();
+    let receipt = fs::read_to_string(root.join("crates/ccp-core/src/receipt.rs")).unwrap();
+    assert!(!canonical.contains("crate::receipt"));
+    assert!(!errors.contains("crate::receipt"));
+    assert!(!config.contains("crate::receipt"));
+    assert!(!receipt.contains("pub enum EvidenceStatus"));
+    assert!(errors.contains("pub enum EvidenceStatus"));
+}
+
 const MANIFEST: &str = include_str!("fixtures/m2-compatibility-envelope-v1.json");
 
 fn reject_duplicate_keys(input: &str) -> Result<(), serde_json::Error> {
