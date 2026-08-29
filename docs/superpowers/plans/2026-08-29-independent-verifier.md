@@ -566,7 +566,7 @@
 - [ ] **Step 3: Re-run dependency and hash evidence**
 
   ```console
-  rtk cargo tree --locked -p ccp-verifier --edges normal,no-dev,no-build
+  rtk cargo tree --locked -p ccp-verifier --edges normal
   rtk cargo metadata --locked --format-version 1
   rtk shasum -a 256 tests/fixtures/receipt-v1-pass.json tests/fixtures/receipt-v2-pass.json schema/receipt-v1.schema.json schema/receipt-v2.schema.json schema/policy-v1.schema.json schema/policy-v1_1.schema.json schema/verification-report-v1.schema.json
   rtk shasum -a 256 target/release/ccp-verifier
