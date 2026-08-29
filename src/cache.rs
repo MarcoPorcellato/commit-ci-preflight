@@ -22,7 +22,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::Duration;
@@ -54,6 +54,9 @@ const PROMOTION_SCHEMA_VERSION: &str = "1.0";
 const MAX_INVENTORY_NODES: usize = 100_000;
 const INIT_RETRIES: usize = 40;
 const INIT_RETRY_DELAY: Duration = Duration::from_millis(5);
+const PREPARED_PHASE_PREPARING: u8 = 0;
+const PREPARED_PHASE_STAGING: u8 = 1;
+const PREPARED_PHASE_PROMOTED: u8 = 2;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
@@ -428,6 +431,15 @@ impl ManagedCache {
         ensure_managed_directory(&staging_path)?;
         let data_path = staging_path.join("data");
         ensure_managed_directory(&data_path)?;
+        let owner = Arc::new(PreparedCacheGenerationOwner {
+            entry_path: path.clone(),
+            staging_path: staging_path.clone(),
+            key_digest: key.digest.clone(),
+            plan_digest: plan_digest.to_owned(),
+            generation,
+            phase: AtomicU8::new(PREPARED_PHASE_PREPARING),
+            _entry_lock: entry_lock,
+        });
         if complete {
             let source = path.join("data");
             remove_if_present(&data_path)?;
@@ -444,13 +456,7 @@ impl ManagedCache {
             state: "staging".to_owned(),
         };
         write_generation_manifest(&staging_path, &manifest)?;
-        let owner = Arc::new(PreparedCacheGenerationOwner {
-            staging_path: staging_path.clone(),
-            key_digest: key.digest.clone(),
-            plan_digest: plan_digest.to_owned(),
-            generation,
-            _entry_lock: entry_lock,
-        });
+        owner.phase.store(PREPARED_PHASE_STAGING, Ordering::Release);
         Ok(PreparedCacheEntry {
             path,
             data_path,
@@ -588,6 +594,10 @@ impl ManagedCache {
             fs::rename(&prepared.data_path, &current).map_err(CacheError::Io)?;
             fs::rename(&manifest_path, &previous_manifest_path).map_err(CacheError::Io)?;
             write_complete_marker(&marker)?;
+            prepared
+                ._generation_owner
+                .phase
+                .store(PREPARED_PHASE_PROMOTED, Ordering::Release);
         }
         Ok(())
     }
@@ -936,28 +946,43 @@ pub struct PreparedCacheEntry {
 
 #[derive(Debug)]
 struct PreparedCacheGenerationOwner {
+    entry_path: PathBuf,
     staging_path: PathBuf,
     key_digest: String,
     plan_digest: String,
     generation: u64,
+    phase: AtomicU8,
     _entry_lock: Arc<File>,
 }
 
 impl Drop for PreparedCacheGenerationOwner {
     fn drop(&mut self) {
-        let Ok(manifest) =
-            read_generation_manifest(&self.staging_path.join(GENERATION_MANIFEST_FILE))
-        else {
+        let phase = self.phase.load(Ordering::Acquire);
+        if phase == PREPARED_PHASE_PROMOTED {
             return;
-        };
-        if manifest.schema_version == GENERATION_SCHEMA_VERSION
-            && manifest.key_digest == self.key_digest
-            && manifest.plan_digest == self.plan_digest
-            && manifest.generation == self.generation
-            && manifest.state == "staging"
-        {
-            let _ = fs::remove_dir_all(&self.staging_path);
         }
+        if phase != PREPARED_PHASE_PREPARING && phase != PREPARED_PHASE_STAGING {
+            return;
+        }
+        if validate_owned_staging_root(&self.entry_path, &self.staging_path).is_err() {
+            return;
+        }
+        if phase == PREPARED_PHASE_STAGING {
+            let Ok(manifest) =
+                read_generation_manifest(&self.staging_path.join(GENERATION_MANIFEST_FILE))
+            else {
+                return;
+            };
+            if manifest.schema_version != GENERATION_SCHEMA_VERSION
+                || manifest.key_digest != self.key_digest
+                || manifest.plan_digest != self.plan_digest
+                || manifest.generation != self.generation
+                || manifest.state != "staging"
+            {
+                return;
+            }
+        }
+        let _ = remove_owned_generation_directory(&self.staging_path);
     }
 }
 
@@ -1229,6 +1254,29 @@ fn remove_if_present(path: &Path) -> Result<(), CacheError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(CacheError::Io(error)),
     }
+}
+
+fn remove_owned_generation_directory(path: &Path) -> Result<(), CacheError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()))
+        }
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path).map_err(CacheError::Io),
+        Ok(_) => Err(CacheError::UnexpectedEntry(path.to_path_buf())),
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+fn validate_owned_staging_root(entry_path: &Path, staging_path: &Path) -> Result<(), CacheError> {
+    if staging_path.parent() != Some(entry_path) {
+        return Err(CacheError::GenerationMismatch);
+    }
+    let name = staging_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(CacheError::GenerationMismatch)?;
+    validate_owned_name(name, ".staging-")?;
+    validate_plain_directory(staging_path)
 }
 
 fn write_complete_marker(path: &Path) -> Result<(), CacheError> {
@@ -2360,6 +2408,66 @@ timeout_seconds = 60
             b"unchanged"
         );
         drop(second);
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_payload_preflight_removes_the_new_staging_generation() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+
+        let fixture = completed_entry_fixture("failed-payload-preflight-cleanup");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
+        let socket_path = fixture.data_path.join("unsupported.socket");
+        let socket_parent = PathBuf::from("/private/tmp").join(format!(
+            "ccp-socket-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        symlink(&fixture.data_path, &socket_parent).unwrap();
+        let listener = UnixListener::bind(socket_parent.join("unsupported.socket")).unwrap();
+
+        let preparation = fixture.cache.prepare_entry(&key, &plan.plan_digest, 2);
+        let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .collect();
+        drop(listener);
+        fs::remove_file(socket_path).unwrap();
+        fs::remove_file(socket_parent).unwrap();
+        finish_fixture(fixture);
+
+        assert!(matches!(preparation, Err(CacheError::UnexpectedEntry(_))));
+        assert!(staging.is_empty(), "failed preparation leaked {staging:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_cleanup_unlinks_payload_links_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+
+        let (repo, resolved) = resolved_fixture("staging-cleanup-links");
+        let cache = ManagedCache::initialize(resolved.clone()).unwrap();
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
+        let outside = repo.join("cleanup-sentinel");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("first"), b"first").unwrap();
+        fs::write(outside.join("second"), b"second").unwrap();
+
+        let prepared = cache.prepare_entry(&key, &plan.plan_digest, 1).unwrap();
+        fs::create_dir(prepared.data_path.join("nested")).unwrap();
+        symlink(&outside, prepared.data_path.join("external")).unwrap();
+        symlink(&outside, prepared.data_path.join("nested/external")).unwrap();
+        let staging = prepared.staging_path.clone();
+        drop(prepared);
+
+        assert!(!staging.exists());
+        assert_eq!(fs::read(outside.join("first")).unwrap(), b"first");
+        assert_eq!(fs::read(outside.join("second")).unwrap(), b"second");
         clean(&resolved.path);
         clean(&repo);
     }
