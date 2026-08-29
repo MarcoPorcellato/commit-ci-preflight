@@ -109,6 +109,43 @@ fn protocol_types_are_nominally_identical_across_root_and_core_paths() {
 }
 
 #[test]
+fn matrix_config_and_plan_paths_are_nominally_identical() {
+    fn same<T>(_: Option<T>, _: Option<T>) {}
+    same(
+        None::<commit_ci_preflight::matrix::MatrixConfigV2>,
+        None::<ccp_core::matrix::MatrixConfigV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixEnvironmentConfigV2>,
+        None::<ccp_core::matrix::MatrixEnvironmentConfigV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixRuntimeConfigV2>,
+        None::<ccp_core::matrix::MatrixRuntimeConfigV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixCheckConfigV2>,
+        None::<ccp_core::matrix::MatrixCheckConfigV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixPlanEnvelopeV2>,
+        None::<ccp_core::matrix::MatrixPlanEnvelopeV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixPlanProfile>,
+        None::<ccp_core::matrix::MatrixPlanProfile>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixPlanV2>,
+        None::<ccp_core::matrix::MatrixPlanV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixRuntimePlanV2>,
+        None::<ccp_core::matrix::MatrixRuntimePlanV2>,
+    );
+}
+
+#[test]
 fn root_verify_is_a_compatibility_facade_for_moved_models_and_errors() {
     let source =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/verify.rs")).unwrap();

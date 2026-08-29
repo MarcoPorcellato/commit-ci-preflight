@@ -15,6 +15,10 @@
 - Focused command reached execution: 11 passed, 5 failed. Failures are legacy profile digest/validation parity (4 tests) plus pinned schema naming (fixed by restoring `EnvironmentConfig` schemars rename; rerun still required).
 - Exact command: `rtk cargo fmt --all && rtk env CARGO_TARGET_DIR=/private/tmp/ccp-independent-task4-slice-a cargo test --locked --test independent_verifier_contract --test matrix_contract --test receipt_contract && rtk git diff --check`
 - No commit created; required GREEN gates remain outstanding.
+
+### Packaging correction (2026-08-29)
+
+- The previously omitted eight-type Matrix identity test was verified independently: 1 passed; `git diff --check` passed. It is packaged in the follow-up commit.
 Implemented the first bounded extraction slice in `ccp-core::matrix`.
 
 ## Scope
