@@ -269,6 +269,7 @@ fn legacy_matrix_receipt_from_production_plan(
         incomplete_reason: None,
         redaction_policy_version: "1.0".to_owned(),
     })
+    .map_err(MatrixError::from)
 }
 
 fn legacy_matrix_receipt() -> MatrixReceiptEnvelopeV2 {

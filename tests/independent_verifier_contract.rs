@@ -146,6 +146,50 @@ fn matrix_config_and_plan_paths_are_nominally_identical() {
 }
 
 #[test]
+fn matrix_receipt_policy_and_required_check_paths_are_nominally_identical() {
+    fn same<T>(_: Option<T>, _: Option<T>) {}
+    same(
+        None::<commit_ci_preflight::matrix::MatrixReceiptEnvelopeV2>,
+        None::<ccp_core::matrix::MatrixReceiptEnvelopeV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixReceiptV2>,
+        None::<ccp_core::matrix::MatrixReceiptV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixRuntimeReceiptV2>,
+        None::<ccp_core::matrix::MatrixRuntimeReceiptV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixVerificationPolicyV2>,
+        None::<ccp_core::matrix::MatrixVerificationPolicyV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixRequiredCheckV2>,
+        None::<ccp_core::matrix::MatrixRequiredCheckV2>,
+    );
+    same(
+        None::<commit_ci_preflight::matrix::MatrixRuntimePolicyV2>,
+        None::<ccp_core::matrix::MatrixRuntimePolicyV2>,
+    );
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/matrix.rs")).unwrap();
+    for token in [
+        "pub struct MatrixReceiptEnvelopeV2",
+        "pub struct MatrixReceiptV2",
+        "pub struct MatrixRuntimeReceiptV2",
+        "pub struct MatrixVerificationPolicyV2",
+        "pub struct MatrixRequiredCheckV2",
+        "pub struct MatrixRuntimePolicyV2",
+    ] {
+        assert!(
+            !source.contains(token),
+            "duplicate definition remains: {token}"
+        );
+    }
+}
+
+#[test]
 fn root_verify_is_a_compatibility_facade_for_moved_models_and_errors() {
     let source =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/verify.rs")).unwrap();

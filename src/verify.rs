@@ -96,6 +96,7 @@ pub fn load_verification_policy_document(
         Some(crate::matrix::MATRIX_POLICY_SCHEMA_VERSION) => {
             crate::matrix::MatrixVerificationPolicyV2::parse(source)
                 .map(VerificationPolicyDocument::V2)
+                .map_err(crate::matrix::MatrixError::from)
                 .map_err(VerificationPolicyDocumentError::V2)
         }
         _ => Err(VerificationPolicyDocumentError::UnsupportedSchemaVersion),

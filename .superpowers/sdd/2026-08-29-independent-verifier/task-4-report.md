@@ -60,6 +60,20 @@ Final gate counts: matrix 19/19, verification 21 passed plus 1 explicit ignored,
 Implemented the bounded receipt, policy, verification, historical digest, and
 schema slice in `ccp-core`, retaining root compatibility definitions for B3.
 
+## Task 4 B2 final integration RED (2026-08-29)
+
+- Added `matrix_receipt_policy_and_required_check_paths_are_nominally_identical`
+  to `tests/independent_verifier_contract.rs`, covering the six receipt/policy
+  nominal identities and source-boundary assertions.
+- Exact command: `rtk env CARGO_TARGET_DIR=/private/tmp/ccp-independent-task4-b2 cargo test --locked --test independent_verifier_contract matrix_receipt_policy_and_required_check_paths_are_nominally_identical`
+- Result: RED as required. Compilation reported six nominal type mismatches;
+  root duplicate definitions were identified at `src/matrix.rs` lines 288,
+  295, 309, 401, 412, and 419. No production migration was completed in this
+  slice yet.
+- GitNexus attempt was inconclusive: checkout is not indexed and the CLI
+  reported multiple unrelated indexed repositories. Bounded `rg`/line-number
+  inspection was used instead.
+
 ## Scope
 
 - Added `MatrixReceiptEnvelopeV2`, `MatrixReceiptV2`, and
@@ -81,3 +95,28 @@ schema slice in `ccp-core`, retaining root compatibility definitions for B3.
 ## Commit
 
 Local commit: `refactor: add pure matrix receipt policy core`.
+## B2 cleanup and focused verification
+
+- Removed the obsolete root legacy module and updated the source-boundary assertion to the core legacy implementation.
+- Removed root-only imports and constants left unused after receipt/policy contract migration; test-only imports remain scoped to the unit-test module.
+- Preserved the root schema compatibility bytes and mapped core receipt errors through the existing root adapter.
+- Focused verification: identity 8/8, matrix contract 19/19, receipt contract 11/11, verification contract 21 passed/1 ignored, root matrix unit tests 5/5, ccp-core tests 46/46.
+- cargo fmt all check and git diff check: PASS.
+
+## B2 final integration and independent controller verification
+
+- Replaced the six duplicate root receipt/policy definitions with nominal
+  `ccp_core::matrix` re-exports. Root execution and `MatrixError` remain
+  root-owned.
+- Retained the public root schema and verification free functions as thin
+  compatibility wrappers; core `MatrixContractError` is converted through the
+  exhaustive root adapter. The policy-document dispatcher performs the same
+  explicit conversion while preserving its public error variant.
+- Removed the duplicated root policy evaluator and the dead root legacy module;
+  the independent-verifier test proves all six cross-crate identities and the
+  absence of root look-alike definitions.
+- Fresh controller command:
+  `rtk cargo test --locked --test independent_verifier_contract --test matrix_contract --test receipt_contract --test verification_contract && rtk cargo test --locked --lib matrix && rtk cargo test --locked -p ccp-core && rtk cargo fmt --all -- --check && rtk git diff --check`.
+- Result: 59 passed plus 1 explicitly ignored across the four integration
+  suites; 5/5 root Matrix unit tests; 46/46 core tests; formatting and diff
+  checks PASS.

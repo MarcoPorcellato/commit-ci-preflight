@@ -546,7 +546,7 @@ fn legacy_receipt_provenance_is_uniform() {
     mixed.runtime_receipts[1].receipt = ReceiptEnvelopeV1::seal(inner).expect("reseal mixed inner");
     assert!(matches!(
         MatrixReceiptEnvelopeV2::seal(mixed),
-        Err(MatrixError::InvalidReceipt)
+        Err(MatrixContractError::InvalidReceipt)
     ));
 }
 
@@ -761,7 +761,7 @@ fn production_sources_do_not_embed_adopter_expected_digests() {
         "eff5b7d55bb0220890dbfb050bb68a1e0fbba8f9a30a69e2f66085354fcc8562",
         "7afb3e6dd435d9d5a317e4d9d85e80527431044312bbe299e9a70b6ba9e994c8",
     ];
-    for path in ["src/matrix.rs", "src/matrix_legacy.rs"] {
+    for path in ["src/matrix.rs", "crates/ccp-core/src/matrix_legacy.rs"] {
         let source = std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path))
             .expect("production source");
         for digest in prohibited {

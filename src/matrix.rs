@@ -19,20 +19,16 @@
 //! runtime that executed it, while v1 inputs and historical evidence retain
 //! their exact parser and verifier behaviour.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use schemars::{JsonSchema, schema_for};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::cache::ManagedCache;
-use crate::config::{ConfigError, validate_identifier};
+use crate::config::ConfigError;
 use crate::process::{CancellationToken, SupervisorPort};
 use crate::receipt::{
-    EvidenceStatus, ProducerEvidence, ReceiptEnvelopeV1, ReceiptError, ReceiptV1,
-    RepositoryEvidence, RunEvidence, canonical_digest, canonical_json,
+    EvidenceStatus, ProducerEvidence, ReceiptError, RunEvidence, canonical_digest,
 };
 use crate::run::{
     Clock, CompletionBarrier, NoopCompletionBarrier, NoopRunLifecycleObserver, RunError,
@@ -41,18 +37,15 @@ use crate::run::{
 };
 use crate::runtime::runtime_for;
 use crate::source_snapshot::SourceSnapshot;
-use crate::verify::{
-    AcceptedPlatformV1, VerificationDecision, VerificationFindingV1, VerificationPolicyV1,
-    VerificationReportV1, VerificationStatus, finding, parse_utc_seconds, validate_commit,
-};
+use crate::verify::VerificationReportV1;
 
 pub use ccp_core::matrix::{
     MATRIX_CONFIG_SCHEMA_VERSION, MATRIX_POLICY_SCHEMA_VERSION, MATRIX_RECEIPT_SCHEMA_VERSION,
     MatrixCheckConfigV2, MatrixConfigV2, MatrixEnvironmentConfigV2, MatrixPlanEnvelopeV2,
-    MatrixPlanProfile, MatrixPlanV2, MatrixRuntimeConfigV2, MatrixRuntimePlanV2,
+    MatrixPlanProfile, MatrixPlanV2, MatrixReceiptEnvelopeV2, MatrixReceiptV2,
+    MatrixRequiredCheckV2, MatrixRuntimeConfigV2, MatrixRuntimePlanV2, MatrixRuntimePolicyV2,
+    MatrixRuntimeReceiptV2, MatrixVerificationPolicyV2,
 };
-const MAX_MATRIX_RUNTIMES: usize = 32;
-const MAX_MATRIX_BYTES: usize = 1_048_576;
 
 pub fn build_matrix_plan(
     config: MatrixConfigV2,
@@ -218,7 +211,7 @@ pub fn seal_matrix_run_material(
     material: MatrixRunMaterialV2,
 ) -> Result<MatrixReceiptEnvelopeV2, MatrixError> {
     validate_matrix_receipts_for_seal(envelope, &material.receipt.runtime_receipts)?;
-    MatrixReceiptEnvelopeV2::seal(material.receipt)
+    MatrixReceiptEnvelopeV2::seal(material.receipt).map_err(MatrixError::from)
 }
 
 /// Atomically publish a previously sealed Matrix receipt. Callers must invoke
@@ -283,216 +276,16 @@ struct MatrixRunIdInput<'a> {
     started_at_utc: &'a str,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixReceiptEnvelopeV2 {
-    pub receipt_id: String,
-    pub receipt: MatrixReceiptV2,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixReceiptV2 {
-    pub schema_version: String,
-    pub producer: ProducerEvidence,
-    pub repository: RepositoryEvidence,
-    pub run: RunEvidence,
-    pub configuration_digest: String,
-    pub runtime_receipts: Vec<MatrixRuntimeReceiptV2>,
-    pub overall_status: EvidenceStatus,
-    pub incomplete_reason: Option<String>,
-    pub redaction_policy_version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixRuntimeReceiptV2 {
-    pub runtime_id: String,
-    pub receipt: ReceiptEnvelopeV1,
-}
-
-impl MatrixReceiptEnvelopeV2 {
-    pub fn seal(receipt: MatrixReceiptV2) -> Result<Self, MatrixError> {
-        receipt.validate()?;
-        let receipt_id = canonical_digest(&receipt).map_err(MatrixError::Receipt)?;
-        Ok(Self {
-            receipt_id,
-            receipt,
-        })
-    }
-
-    pub fn verify(&self) -> Result<(), MatrixError> {
-        self.receipt.validate()?;
-        let expected = canonical_digest(&self.receipt).map_err(MatrixError::Receipt)?;
-        if expected != self.receipt_id {
-            return Err(MatrixError::ReceiptIdMismatch);
-        }
-        Ok(())
-    }
-
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixError> {
-        self.verify()?;
-        canonical_json(self).map_err(MatrixError::Receipt)
-    }
-}
-
-impl MatrixReceiptV2 {
-    pub fn validate(&self) -> Result<(), MatrixError> {
-        if self.schema_version != MATRIX_RECEIPT_SCHEMA_VERSION {
-            return Err(MatrixError::UnsupportedSchemaVersion(
-                self.schema_version.clone(),
-            ));
-        }
-        if self.repository.dirty || self.runtime_receipts.len() < 2 {
-            return Err(MatrixError::InvalidReceipt);
-        }
-        let mut runtime_ids = BTreeSet::new();
-        let mut check_ids = BTreeSet::new();
-        let mut all_checks = Vec::new();
-        for group in &self.runtime_receipts {
-            validate_identifier("runtime_receipts.runtime_id", &group.runtime_id)
-                .map_err(MatrixError::Config)?;
-            if !runtime_ids.insert(group.runtime_id.as_str()) {
-                return Err(MatrixError::DuplicateValue("runtime_receipts.runtime_id"));
-            }
-            group.receipt.verify().map_err(MatrixError::Receipt)?;
-            let receipt = &group.receipt.receipt;
-            if receipt.repository != self.repository || receipt.producer != self.producer {
-                return Err(MatrixError::InvalidReceipt);
-            }
-            for check in &receipt.checks {
-                if !check_ids.insert(check.id.as_str()) {
-                    return Err(MatrixError::DuplicateValue("runtime_receipts.checks.id"));
-                }
-                all_checks.push(check.clone());
-            }
-        }
-        if all_checks.is_empty() {
-            return Err(MatrixError::InvalidReceipt);
-        }
-        let platform = self.runtime_receipts[0].receipt.receipt.platform.clone();
-        ReceiptV1 {
-            schema_version: crate::receipt::RECEIPT_SCHEMA_VERSION.to_owned(),
-            producer: self.producer.clone(),
-            repository: self.repository.clone(),
-            run: self.run.clone(),
-            platform,
-            configuration_digest: self.configuration_digest.clone(),
-            checks: all_checks,
-            overall_status: self.overall_status,
-            incomplete_reason: self.incomplete_reason.clone(),
-            redaction_policy_version: self.redaction_policy_version.clone(),
-        }
-        .validate()
-        .map_err(MatrixError::Receipt)
-    }
-}
-
 pub fn matrix_config_schema_json() -> Result<String, MatrixError> {
-    serde_json::to_string_pretty(&schema_for!(MatrixConfigV2)).map_err(MatrixError::Json)
+    Ok(include_str!("../schema/config-v2.schema.json").to_owned())
 }
 
 pub fn matrix_receipt_schema_json() -> Result<String, MatrixError> {
-    ccp_core::schema::combined_receipt_v2_schema_json().map_err(MatrixError::Json)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixVerificationPolicyV2 {
-    pub schema_version: String,
-    pub project: String,
-    pub configuration_digest: String,
-    pub required_checks: Vec<MatrixRequiredCheckV2>,
-    pub max_age_seconds: u64,
-    pub runtimes: Vec<MatrixRuntimePolicyV2>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixRequiredCheckV2 {
-    pub id: String,
-    pub runtime_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct MatrixRuntimePolicyV2 {
-    pub id: String,
-    pub configuration_digest: String,
-    pub image_reference: String,
-    pub platforms: Vec<AcceptedPlatformV1>,
-}
-
-impl MatrixVerificationPolicyV2 {
-    pub fn load(path: &Path) -> Result<Self, MatrixError> {
-        let source = fs::read_to_string(path).map_err(MatrixError::Io)?;
-        Self::parse(&source)
-    }
-
-    pub fn parse(source: &str) -> Result<Self, MatrixError> {
-        if source.len() > MAX_MATRIX_BYTES {
-            return Err(MatrixError::ConfigTooLarge);
-        }
-        let policy: Self = toml::from_str(source).map_err(MatrixError::Parse)?;
-        policy.validate()?;
-        Ok(policy)
-    }
-
-    pub fn validate(&self) -> Result<(), MatrixError> {
-        if self.schema_version != MATRIX_POLICY_SCHEMA_VERSION {
-            return Err(MatrixError::UnsupportedSchemaVersion(
-                self.schema_version.clone(),
-            ));
-        }
-        if !(2..=MAX_MATRIX_RUNTIMES).contains(&self.runtimes.len())
-            || self.required_checks.is_empty()
-        {
-            return Err(MatrixError::InvalidField("runtimes_or_required_checks"));
-        }
-        let mut runtime_ids = BTreeSet::new();
-        for runtime in &self.runtimes {
-            validate_identifier("runtimes.id", &runtime.id).map_err(MatrixError::Config)?;
-            if !runtime_ids.insert(runtime.id.as_str()) {
-                return Err(MatrixError::DuplicateValue("runtimes.id"));
-            }
-            VerificationPolicyV1 {
-                schema_version: "1.0".to_owned(),
-                project: self.project.clone(),
-                configuration_digest: runtime.configuration_digest.clone(),
-                required_checks: vec![runtime.id.clone()],
-                image_reference: runtime.image_reference.clone(),
-                max_age_seconds: self.max_age_seconds,
-                platforms: runtime.platforms.clone(),
-            }
-            .validate()
-            .map_err(|error| MatrixError::Policy(error.to_string()))?;
-        }
-        let mut check_ids = BTreeSet::new();
-        let mut coverage = BTreeSet::new();
-        for check in &self.required_checks {
-            validate_identifier("required_checks.id", &check.id).map_err(MatrixError::Config)?;
-            validate_identifier("required_checks.runtime_id", &check.runtime_id)
-                .map_err(MatrixError::Config)?;
-            if !runtime_ids.contains(check.runtime_id.as_str()) {
-                return Err(MatrixError::UnknownRuntime(check.runtime_id.clone()));
-            }
-            if !check_ids.insert(check.id.as_str()) {
-                return Err(MatrixError::DuplicateValue("required_checks.id"));
-            }
-            coverage.insert(check.runtime_id.as_str());
-        }
-        if coverage.len() != runtime_ids.len() {
-            return Err(MatrixError::InvalidField(
-                "required_checks.runtime_coverage",
-            ));
-        }
-        Ok(())
-    }
+    Ok(include_str!("../schema/receipt-v2.schema.json").to_owned())
 }
 
 pub fn matrix_policy_schema_json() -> Result<String, MatrixError> {
-    serde_json::to_string_pretty(&schema_for!(MatrixVerificationPolicyV2))
-        .map_err(MatrixError::Json)
+    Ok(include_str!("../schema/policy-v2.schema.json").to_owned())
 }
 
 pub fn verify_matrix_receipt_document(
@@ -501,238 +294,20 @@ pub fn verify_matrix_receipt_document(
     expected_commit: &str,
     evaluated_at_utc: &str,
 ) -> Result<VerificationReportV1, MatrixError> {
-    policy.validate()?;
-    validate_commit(expected_commit).map_err(MatrixError::Verification)?;
-    let evaluated_at =
-        parse_utc_seconds(evaluated_at_utc).ok_or(MatrixError::InvalidEvaluationTime)?;
-    let mut report = VerificationReportV1 {
-        schema_version: crate::verify::VERIFICATION_REPORT_SCHEMA_VERSION.to_owned(),
-        assurance_scope: "integrity_and_repository_policy_only".to_owned(),
-        evaluated_at_utc: evaluated_at_utc.to_owned(),
-        expected_commit: expected_commit.to_owned(),
-        receipt_id: None,
-        integrity_status: VerificationStatus::Fail,
-        policy_status: VerificationStatus::NotRun,
-        decision: VerificationDecision::Fail,
-        findings: Vec::new(),
-    };
-    let envelope: MatrixReceiptEnvelopeV2 = match serde_json::from_slice(bytes) {
-        Ok(value) => value,
-        Err(_) => {
-            report.findings.push(finding(
-                "receipt.parse_or_shape",
-                "receipt",
-                "receipt is not valid strict schema v2 JSON",
-            ));
-            return Ok(report);
-        }
-    };
-    if envelope.verify().is_err() {
-        report.findings.push(finding(
-            "receipt.semantic_or_digest_invalid",
-            "receipt",
-            "receipt violates v2 integrity invariants",
-        ));
-        return Ok(report);
-    }
-    report.receipt_id = Some(envelope.receipt_id.clone());
-    report.integrity_status = VerificationStatus::Pass;
-    report.policy_status = VerificationStatus::Pass;
-    evaluate_matrix_policy(
-        &envelope,
+    ccp_core::matrix::verify_matrix_receipt_document(
+        bytes,
         policy,
         expected_commit,
-        evaluated_at,
-        &mut report.findings,
-    );
-    if !report.findings.is_empty() {
-        report.policy_status = VerificationStatus::Fail;
-    }
-    if report.policy_status == VerificationStatus::Pass {
-        report.decision = VerificationDecision::Pass;
-    }
-    Ok(report)
-}
-
-fn evaluate_matrix_policy(
-    envelope: &MatrixReceiptEnvelopeV2,
-    policy: &MatrixVerificationPolicyV2,
-    expected_commit: &str,
-    evaluated_at: i64,
-    findings: &mut Vec<VerificationFindingV1>,
-) {
-    let receipt = &envelope.receipt;
-    equal(
-        &receipt.repository.repository,
-        &policy.project,
-        "policy.repository",
-        "repository.repository",
-        "receipt project does not match repository policy",
-        findings,
-    );
-    equal(
-        &receipt.repository.commit_sha,
-        expected_commit,
-        "policy.commit",
-        "repository.commit_sha",
-        "receipt commit does not match the externally supplied commit",
-        findings,
-    );
-    if receipt.repository.dirty {
-        findings.push(finding(
-            "policy.dirty",
-            "repository.dirty",
-            "repository policy requires a clean checkout",
-        ));
-    }
-    equal(
-        &receipt.configuration_digest,
-        &policy.configuration_digest,
-        "policy.configuration",
-        "configuration_digest",
-        "receipt configuration digest does not match repository policy",
-        findings,
-    );
-    if receipt.overall_status != EvidenceStatus::Pass {
-        findings.push(finding(
-            "policy.overall_status",
-            "overall_status",
-            "repository policy requires an overall PASS receipt",
-        ));
-    }
-    let policy_runtimes: BTreeMap<_, _> = policy
-        .runtimes
-        .iter()
-        .map(|runtime| (runtime.id.as_str(), runtime))
-        .collect();
-    let receipt_runtimes: BTreeMap<_, _> = receipt
-        .runtime_receipts
-        .iter()
-        .map(|runtime| (runtime.runtime_id.as_str(), runtime))
-        .collect();
-    if policy_runtimes.len() != receipt_runtimes.len()
-        || policy_runtimes
-            .keys()
-            .any(|id| !receipt_runtimes.contains_key(id))
-    {
-        findings.push(finding(
-            "policy.runtime_set",
-            "runtime_receipts",
-            "receipt runtime set does not exactly match repository policy",
-        ));
-    }
-    for (runtime_id, expected) in policy_runtimes {
-        let Some(actual) = receipt_runtimes.get(runtime_id) else {
-            continue;
-        };
-        let platform = &actual.receipt.receipt.platform;
-        equal(
-            &actual.receipt.receipt.configuration_digest,
-            &expected.configuration_digest,
-            "policy.runtime_configuration",
-            "runtime_receipts.configuration_digest",
-            "receipt runtime configuration does not match repository policy",
-            findings,
-        );
-        equal(
-            &platform.image_reference,
-            &expected.image_reference,
-            "policy.runtime_image",
-            "runtime_receipts.platform.image_reference",
-            "receipt runtime image does not match repository policy",
-            findings,
-        );
-        if !expected.platforms.iter().any(|accepted| {
-            accepted.host_os == platform.host_os
-                && accepted.host_arch == platform.host_arch
-                && accepted.runtime_kind == platform.runtime_kind
-        }) {
-            findings.push(finding(
-                "policy.runtime_platform",
-                "runtime_receipts.platform",
-                "receipt runtime platform tuple is not accepted by repository policy",
-            ));
-        }
-    }
-    let expected_checks: BTreeMap<_, _> = policy
-        .required_checks
-        .iter()
-        .map(|check| (check.id.as_str(), check.runtime_id.as_str()))
-        .collect();
-    let mut actual_checks = BTreeMap::new();
-    for runtime in &receipt.runtime_receipts {
-        for check in &runtime.receipt.receipt.checks {
-            if check.required {
-                actual_checks.insert(check.id.as_str(), (runtime.runtime_id.as_str(), check));
-            }
-        }
-    }
-    if actual_checks.len() != expected_checks.len()
-        || expected_checks
-            .keys()
-            .any(|id| !actual_checks.contains_key(id))
-    {
-        findings.push(finding(
-            "policy.required_check_set",
-            "checks",
-            "required check set does not exactly match repository policy",
-        ));
-    }
-    for (id, runtime_id) in expected_checks {
-        match actual_checks.get(id) {
-            Some((actual_runtime, check))
-                if *actual_runtime == runtime_id && check.status == EvidenceStatus::Pass => {}
-            Some((actual_runtime, _)) if *actual_runtime != runtime_id => findings.push(finding(
-                "policy.check_runtime",
-                "checks.runtime_id",
-                "required check ran in a different runtime than repository policy",
-            )),
-            Some(_) => findings.push(finding(
-                "policy.required_check_result",
-                "checks.status",
-                "one or more policy-required checks did not PASS",
-            )),
-            None => {}
-        }
-    }
-    match parse_utc_seconds(&receipt.run.finished_at_utc) {
-        Some(finished) if finished > evaluated_at => findings.push(finding(
-            "policy.future_receipt",
-            "run.finished_at_utc",
-            "receipt completion time is later than verification time",
-        )),
-        Some(finished) if evaluated_at - finished > policy.max_age_seconds as i64 => {
-            findings.push(finding(
-                "policy.stale_receipt",
-                "run.finished_at_utc",
-                "receipt exceeds repository freshness policy",
-            ))
-        }
-        Some(_) => {}
-        None => findings.push(finding(
-            "policy.invalid_time",
-            "run.finished_at_utc",
-            "receipt completion time cannot be evaluated",
-        )),
-    }
-}
-
-fn equal(
-    actual: &str,
-    expected: &str,
-    code: &str,
-    field: &str,
-    message: &str,
-    findings: &mut Vec<VerificationFindingV1>,
-) {
-    if actual != expected {
-        findings.push(finding(code, field, message));
-    }
+        evaluated_at_utc,
+    )
+    .map_err(MatrixError::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::fs;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -741,7 +316,9 @@ mod tests {
         CapturedStream, CleanupStatus, ExitOutcome, GenerationGuard, ProcessError, ProcessRequest,
         ProcessResult, ProcessTermination, RunIdentity,
     };
-    use crate::receipt::{CheckEvidence, PlatformEvidence};
+    use crate::receipt::{
+        CheckEvidence, PlatformEvidence, ReceiptEnvelopeV1, ReceiptV1, RepositoryEvidence,
+    };
     use crate::run::SystemClock;
     use crate::source_snapshot::SourceSnapshot;
 
