@@ -3,8 +3,8 @@ use commit_ci_preflight::{
     matrix::{MatrixError, MatrixPlanV2},
     receipt::{ReceiptEnvelopeV1, ReceiptError},
     verify::{
-        PolicyError, VerificationError, VerificationPolicyDocument, VerificationPolicyV1,
-        VerificationPolicyV1_1, VerificationReportV1,
+        PolicyError, TrustedPlanError, VerificationError, VerificationPolicyDocument,
+        VerificationPolicyV1, VerificationPolicyV1_1, VerificationReportV1,
     },
 };
 use std::error::Error;
@@ -123,12 +123,12 @@ fn matrix_witness(e: MatrixError) {
         | MatrixError::InvalidEvaluationTime => {}
     }
 }
-fn trusted_witness(e: commit_ci_preflight::verify::TrustedPlanError) {
+fn trusted_witness(e: TrustedPlanError) {
     match e {
-        commit_ci_preflight::verify::TrustedPlanError::PolicyPath
-        | commit_ci_preflight::verify::TrustedPlanError::Io(_)
-        | commit_ci_preflight::verify::TrustedPlanError::UnsafeConfigurationPath
-        | commit_ci_preflight::verify::TrustedPlanError::Config(_) => {}
+        TrustedPlanError::PolicyPath
+        | TrustedPlanError::Io(_)
+        | TrustedPlanError::UnsafeConfigurationPath
+        | TrustedPlanError::Config(_) => {}
     }
 }
 
@@ -137,7 +137,7 @@ fn assert_type_contracts() {
     assert_send_sync::<ReceiptError>();
     assert_send_sync::<ConfigError>();
     assert_send_sync::<PolicyError>();
-    assert_send_sync::<commit_ci_preflight::verify::TrustedPlanError>();
+    assert_send_sync::<TrustedPlanError>();
     assert_send_sync::<VerificationError>();
     assert_send_sync::<MatrixError>();
 }
@@ -442,10 +442,35 @@ fn assert_all_error_families_are_constructible_and_stable() {
     for (error, expected, source) in policy_cases {
         assert_error(error, expected, source);
     }
+    let trusted_plan_cases = [
+        (
+            TrustedPlanError::PolicyPath,
+            "trusted policy path has no parent directory",
+            false,
+        ),
+        (
+            TrustedPlanError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "missing")),
+            "cannot read trusted configuration",
+            true,
+        ),
+        (
+            TrustedPlanError::UnsafeConfigurationPath,
+            "trusted configuration path is not a regular local file",
+            false,
+        ),
+        (
+            TrustedPlanError::Config(ConfigError::NoChecks),
+            "trusted configuration is invalid: configuration contains no checks",
+            true,
+        ),
+    ];
+    for (error, expected, source) in trusted_plan_cases {
+        assert_error(error, expected, source);
+    }
     let verification_cases = [
         VerificationError::Policy(PolicyError::TooLarge),
         VerificationError::PolicyDocument("x".into()),
-        VerificationError::TrustedPlan(commit_ci_preflight::verify::TrustedPlanError::PolicyPath),
+        VerificationError::TrustedPlan(TrustedPlanError::PolicyPath),
         VerificationError::TrustedPolicyPathRequired,
         VerificationError::InvalidExpectedCommit,
         VerificationError::InvalidEvaluationTime,
@@ -475,62 +500,85 @@ fn assert_all_error_families_are_constructible_and_stable() {
         );
     }
     // MatrixError has no source() implementation; every variant is publicly constructible.
-    let matrix_cases = vec![
-        MatrixError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")),
-        MatrixError::Parse(toml::from_str::<toml::Value>("[").unwrap_err()),
-        MatrixError::Json(serde_json::from_str::<serde_json::Value>("[").unwrap_err()),
-        MatrixError::Config(ConfigError::NoChecks),
-        MatrixError::Receipt(ReceiptError::NoChecks),
-        MatrixError::Policy("x".into()),
-        MatrixError::Verification(VerificationError::InvalidExpectedCommit),
-        MatrixError::Runtime(commit_ci_preflight::runtime::RuntimeError::Unavailable),
-        MatrixError::Run(commit_ci_preflight::run::RunError::InvalidCommit),
-        MatrixError::UnsupportedSchemaVersion("x".into()),
-        MatrixError::ConfigTooLarge,
-        MatrixError::InvalidField("x"),
-        MatrixError::DuplicateValue("x"),
-        MatrixError::UnknownRuntime("x".into()),
-        MatrixError::RuntimeWithoutRequiredCheck("x".into()),
-        MatrixError::CrossRuntimeDependency {
-            check: "a".into(),
-            dependency: "b".into(),
-        },
-        MatrixError::LegacyPlanNotRepresentable("x"),
-        MatrixError::PlanDigestMismatch,
-        MatrixError::ReceiptIdMismatch,
-        MatrixError::InvalidReceipt,
-        MatrixError::InvalidEvaluationTime,
+    let matrix_toml = toml::from_str::<toml::Value>("[").unwrap_err();
+    let matrix_toml_display = format!("matrix configuration parse failed: {matrix_toml}");
+    let matrix_json = serde_json::from_str::<serde_json::Value>("[").unwrap_err();
+    let matrix_json_display = format!("matrix JSON serialization failed: {matrix_json}");
+    let matrix_cases =
+        vec![
+        (
+            MatrixError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")),
+            "matrix I/O failed: x".to_owned(),
+        ),
+        (MatrixError::Parse(matrix_toml), matrix_toml_display),
+        (MatrixError::Json(matrix_json), matrix_json_display),
+        (
+            MatrixError::Config(ConfigError::NoChecks),
+            "matrix configuration invalid: configuration contains no checks".to_owned(),
+        ),
+        (
+            MatrixError::Receipt(ReceiptError::NoChecks),
+            "matrix receipt invalid: receipt contains no checks".to_owned(),
+        ),
+        (MatrixError::Policy("x".into()), "matrix policy invalid: x".to_owned()),
+        (
+            MatrixError::Verification(VerificationError::InvalidExpectedCommit),
+            "matrix verification invalid: expected commit must be lowercase Git SHA-1 or SHA-256"
+                .to_owned(),
+        ),
+        (
+            MatrixError::Runtime(commit_ci_preflight::runtime::RuntimeError::Unavailable),
+            "matrix runtime invalid: Docker-compatible runtime is unavailable".to_owned(),
+        ),
+        (
+            MatrixError::Run(commit_ci_preflight::run::RunError::InvalidCommit),
+            "matrix run failed: Git returned an invalid commit identifier".to_owned(),
+        ),
+        (
+            MatrixError::UnsupportedSchemaVersion("x".into()),
+            "unsupported matrix schema version: x".to_owned(),
+        ),
+        (
+            MatrixError::ConfigTooLarge,
+            "matrix configuration exceeds the bounded input size".to_owned(),
+        ),
+        (MatrixError::InvalidField("x"), "invalid matrix field: x".to_owned()),
+        (MatrixError::DuplicateValue("x"), "duplicate matrix value: x".to_owned()),
+        (
+            MatrixError::UnknownRuntime("x".into()),
+            "matrix check references unknown runtime: x".to_owned(),
+        ),
+        (
+            MatrixError::RuntimeWithoutRequiredCheck("x".into()),
+            "matrix runtime has no required check: x".to_owned(),
+        ),
+        (
+            MatrixError::CrossRuntimeDependency {
+                check: "a".into(),
+                dependency: "b".into(),
+            },
+            "matrix cross-runtime dependency is unsupported: a -> b".to_owned(),
+        ),
+        (
+            MatrixError::LegacyPlanNotRepresentable("x"),
+            "matrix legacy plan cannot represent: x".to_owned(),
+        ),
+        (MatrixError::PlanDigestMismatch, "matrix plan digest mismatch".to_owned()),
+        (
+            MatrixError::ReceiptIdMismatch,
+            "matrix receipt identifier mismatch".to_owned(),
+        ),
+        (
+            MatrixError::InvalidReceipt,
+            "matrix receipt violates semantic invariants".to_owned(),
+        ),
+        (
+            MatrixError::InvalidEvaluationTime,
+            "matrix evaluation time is invalid".to_owned(),
+        ),
     ];
-    let expected = [
-        "matrix I/O failed: x",
-        "matrix configuration parse failed: TOML parse error",
-        "matrix JSON serialization failed: EOF while parsing a list at line 1 column 1",
-        "matrix configuration invalid: configuration contains no checks",
-        "matrix receipt invalid: receipt contains no checks",
-        "matrix policy invalid: x",
-        "matrix verification invalid: expected commit must be lowercase Git SHA-1 or SHA-256",
-        "matrix runtime invalid: Docker-compatible runtime is unavailable",
-        "matrix run failed: Git returned an invalid commit identifier",
-        "unsupported matrix schema version: x",
-        "matrix configuration exceeds the bounded input size",
-        "invalid matrix field: x",
-        "duplicate matrix value: x",
-        "matrix check references unknown runtime: x",
-        "matrix runtime has no required check: x",
-        "matrix cross-runtime dependency is unsupported: a -> b",
-        "matrix legacy plan cannot represent: x",
-        "matrix plan digest mismatch",
-        "matrix receipt identifier mismatch",
-        "matrix receipt violates semantic invariants",
-        "matrix evaluation time is invalid",
-    ];
-    for (error, prefix) in matrix_cases.into_iter().zip(expected) {
-        assert!(error.source().is_none());
-        assert!(
-            error.to_string().starts_with(prefix),
-            "{} != {prefix}",
-            error
-        );
+    for (error, expected) in matrix_cases {
+        assert_error(error, &expected, false);
     }
     let _ = PathBuf::new();
 }
@@ -549,6 +597,7 @@ fn root_public_api_and_error_contract_is_compile_checked() {
         ReceiptError,
         ConfigError,
         PolicyError,
+        TrustedPlanError,
         VerificationError,
         MatrixError,
     )> = None;
@@ -556,7 +605,7 @@ fn root_public_api_and_error_contract_is_compile_checked() {
     receipt_witness(ReceiptError::NoChecks);
     config_witness(ConfigError::NoChecks);
     policy_witness(PolicyError::TooLarge);
-    trusted_witness(commit_ci_preflight::verify::TrustedPlanError::PolicyPath);
+    trusted_witness(TrustedPlanError::PolicyPath);
     verification_witness(VerificationError::InvalidExpectedCommit);
     matrix_witness(MatrixError::PlanDigestMismatch);
     assert_all_error_families_are_constructible_and_stable();
@@ -595,7 +644,7 @@ fn root_public_api_and_error_contract_is_compile_checked() {
         true,
     );
     assert_error(
-        VerificationError::TrustedPlan(commit_ci_preflight::verify::TrustedPlanError::PolicyPath),
+        VerificationError::TrustedPlan(TrustedPlanError::PolicyPath),
         "trusted policy path has no parent directory",
         true,
     );
