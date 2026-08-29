@@ -16,7 +16,6 @@ pub mod admission;
 pub mod agent_session;
 pub mod benchmark;
 pub mod cache;
-#[allow(dead_code)] // Tasks 2-3 consume the private traversal surface.
 mod cache_payload;
 pub mod config;
 pub mod durable_fs;

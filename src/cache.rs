@@ -31,6 +31,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::cache_payload::{copy_payload_tree, validate_payload_tree};
 use crate::config::{ExecutionPlanEnvelopeV1, NormalizedCache};
 use crate::durable_fs::{DurableFileSystem, DurableFsError};
 use crate::receipt::{ReceiptError, canonical_json};
@@ -431,8 +432,8 @@ impl ManagedCache {
             let source = path.join("data");
             remove_if_present(&data_path)?;
             if !try_clone_tree(&source, &data_path)? {
-                ensure_managed_directory(&data_path)?;
-                copy_tree(&source, &data_path)?;
+                let mut nodes = 0;
+                copy_payload_tree(&source, &data_path, &mut nodes, MAX_INVENTORY_NODES)?;
             }
         }
         let manifest = CacheGenerationManifestV1 {
@@ -1242,7 +1243,7 @@ fn write_complete_marker(path: &Path) -> Result<(), CacheError> {
 
 fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError> {
     let mut nodes = 0;
-    bounded_tree_size(source, &mut nodes)?;
+    validate_payload_tree(source, &mut nodes, MAX_INVENTORY_NODES)?;
     #[cfg(target_os = "macos")]
     {
         let source = CString::new(
@@ -1258,7 +1259,7 @@ fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError>
         )
         .map_err(|_| CacheError::UnsafePath("cache path contains NUL"))?;
         // clonefile is an optimization only. Unsupported filesystems fall
-        // back to the deterministic symlink-rejecting copy path below.
+        // back to the deterministic link-preserving copy path below.
         let result = unsafe { clonefile(source.as_ptr(), destination_c.as_ptr(), 0) };
         if result == 0 {
             return Ok(true);
@@ -1275,26 +1276,6 @@ fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError>
         let _ = (source, destination);
         Ok(false)
     }
-}
-
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), CacheError> {
-    let metadata = fs::symlink_metadata(source).map_err(CacheError::Io)?;
-    if metadata.file_type().is_symlink() {
-        return Err(CacheError::SymlinkInManagedRoot(source.to_path_buf()));
-    }
-    if metadata.is_file() {
-        fs::copy(source, destination).map_err(CacheError::Io)?;
-        return Ok(());
-    }
-    if !metadata.is_dir() {
-        return Err(CacheError::UnexpectedEntry(source.to_path_buf()));
-    }
-    ensure_managed_directory(destination)?;
-    for entry in sorted_directory_entries(source)? {
-        let name = entry.file_name();
-        copy_tree(&entry.path(), &destination.join(name))?;
-    }
-    Ok(())
 }
 
 fn wait_for_concurrent_initializer(root: &Path, marker: &Path) -> Result<(), CacheError> {
@@ -1670,35 +1651,6 @@ fn is_payload_root(entry_root: &Path, candidate: &Path) -> bool {
         }
         _ => false,
     }
-}
-
-fn bounded_tree_size(path: &Path, nodes: &mut usize) -> Result<(u64, u64), CacheError> {
-    *nodes = nodes.checked_add(1).ok_or(CacheError::SizeOverflow)?;
-    if *nodes > MAX_INVENTORY_NODES {
-        return Err(CacheError::InventoryLimitExceeded);
-    }
-    let metadata = fs::symlink_metadata(path).map_err(CacheError::Io)?;
-    if metadata.file_type().is_symlink() {
-        return Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()));
-    }
-    if metadata.is_file() {
-        return Ok((metadata.len(), 1));
-    }
-    if !metadata.is_dir() {
-        return Err(CacheError::UnexpectedEntry(path.to_path_buf()));
-    }
-    let mut bytes = 0_u64;
-    let mut files = 0_u64;
-    for entry in sorted_directory_entries(path)? {
-        let (entry_bytes, entry_files) = bounded_tree_size(&entry.path(), nodes)?;
-        bytes = bytes
-            .checked_add(entry_bytes)
-            .ok_or(CacheError::SizeOverflow)?;
-        files = files
-            .checked_add(entry_files)
-            .ok_or(CacheError::SizeOverflow)?;
-    }
-    Ok((bytes, files))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -2366,6 +2318,48 @@ timeout_seconds = 60
         assert_eq!(inventory.entries.len(), 1);
         assert_eq!(inventory.entries[0].status, CacheEntryStatus::Complete);
 
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn complete_payload_symlinks_are_preserved_across_generation_reuse() {
+        use std::os::unix::fs::symlink;
+
+        let (repo, resolved) = resolved_fixture("payload-link-reuse");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("cache key");
+        let outside = repo.join("reuse-sentinel");
+        fs::write(&outside, b"unchanged").expect("write external sentinel");
+
+        let first = cache
+            .prepare_entry(&key, &plan.plan_digest, 1)
+            .expect("prepare first generation");
+        fs::write(first.data_path.join("regular"), b"value").expect("write regular payload");
+        symlink("regular", first.data_path.join("relative")).expect("create relative link");
+        symlink("missing", first.data_path.join("broken")).expect("create broken link");
+        symlink(&outside, first.data_path.join("external")).expect("create external link");
+        cache
+            .promote_entry(&first)
+            .expect("promote first generation");
+        drop(first);
+
+        let second = cache
+            .prepare_entry(&key, &plan.plan_digest, 2)
+            .expect("prepare second generation");
+        for name in ["relative", "broken", "external"] {
+            assert_eq!(
+                fs::read_link(second.data_path.join(name)).expect("read reused link"),
+                fs::read_link(cache.entry_data_path(&key).join(name)).expect("read current link")
+            );
+        }
+        assert_eq!(
+            fs::read(&outside).expect("read external sentinel"),
+            b"unchanged"
+        );
+        drop(second);
         clean(&resolved.path);
         clean(&repo);
     }

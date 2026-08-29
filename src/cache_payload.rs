@@ -2,6 +2,7 @@ use crate::cache::CacheError;
 #[cfg(test)]
 use std::cell::RefCell;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,69 @@ pub(crate) fn validate_payload_tree(
     node_limit: usize,
 ) -> Result<(), CacheError> {
     measure_payload_tree(root, nodes, node_limit).map(|_| ())
+}
+
+pub(crate) fn copy_payload_tree(
+    source: &Path,
+    destination: &Path,
+    nodes: &mut usize,
+    node_limit: usize,
+) -> Result<(), CacheError> {
+    let metadata = traced_symlink_metadata(source).map_err(CacheError::Io)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CacheError::SymlinkInManagedRoot(source.to_path_buf()));
+    }
+    if !metadata.is_dir() {
+        return Err(CacheError::UnexpectedEntry(source.to_path_buf()));
+    }
+    match traced_symlink_metadata(destination) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(CacheError::Io(error)),
+        Ok(_) => return Err(CacheError::UnexpectedEntry(destination.to_path_buf())),
+    }
+    copy_payload_node(source, destination, nodes, node_limit)
+}
+
+fn copy_payload_node(
+    source: &Path,
+    destination: &Path,
+    nodes: &mut usize,
+    node_limit: usize,
+) -> Result<(), CacheError> {
+    *nodes = nodes
+        .checked_add(1)
+        .ok_or(CacheError::InventoryLimitExceeded)?;
+    if *nodes > node_limit {
+        return Err(CacheError::InventoryLimitExceeded);
+    }
+
+    let metadata = traced_symlink_metadata(source).map_err(CacheError::Io)?;
+    if metadata.file_type().is_symlink() {
+        return recreate_payload_link(source, destination);
+    }
+    if metadata.is_file() {
+        fs::copy(source, destination).map_err(CacheError::Io)?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Err(CacheError::UnexpectedEntry(source.to_path_buf()));
+    }
+
+    fs::create_dir(destination).map_err(CacheError::Io)?;
+    let mut entries = traced_read_directory(source)
+        .map_err(CacheError::Io)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CacheError::Io)?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        copy_payload_node(
+            &entry.path(),
+            &destination.join(entry.file_name()),
+            nodes,
+            node_limit,
+        )?;
+    }
+    Ok(())
 }
 
 fn walk_payload(
@@ -92,6 +156,31 @@ fn measure_symlink(path: &Path) -> Result<PayloadTreeStats, CacheError> {
         bytes: target.as_os_str().as_bytes().len() as u64,
         files: 1,
     })
+}
+
+#[cfg(unix)]
+fn recreate_payload_link(source: &Path, destination: &Path) -> Result<(), CacheError> {
+    use std::os::unix::fs::symlink;
+
+    let target =
+        traced_read_link(source).map_err(|source_error| CacheError::PayloadSymlinkRead {
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+    match traced_symlink_metadata(destination) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(CacheError::Io(error)),
+        Ok(_) => return Err(CacheError::UnexpectedEntry(destination.to_path_buf())),
+    }
+    symlink(&target, destination).map_err(|source_error| CacheError::PayloadSymlinkCreate {
+        path: destination.to_path_buf(),
+        source: source_error,
+    })
+}
+
+#[cfg(not(unix))]
+fn recreate_payload_link(source: &Path, _destination: &Path) -> Result<(), CacheError> {
+    Err(CacheError::PayloadSymlinkUnsupported(source.to_path_buf()))
 }
 
 #[cfg(not(unix))]
@@ -244,6 +333,57 @@ mod tests {
                 .all(|operation| { !operation.filesystem_path().starts_with(&outside) })
         );
         remove_fixture(&fixture, &outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_copy_preserves_each_link_target_and_external_sentinel() {
+        use std::os::unix::fs::symlink;
+
+        let source = payload_fixture("copy-source");
+        let destination = source
+            .parent()
+            .expect("fixture parent")
+            .join("copy-destination");
+        let outside = source
+            .parent()
+            .expect("fixture parent")
+            .join("copy-sentinel");
+        fs::write(source.join("regular"), b"payload").expect("write regular payload");
+        fs::write(&outside, b"outside").expect("write external sentinel");
+        symlink("regular", source.join("relative")).expect("create relative link");
+        symlink("missing", source.join("broken")).expect("create broken link");
+        symlink(&outside, source.join("absolute")).expect("create absolute link");
+        symlink("self", source.join("self")).expect("create self link");
+
+        let mut nodes = 0;
+        copy_payload_tree(&source, &destination, &mut nodes, 100).expect("copy payload");
+
+        for name in ["relative", "broken", "absolute", "self"] {
+            assert_eq!(
+                fs::read_link(destination.join(name)).expect("read copied link"),
+                fs::read_link(source.join(name)).expect("read source link")
+            );
+        }
+        assert_eq!(
+            fs::read(destination.join("regular")).expect("read copied payload"),
+            b"payload"
+        );
+        assert_eq!(
+            fs::read(&outside).expect("read external sentinel"),
+            b"outside"
+        );
+        remove_fixture(&source, &outside);
+        fs::remove_dir_all(destination).expect("remove copy destination");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn payload_link_recreation_is_explicitly_unsupported() {
+        assert!(matches!(
+            recreate_payload_link(Path::new("source"), Path::new("destination")),
+            Err(CacheError::PayloadSymlinkUnsupported(_))
+        ));
     }
 
     #[cfg(unix)]
