@@ -10,6 +10,8 @@ Generated deterministically from the locked Rust dependency graph for Commit CI 
 | bitflags | 2.13.1 | The Rust Project Developers | MIT OR Apache-2.0 | https://github.com/bitflags/bitflags | b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da |
 | block-buffer | 0.12.1 | RustCrypto Developers | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils | d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa |
 | block2 | 0.6.2 | Mads Marquart <mads@marquart.dk> | MIT | https://github.com/madsmtm/objc2 | cdeb9d870516001442e364c5220d3574d2da8dc765554b4a617230d33fa58ef5 |
+| ccp-core | 0.1.0 | Not declared | Apache-2.0 | Not declared | Not present |
+| ccp-verifier | 0.1.0 | Not declared | Apache-2.0 | Not declared | Not present |
 | cfg-if | 1.0.4 | Alex Crichton <alex@alexcrichton.com> | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if | 9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801 |
 | cfg_aliases | 0.2.2 | Zicklag <zicklag@katharostech.com> | MIT | https://github.com/katharostech/cfg_aliases | f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527 |
 | clap | 4.6.6 | Not declared | MIT OR Apache-2.0 | https://github.com/clap-rs/clap | 473c7e07f409a8d772161724aa8db6a765a2532a70f9667eeb7b49d3d02fbdca |
@@ -86,6 +88,8 @@ Generated deterministically from the locked Rust dependency graph for Commit CI 
 The following packaged crates declared a license expression but did not contain a UTF-8 file whose name begins with LICENSE, COPYING, NOTICE, or UNLICENSE. Consult the source link and declared expression above before redistribution.
 
 - block2 0.6.2
+- ccp-core 0.1.0
+- ccp-verifier 0.1.0
 - dispatch2 0.3.1
 - objc2 0.6.4
 - objc2-encode 4.1.0

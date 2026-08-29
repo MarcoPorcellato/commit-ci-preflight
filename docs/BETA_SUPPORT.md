@@ -38,6 +38,9 @@ The beta candidate implements:
 - a lightweight GitHub receipt gate;
 - a read-only, non-executing GitHub Actions migration assistant;
 - deterministic benchmark and native evidence contracts.
+- a bounded `ccp-verifier` local source-build surface for `verify` and schema
+  inspection; no published verifier binary or static multi-platform artifact
+  is claimed (distribution is deferred to M3).
 
 ## Intentional limitations
 

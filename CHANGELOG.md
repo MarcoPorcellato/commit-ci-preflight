@@ -9,6 +9,13 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added the M2 physically independent verifier boundary: `ccp-core` owns the
+  protocol and pure verification contracts, while `ccp-verifier` is available
+  as a bounded local source build with `verify` and schema commands. This does
+  not claim a published binary, platform qualification, static distribution,
+  or producer identity; `verify-benchmark` remains in the root CLI and static
+  multi-platform distribution is deferred to M3.
+
 - Added the adoption-help issue-form source and a 1280 × 640 social-preview PNG
   upload candidate. GitHub form rendering/live chooser remains unverified until
   the remote gate; preview upload is owner-only and pending.

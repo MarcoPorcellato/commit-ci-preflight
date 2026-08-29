@@ -268,7 +268,7 @@ The target workspace is:
 
 ```text
 crates/
-  ccp-contract/         normalized plans, receipts, policy, schemas, digests
+  ccp-core/             normalized plans, receipts, policy, schemas, digests
   ccp-verifier/         bounded trusted verification only
   ccp-git-snapshot/     immutable commit materialization and source manifest
   ccp-supervisor/       process containment, output drain, deadlines, cleanup
@@ -281,12 +281,12 @@ crates/
 Dependency rules:
 
 ```text
-ccp-contract <- ccp-verifier
-ccp-contract <- ccp-git-snapshot
-ccp-contract <- ccp-supervisor
-ccp-contract <- ccp-runtime-docker
-ccp-contract <- ccp-state
-ccp-contract + adapters <- ccp-runner <- ccp-cli
+ccp-core <- ccp-verifier
+ccp-core <- ccp-git-snapshot
+ccp-core <- ccp-supervisor
+ccp-core <- ccp-runtime-docker
+ccp-core <- ccp-state
+ccp-core + adapters <- ccp-runner <- ccp-cli
 ```
 
 `ccp-verifier` must not depend on the runner or any runtime/state adapter. The
@@ -738,7 +738,7 @@ Exit gate:
 
 Deliverables:
 
-- incremental workspace split beginning with `ccp-contract` and `ccp-verifier`;
+- incremental workspace split beginning with `ccp-core` and `ccp-verifier`;
 - minimal verifier binary with a reviewed dependency allowlist;
 - GitHub gate builds or retrieves only the trusted verifier artifact;
 - evidence status records source commit, evidence commit/blob digest, receipt ID,

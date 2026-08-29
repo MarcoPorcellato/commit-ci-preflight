@@ -190,8 +190,8 @@ Deliverables:
 - add a dedicated `ccp-verifier` binary with only `verify` and schema surfaces;
 - prohibit runner/runtime dependencies from its resolved dependency graph;
 - add equivalence, maximum-input, malformed-input, and binary-size receipts;
-- produce a static `x86_64-unknown-linux-musl` verifier candidate locally or in
-  an explicitly authorized release workflow.
+- record a local verifier candidate only; static `x86_64-unknown-linux-musl`
+  and multi-platform distribution are deferred to M3.
 
 Exit gate:
 
@@ -200,6 +200,10 @@ Exit gate:
 - dependency audit proves no Docker/process/cache/resource modules are reachable
   from the verifier binary;
 - no receipt v1 or policy v1 compatibility break.
+
+M2 availability is source-build availability only. It does not imply binary
+distribution, platform qualification, or producer identity. The
+`verify-benchmark` command remains part of the root CLI.
 
 ### PR 3 — Slim trusted GitHub gate
 

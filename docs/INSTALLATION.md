@@ -112,6 +112,15 @@ argv and mounts but does not execute checks. Follow the
 [end-to-end tutorial](TUTORIAL.md) before using the tool on an important
 repository.
 
+## Local verifier source build
+
+The workspace package `ccp-verifier` can be built locally with
+`cargo build --locked --bin ccp-verifier`. Its bounded `verify` and `schema`
+commands are for local inspection and CI experiments. This is not a published
+binary or a platform-availability claim; static and multi-platform
+distribution remain M3 work. `verify-benchmark` remains a root
+`commit-ci-preflight` command.
+
 ## Uninstall
 
 For the default Cargo installation:

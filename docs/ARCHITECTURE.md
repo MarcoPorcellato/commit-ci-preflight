@@ -14,6 +14,13 @@ immutable source snapshot work is documented in
 [`docs/INVARIANT_EVIDENCE_MATRIX.md`](INVARIANT_EVIDENCE_MATRIX.md). This page
 includes the implemented 0.1.0 source candidate and T2 source boundary.
 
+The M2 workspace also provides `ccp-core` as the canonical protocol and pure
+verification library and `ccp-verifier` as a bounded local source-build
+binary. The latter exposes only `verify` and schema commands; it is not a
+published binary or a distribution claim. `verify-benchmark` remains a root
+`commit-ci-preflight` command. Static and multi-platform distribution are
+deferred to M3.
+
 ## System purpose
 
 Commit CI Preflight moves deterministic, resource-intensive checks to
