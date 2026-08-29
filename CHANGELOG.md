@@ -9,6 +9,9 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added a benefit-led visitor journey, bounded PR #71 case study, and public
+  support routing for adoption, defects, security reports, and proposals.
+
 - Shared terminal owned-resource finalization now routes historical and matrix
   runs, benchmarks, and guarded execution through completion-before-release,
   exactly-once admission release, and fail-closed release-error precedence.

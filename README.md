@@ -1,5 +1,17 @@
 # Commit CI Preflight
 
+> **Run heavy CI locally. Prove the exact commit on GitHub.**
+
+Commit CI Preflight (CCP) turns expensive, deterministic checks into
+commit-bound evidence: run a reviewed plan on your machine, then let a small
+GitHub gate verify the exact pull-request head.
+
+Start here:
+
+- [PR #71 case study](docs/CASE_STUDY_PR71.md) — a bounded, public example.
+- [Clean-room tutorial](docs/TUTORIAL.md) — produce and verify a first receipt.
+- [Adoption guide](docs/ADOPTION_GUIDE.md) — decide whether CCP fits your repository.
+
 Proof-carrying CI for developer-owned execution. Commit CI Preflight runs a
 reviewed, pinned execution contract on your hardware, writes a commit-bound
 receipt, and lets GitHub verify that evidence instead of rerunning heavy work.
@@ -65,6 +77,14 @@ absolute home paths, and personal or machine identity fields.
 A receipt is integrity and policy evidence. It is not an identity attestation,
 a signature, or proof that arbitrary local and hosted workflows are identical.
 
+## Is CCP for this repository?
+
+| If your repository has… | CCP fit |
+|---|---|
+| deterministic, container-friendly checks and pinned runtime images | **Yes — start with a clean-room trial** |
+| trusted secrets, deployments, or platform-specific behavior | **Partial — retain the relevant remote/native jobs** |
+| a requirement for signed identity-bound attestations | **No — CCP is not that attestation system** |
+
 ## Quick start
 
 Adopting CCP in another repository? Start with the
@@ -102,75 +122,13 @@ configuration against this source checkout would validate the wrong repository.
 ```
 
 `doctor` performs a bounded read-only runtime probe. `dry-run` prints the
-exact container argv and mounts but does not execute project code.
-
-`run` and `benchmark` are serialized through a default-on host-wide single-slot
-queue so independent local agents cannot start both heavy workloads at once.
-The planned agent admission mode is an owner-approved safety exception for
-orphan prevention, not a second scheduler.
-This agent mode opt-in must never bypass unknown ownership.
-This agent mode opt-in must never revive a terminated chat.
-This agent mode opt-in must never auto-execute a command.
-A live activity must make an explicit claim before it invokes its own guarded
-command.
-Use `--admission-timeout-seconds` to select the bounded wait. The
-`admission status --json` result distinguishes the transient `queue_lock` from
-the heavy-work `slot_lock`, and reports the slot's opaque owner/run identifier,
-acquisition time, heartbeat time, and lease state when available. A missing
-owner record, a malformed lease, or a contradiction between the OS lock and
-the lease is reported as `unknown` and is never treated as inactivity. The
-status also states explicitly that absence of a process in one local shell
-does not prove global inactivity across Codex activities or users. On macOS, the queue is followed by a strict `macos-v4`
-host-memory admission sample, and `run` has a two-second watchdog that cancels
-only on sustained compound or critical pressure. Admission requires at least 20% available memory and
-3 GiB reclaimable uncompressed memory, and caps swap at the smaller of 8 GiB
-and 30% of physical RAM. Compression alone is advisory both before and during
-the run; at pre-start it denies only when at least 70% compression accompanies
-another pressure signal. The in-run watchdog treats compression the same way:
-soft cancellation needs
-at least two converging signals for about 30 seconds, while critical available,
-reclaimable, swap, or compound-compression conditions remain immediate stops.
-`resource status --json` reports bounded metrics and
-capability; Linux and Windows report `unsupported_not_enforced`. Resource and
-admission evidence are not part of receipts yet.
-
-Wrap any other long local workflow with the same protection by passing one
-explicit argv after `--`:
-
-```console
-commit-ci-preflight guard exec \
-  --admission-timeout-seconds 21600 \
-  --timeout-seconds 21600 \
-  --resource-profile ready \
-  --resource-workload-family brain-linux-ci-v1 \
-  --resource-executor orbstack \
-  --resource-execution-mode emulated \
-  --resource-target-platform linux-amd64 \
-  -- make all
-```
-
-The wrapper never invokes a shell, runs the child from the caller's current
-working directory, never creates a receipt, and keeps the admission slot until
-the supervised process tree has stopped. Both waits
-default to six hours for `guard exec` and are capped at 24 hours. On macOS it
-retains at most 500 local, privacy-bounded v2 summaries with workload,
-executor, cache, execution-mode, target and optional requested-limit context.
-The history changes no policy decision and can be disabled
-with `--no-resource-history`; see the
-[resource observation history contract](docs/RESOURCE_OBSERVATION_HISTORY.md).
-Official launchers must pass through `guard exec` to be covered. CCP does not
-claim visibility into direct Docker or OrbStack processes that bypass it; see
-the [coverage and adoption inventory](docs/ORBSTACK_TELEMETRY_COVERAGE.md).
-When multiple agent activities or repositories share the Mac, follow the
-[cross-activity coordination runbook](docs/COORDINATION_RUNBOOK.md). It defines
-the owner/lease interpretation, reservation handoff, worktree isolation, and
-safe recovery rules; a process list from one terminal is not a host-wide
-ownership proof.
-Inspect the bounded local records without starting work:
-
-```console
-commit-ci-preflight resource history --json
-```
+exact container argv and mounts but does not execute project code. For the
+admission, resource, cache, and guarded-workflow contracts, use the
+[coordination runbook](docs/COORDINATION_RUNBOOK.md),
+[local run contract](docs/LOCAL_RUN.md), and
+[resource observation history](docs/RESOURCE_OBSERVATION_HISTORY.md). These
+documents contain the operational details without interrupting the first
+visitor journey.
 
 ### 3. Run the clean-room demo
 
@@ -181,6 +139,12 @@ repository policy.
 
 For installation, checksum verification, and local candidate archives, see
 [the installation guide](docs/INSTALLATION.md).
+
+## Dogfooding proof
+
+This repository uses CCP for its own bounded qualification workflow. See the
+[PR #71 case study](docs/CASE_STUDY_PR71.md) for the exact public anchors and
+the limits of what that evidence proves.
 
 ## What makes it different
 

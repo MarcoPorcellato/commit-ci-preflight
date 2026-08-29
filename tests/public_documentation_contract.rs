@@ -216,6 +216,8 @@ fn current_public_documents_have_valid_local_links() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     const PUBLIC_DOCUMENTS: &[&str] = &[
         "README.md",
+        "SUPPORT.md",
+        "docs/CASE_STUDY_PR71.md",
         "docs/INSTALLATION.md",
         "docs/TUTORIAL.md",
         "docs/ADOPTION_GUIDE.md",
