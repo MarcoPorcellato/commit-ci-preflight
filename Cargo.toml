@@ -16,6 +16,7 @@ default-members = ["."]
 resolver = "3"
 
 [dependencies]
+ccp-core = { path = "crates/ccp-core" }
 clap = { version = "4.6.6", default-features = false, features = ["derive", "error-context", "help", "std", "usage"] }
 ctrlc = { version = "=3.5.2", features = ["termination"] }
 fs2 = "=0.4.3"

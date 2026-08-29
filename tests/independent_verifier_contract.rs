@@ -10,6 +10,41 @@ use std::{
     path::{Path, PathBuf},
 };
 
+fn root_to_core(
+    value: commit_ci_preflight::receipt::ReceiptEnvelopeV2,
+) -> ccp_core::receipt::ReceiptEnvelopeV2 {
+    value
+}
+fn core_to_root(
+    value: ccp_core::config::ExecutionPlanV1,
+) -> commit_ci_preflight::config::ExecutionPlanV1 {
+    value
+}
+fn root_error_to_core(
+    value: commit_ci_preflight::receipt::ReceiptError,
+) -> ccp_core::errors::ReceiptError {
+    value
+}
+fn core_runtime_to_root(
+    value: ccp_core::runtime_evidence::RuntimeCapabilityEvidenceV1,
+) -> commit_ci_preflight::runtime::RuntimeCapabilityEvidenceV1 {
+    value
+}
+
+#[test]
+fn protocol_types_are_nominally_identical_across_root_and_core_paths() {
+    let _: fn(
+        commit_ci_preflight::receipt::ReceiptEnvelopeV2,
+    ) -> ccp_core::receipt::ReceiptEnvelopeV2 = root_to_core;
+    let _: fn(ccp_core::config::ExecutionPlanV1) -> commit_ci_preflight::config::ExecutionPlanV1 =
+        core_to_root;
+    let _: fn(commit_ci_preflight::receipt::ReceiptError) -> ccp_core::errors::ReceiptError =
+        root_error_to_core;
+    let _: fn(
+        ccp_core::runtime_evidence::RuntimeCapabilityEvidenceV1,
+    ) -> commit_ci_preflight::runtime::RuntimeCapabilityEvidenceV1 = core_runtime_to_root;
+}
+
 const MANIFEST: &str = include_str!("fixtures/m2-compatibility-envelope-v1.json");
 
 fn reject_duplicate_keys(input: &str) -> Result<(), serde_json::Error> {
