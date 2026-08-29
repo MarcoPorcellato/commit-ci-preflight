@@ -25,8 +25,9 @@ targets therefore have the same host-side treatment: preserve the link object
 without dereferencing it.
 
 The implementation will also construct prepared-generation cleanup ownership
-immediately after creating a staging directory and before any fallible clone or
-copy. A failed reuse attempt must not leave an unowned `.staging-*` directory.
+immediately after creating a staging directory and before creating or
+validating its `data` root or attempting any fallible clone or copy. A failed
+reuse attempt must not leave an unowned `.staging-*` directory.
 
 No configuration, receipt, policy, cache-key, generation-manifest, or journal
 schema changes are introduced.
@@ -221,9 +222,10 @@ Windows evidence.
 
 ### Preparation ownership and cleanup
 
-`PreparedCacheGenerationOwner` must be created immediately after both the
-plain staging directory and its plain `data` root exist, and before removing
-that empty root or attempting clone/copy reuse. It owns:
+`PreparedCacheGenerationOwner` must be created immediately after the plain
+staging directory exists, before creating or validating its plain `data` root,
+removing that empty root, or attempting clone/copy reuse. During the preparing
+phase, the `data` root may therefore be absent or incomplete. The owner owns:
 
 - the exact staging path;
 - key digest, plan digest, and generation identity once available;
@@ -329,8 +331,8 @@ link once and does not count or size its target.
 
 ### Cleanup ownership
 
-- inject failure before clone, during clone preflight, during fallback copy,
-  and before manifest write;
+- inject failure while preparing the staging `data` root, before clone, during
+  clone preflight, during fallback copy, and before manifest write;
 - prove the exact owned staging directory is removed on final drop;
 - prove the entry lock is held through cleanup and then released;
 - prove unrelated and identity-mismatched staging directories are preserved;

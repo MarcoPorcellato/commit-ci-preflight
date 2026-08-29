@@ -483,8 +483,6 @@ impl ManagedCache {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let staging_path = path.join(format!(".staging-{}-{sequence}", std::process::id()));
         ensure_managed_directory(&staging_path)?;
-        let data_path = staging_path.join("data");
-        ensure_managed_directory(&data_path)?;
         let owner = Arc::new(PreparedCacheGenerationOwner {
             entry_path: path.clone(),
             staging_path: staging_path.clone(),
@@ -494,6 +492,14 @@ impl ManagedCache {
             phase: AtomicU8::new(PREPARED_PHASE_PREPARING),
             _entry_lock: entry_lock,
         });
+        let data_path = staging_path.join("data");
+        #[cfg(test)]
+        if take_staging_data_directory_preparation_failure_for_test() {
+            return Err(CacheError::Io(io::Error::other(
+                "injected staging data directory preparation failure",
+            )));
+        }
+        ensure_managed_directory(&data_path)?;
         if complete {
             let source = path.join("data");
             remove_if_present(&data_path)?;
@@ -1427,10 +1433,21 @@ fn try_clone_tree(
 #[cfg(test)]
 thread_local! {
     static FORCE_CLONE_FALLBACK: Cell<bool> = const { Cell::new(false) };
+    static FAIL_STAGING_DATA_DIRECTORY_PREPARATION_ONCE: Cell<bool> = const { Cell::new(false) };
     static FAIL_GENERATION_MANIFEST_WRITE_ONCE: Cell<bool> = const { Cell::new(false) };
     static CLONE_OPERATIONS: std::cell::RefCell<Vec<CloneOperation>> = const {
         std::cell::RefCell::new(Vec::new())
     };
+}
+
+#[cfg(test)]
+fn fail_staging_data_directory_preparation_once_for_test() {
+    FAIL_STAGING_DATA_DIRECTORY_PREPARATION_ONCE.with(|failure| failure.set(true));
+}
+
+#[cfg(test)]
+fn take_staging_data_directory_preparation_failure_for_test() -> bool {
+    FAIL_STAGING_DATA_DIRECTORY_PREPARATION_ONCE.with(|failure| failure.replace(false))
 }
 
 #[cfg(test)]
@@ -2919,6 +2936,34 @@ timeout_seconds = 60
             .expect("entry lock is released after cleanup");
         drop(released);
         finish_fixture(fixture);
+    }
+
+    #[test]
+    fn data_directory_preparation_failure_removes_owned_staging_and_releases_the_entry_lock() {
+        let fixture = completed_entry_fixture("data-directory-preparation-cleanup");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+
+        fail_staging_data_directory_preparation_once_for_test();
+        let preparation = fixture.cache.prepare_entry(&key, &plan.plan_digest, 2);
+
+        assert!(matches!(preparation, Err(CacheError::Io(_))));
+        let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
+            .expect("entry directory")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .map(|entry| entry.path())
+            .collect();
+        let released = fixture.cache.prepare_entry(&key, &plan.plan_digest, 3);
+        let lock_was_released = released.is_ok();
+        drop(released);
+        finish_fixture(fixture);
+
+        assert!(
+            staging.is_empty(),
+            "data preparation failure leaked {staging:?}"
+        );
+        assert!(lock_was_released, "entry lock remained held after failure");
     }
 
     #[cfg(unix)]

@@ -10,7 +10,8 @@ cleaning every newly created failed staging generation.
 no-follow traversal, accounting, and Unix link-preserving copy. Keep cache
 layout, promotion, recovery, and ownership decisions in `cache.rs`, and call
 the payload module only after validating an exact plain `data` root. Move the
-prepared-generation RAII owner before fallible reuse so cleanup covers both
+prepared-generation RAII owner immediately after staging creation, before the
+fallible `data`-root preparation and reuse paths, so cleanup covers both
 pre-manifest and manifest-backed staging phases.
 
 **Tech Stack:** Rust 2024, Rust 1.87+, standard-library filesystem APIs,
@@ -789,16 +790,28 @@ fn failed_payload_preflight_removes_the_new_staging_generation() {
 }
 ```
 
+Add a second deterministic regression named
+`data_directory_preparation_failure_removes_owned_staging_and_releases_the_entry_lock`.
+Use a thread-local, one-shot test seam immediately before the staging `data`
+directory is created or validated. The test must prove the injected failure
+leaves no `.staging-*` directory and that a subsequent preparation can acquire
+the same entry lock.
+
 - [ ] **Step 2: Run the regression to prove the observed leak**
 
 Run:
 
 ```console
 cargo test --locked cache::tests::failed_payload_preflight_removes_the_new_staging_generation -- --exact
+cargo test --locked cache::tests::data_directory_preparation_failure_removes_owned_staging_and_releases_the_entry_lock -- --exact
 ```
 
-Expected: FAIL because one `.staging-*` directory remains after
-`prepare_entry` returns the preflight error.
+Expected at the original Task 4 baseline: both fail because one `.staging-*`
+directory remains after `prepare_entry` returns the injected or preflight
+error. When applying the later corrective checkpoint, first add the test-only
+seam and regression without changing owner ordering; the new test must compile
+and fail on the leaked-staging assertion. A compile failure against a revision
+that does not yet contain the test seam is not behavioral RED evidence.
 
 - [ ] **Step 3: Add phase-aware generation ownership**
 
@@ -820,9 +833,10 @@ struct PreparedCacheGenerationOwner {
 }
 ```
 
-Construct its `Arc` immediately after creating the plain staging and plain
-`data` directories, before `remove_if_present`, `try_clone_tree`, or
-`copy_payload_tree`. After `write_generation_manifest` succeeds, execute:
+Construct its `Arc` immediately after creating the plain staging directory and
+before creating or validating its plain `data` directory, calling
+`remove_if_present`, `try_clone_tree`, or `copy_payload_tree`. After
+`write_generation_manifest` succeeds, execute:
 
 ```rust
 owner.phase.store(PREPARED_PHASE_STAGING, Ordering::Release);
@@ -890,6 +904,7 @@ Run:
 
 ```console
 cargo test --locked cache::tests::failed_payload_preflight_removes_the_new_staging_generation -- --exact
+cargo test --locked cache::tests::data_directory_preparation_failure_removes_owned_staging_and_releases_the_entry_lock -- --exact
 cargo test --locked cache::tests::staging_cleanup_unlinks_payload_links_without_touching_targets -- --exact
 cargo test --locked cache::tests::prepared_entry_clones_share_cleanup_and_lock_until_final_drop -- --exact
 cargo test --locked cache::tests::active_entry_lock_blocks_a_second_preparation_until_release -- --exact
@@ -1045,7 +1060,7 @@ const TESTING_AND_FAULT_INJECTION: &str =
     include_str!("../docs/TESTING_AND_FAULT_INJECTION.md");
 
 #[test]
-fn cache_payload_symlinks_are_documented_as_opaque_unattested_state() {
+fn cache_payload_documentation_contract() {
     for phrase in [
         "control plane",
         "payload plane",
@@ -1074,7 +1089,7 @@ fn cache_payload_symlinks_are_documented_as_opaque_unattested_state() {
 Run:
 
 ```console
-cargo test --locked --test repository_hygiene_contract cache_payload_symlinks_are_documented_as_opaque_unattested_state -- --exact
+cargo test --locked --test repository_hygiene_contract cache_payload_documentation_contract -- --exact
 ```
 
 Expected: FAIL on the first missing documentation phrase.
@@ -1114,7 +1129,7 @@ owns cleanup before reuse, and native candidate qualification remains pending.
 Run:
 
 ```console
-cargo test --locked --test repository_hygiene_contract cache_payload_symlinks_are_documented_as_opaque_unattested_state -- --exact
+cargo test --locked --test repository_hygiene_contract cache_payload_documentation_contract -- --exact
 cargo test --locked cache::tests::complete_payload_symlinks_are_preserved_across_generation_reuse -- --exact
 cargo test --locked cache::tests::failed_payload_preflight_removes_the_new_staging_generation -- --exact
 cargo test --locked cache::tests::staging_cleanup_unlinks_payload_links_without_touching_targets -- --exact
