@@ -253,6 +253,49 @@ mod tests {
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+    #[cfg(unix)]
+    const SHORT_SOCKET_DIRECTORY_RETRIES: usize = 16;
+
+    #[cfg(unix)]
+    struct ShortSocketFixtureDirectory {
+        path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl ShortSocketFixtureDirectory {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ShortSocketFixtureDirectory {
+        fn drop(&mut self) {
+            match fs::symlink_metadata(&self.path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    let _ = fs::remove_dir_all(&self.path);
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn short_socket_fixture_directory() -> ShortSocketFixtureDirectory {
+        let process_id = std::process::id();
+        let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        for attempt in 0..SHORT_SOCKET_DIRECTORY_RETRIES {
+            let path =
+                PathBuf::from("/tmp").join(format!("ccp-ps-{process_id}-{sequence}-{attempt}"));
+            match fs::create_dir(&path) {
+                Ok(()) => return ShortSocketFixtureDirectory { path },
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create short socket fixture directory: {error}"),
+            }
+        }
+        panic!("claim unique short socket fixture directory")
+    }
+
     fn payload_fixture(name: &str) -> PathBuf {
         let base = std::env::var_os("CCP_TEST_ROOT")
             .map(PathBuf::from)
@@ -410,17 +453,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn short_socket_fixture_directory_removes_only_its_owned_path() {
+        let directory = short_socket_fixture_directory();
+        let path = directory.path().to_path_buf();
+        let created = path.join("created-by-test");
+        fs::write(&created, b"owned").expect("write owned fixture child");
+
+        drop(directory);
+
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn unsupported_payload_object_fails_without_traversal() {
         use std::os::unix::{fs::symlink, net::UnixListener};
 
         let fixture = payload_fixture("unsupported-object");
         let socket = fixture.join("listener.socket");
-        let socket_parent = PathBuf::from("/private/tmp").join(format!(
-            "ccp-payload-socket-{}-{}",
-            std::process::id(),
-            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_file(&socket_parent);
+        let socket_directory = short_socket_fixture_directory();
+        let socket_parent = socket_directory.path().join("fixture");
         symlink(&fixture, &socket_parent).expect("link short socket parent");
         let listener =
             UnixListener::bind(socket_parent.join("listener.socket")).expect("bind listener");
@@ -440,7 +492,7 @@ mod tests {
         );
         drop(listener);
         fs::remove_file(socket).expect("remove listener socket");
-        fs::remove_file(socket_parent).expect("remove short socket parent");
+        drop(socket_directory);
         fs::remove_dir(fixture).expect("remove fixture");
     }
 
