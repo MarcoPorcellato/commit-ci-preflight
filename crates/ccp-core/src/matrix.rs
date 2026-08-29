@@ -19,8 +19,8 @@ use crate::config::{
 };
 use crate::errors::{EvidenceStatus, ReceiptError};
 use crate::verification_model::{
-    AcceptedPlatformV1, VerificationDecision, VerificationReportV1, VerificationStatus, finding,
-    parse_utc_seconds, validate_commit,
+    AcceptedPlatformV1, VerificationDecision, VerificationFindingV1, VerificationReportV1,
+    VerificationStatus, finding, parse_utc_seconds, validate_commit,
 };
 
 pub const MATRIX_RECEIPT_SCHEMA_VERSION: &str = "2.0";
@@ -651,9 +651,35 @@ impl MatrixVerificationPolicyV2 {
                 "runtimes_or_required_checks",
             ));
         }
+        validate_project(&self.project)?;
+        validate_digest(&self.configuration_digest, "configuration_digest")?;
+        if !(1..=31_536_000).contains(&self.max_age_seconds) {
+            return Err(MatrixContractError::InvalidField("max_age_seconds"));
+        }
         let mut ids = BTreeSet::new();
         for r in &self.runtimes {
             validate_identifier("runtimes.id", &r.id).map_err(MatrixContractError::Config)?;
+            validate_digest(&r.configuration_digest, "configuration_digest")?;
+            validate_image_reference(&r.image_reference)?;
+            if r.platforms.is_empty() || r.platforms.len() > 32 {
+                return Err(MatrixContractError::InvalidField("platforms"));
+            }
+            let mut platforms = BTreeSet::new();
+            for platform in &r.platforms {
+                validate_identifier("platforms.host_os", &platform.host_os)
+                    .map_err(MatrixContractError::Config)?;
+                validate_identifier("platforms.host_arch", &platform.host_arch)
+                    .map_err(MatrixContractError::Config)?;
+                validate_identifier("platforms.runtime_kind", &platform.runtime_kind)
+                    .map_err(MatrixContractError::Config)?;
+                if !platforms.insert((
+                    &platform.host_os,
+                    &platform.host_arch,
+                    &platform.runtime_kind,
+                )) {
+                    return Err(MatrixContractError::DuplicateValue("platforms"));
+                }
+            }
             if !ids.insert(r.id.as_str()) {
                 return Err(MatrixContractError::DuplicateValue("runtimes.id"));
             }
@@ -671,6 +697,16 @@ impl MatrixVerificationPolicyV2 {
                 return Err(MatrixContractError::DuplicateValue("required_checks.id"));
             }
         }
+        let covered: BTreeSet<_> = self
+            .required_checks
+            .iter()
+            .map(|c| c.runtime_id.as_str())
+            .collect();
+        if covered.len() != ids.len() {
+            return Err(MatrixContractError::InvalidField(
+                "required_checks.runtime_coverage",
+            ));
+        }
         Ok(())
     }
 }
@@ -683,9 +719,8 @@ pub fn verify_matrix_receipt_document(
 ) -> Result<VerificationReportV1, MatrixContractError> {
     policy.validate()?;
     validate_commit(expected_commit).map_err(MatrixContractError::Verification)?;
-    if parse_utc_seconds(evaluated_at_utc).is_none() {
-        return Err(MatrixContractError::InvalidEvaluationTime);
-    }
+    let evaluated_at =
+        parse_utc_seconds(evaluated_at_utc).ok_or(MatrixContractError::InvalidEvaluationTime)?;
     let mut report = VerificationReportV1 {
         schema_version: "1.0".into(),
         assurance_scope: "integrity_and_repository_policy_only".into(),
@@ -719,39 +754,211 @@ pub fn verify_matrix_receipt_document(
     report.receipt_id = Some(envelope.receipt_id.clone());
     report.integrity_status = VerificationStatus::Pass;
     report.policy_status = VerificationStatus::Pass;
-    let r = &envelope.receipt;
-    if r.repository.repository != policy.project {
-        report.findings.push(finding(
-            "policy.repository",
-            "repository.repository",
-            "receipt project does not match repository policy",
-        ));
-    }
-    if r.repository.commit_sha != expected_commit {
-        report.findings.push(finding(
-            "policy.commit",
-            "repository.commit_sha",
-            "receipt commit does not match externally supplied commit",
-        ));
-    }
-    if r.configuration_digest != policy.configuration_digest {
-        report.findings.push(finding(
-            "policy.configuration",
-            "configuration_digest",
-            "receipt configuration digest does not match repository policy",
-        ));
-    }
-    if r.overall_status != EvidenceStatus::Pass {
-        report.findings.push(finding(
-            "policy.overall_status",
-            "overall_status",
-            "repository policy requires an overall PASS receipt",
-        ));
-    }
+    evaluate_matrix_policy(
+        &envelope,
+        policy,
+        expected_commit,
+        evaluated_at,
+        &mut report.findings,
+    );
     if report.findings.is_empty() {
         report.decision = VerificationDecision::Pass;
     } else {
         report.policy_status = VerificationStatus::Fail;
     }
     Ok(report)
+}
+
+fn evaluate_matrix_policy(
+    envelope: &MatrixReceiptEnvelopeV2,
+    policy: &MatrixVerificationPolicyV2,
+    expected_commit: &str,
+    evaluated_at: i64,
+    findings: &mut Vec<VerificationFindingV1>,
+) {
+    let r = &envelope.receipt;
+    equal(
+        &r.repository.repository,
+        &policy.project,
+        "policy.repository",
+        "repository.repository",
+        "receipt project does not match repository policy",
+        findings,
+    );
+    equal(
+        &r.repository.commit_sha,
+        expected_commit,
+        "policy.commit",
+        "repository.commit_sha",
+        "receipt commit does not match the externally supplied commit",
+        findings,
+    );
+    if r.repository.dirty {
+        findings.push(finding(
+            "policy.dirty",
+            "repository.dirty",
+            "repository policy requires a clean checkout",
+        ));
+    }
+    equal(
+        &r.configuration_digest,
+        &policy.configuration_digest,
+        "policy.configuration",
+        "configuration_digest",
+        "receipt configuration digest does not match repository policy",
+        findings,
+    );
+    if r.overall_status != EvidenceStatus::Pass {
+        findings.push(finding(
+            "policy.overall_status",
+            "overall_status",
+            "repository policy requires an overall PASS receipt",
+        ));
+    }
+    let expected: BTreeMap<_, _> = policy.runtimes.iter().map(|x| (x.id.as_str(), x)).collect();
+    let actual: BTreeMap<_, _> = r
+        .runtime_receipts
+        .iter()
+        .map(|x| (x.runtime_id.as_str(), x))
+        .collect();
+    if expected.len() != actual.len() || expected.keys().any(|k| !actual.contains_key(k)) {
+        findings.push(finding(
+            "policy.runtime_set",
+            "runtime_receipts",
+            "receipt runtime set does not exactly match repository policy",
+        ));
+    }
+    for (id, exp) in expected {
+        if let Some(act) = actual.get(id) {
+            let p = &act.receipt.receipt.platform;
+            equal(
+                &act.receipt.receipt.configuration_digest,
+                &exp.configuration_digest,
+                "policy.runtime_configuration",
+                "runtime_receipts.configuration_digest",
+                "receipt runtime configuration does not match repository policy",
+                findings,
+            );
+            equal(
+                &p.image_reference,
+                &exp.image_reference,
+                "policy.runtime_image",
+                "runtime_receipts.platform.image_reference",
+                "receipt runtime image does not match repository policy",
+                findings,
+            );
+            if !exp.platforms.iter().any(|a| {
+                a.host_os == p.host_os
+                    && a.host_arch == p.host_arch
+                    && a.runtime_kind == p.runtime_kind
+            }) {
+                findings.push(finding(
+                    "policy.runtime_platform",
+                    "runtime_receipts.platform",
+                    "receipt runtime platform tuple is not accepted by repository policy",
+                ));
+            }
+        }
+    }
+    let checks: BTreeMap<_, _> = policy
+        .required_checks
+        .iter()
+        .map(|c| (c.id.as_str(), c.runtime_id.as_str()))
+        .collect();
+    let mut actual_checks = BTreeMap::new();
+    for rt in &r.runtime_receipts {
+        for c in &rt.receipt.receipt.checks {
+            if c.required {
+                actual_checks.insert(c.id.as_str(), (rt.runtime_id.as_str(), c));
+            }
+        }
+    }
+    if checks.len() != actual_checks.len() || checks.keys().any(|k| !actual_checks.contains_key(k))
+    {
+        findings.push(finding(
+            "policy.required_check_set",
+            "checks",
+            "required check set does not exactly match repository policy",
+        ));
+    }
+    for (id, rid) in checks {
+        match actual_checks.get(id) {
+            Some((ar, c)) if *ar == rid && c.status == EvidenceStatus::Pass => {}
+            Some((ar, _)) if *ar != rid => findings.push(finding(
+                "policy.check_runtime",
+                "checks.runtime_id",
+                "required check ran in a different runtime than repository policy",
+            )),
+            Some(_) => findings.push(finding(
+                "policy.required_check_result",
+                "checks.status",
+                "one or more policy-required checks did not PASS",
+            )),
+            None => {}
+        }
+    }
+    match parse_utc_seconds(&r.run.finished_at_utc) {
+        Some(t) if t > evaluated_at => findings.push(finding(
+            "policy.future_receipt",
+            "run.finished_at_utc",
+            "receipt completion time is later than verification time",
+        )),
+        Some(t) if evaluated_at - t > policy.max_age_seconds as i64 => findings.push(finding(
+            "policy.stale_receipt",
+            "run.finished_at_utc",
+            "receipt exceeds repository freshness policy",
+        )),
+        Some(_) => {}
+        None => findings.push(finding(
+            "policy.invalid_time",
+            "run.finished_at_utc",
+            "receipt completion time cannot be evaluated",
+        )),
+    }
+}
+fn equal(
+    a: &str,
+    b: &str,
+    code: &str,
+    field: &str,
+    msg: &str,
+    out: &mut Vec<VerificationFindingV1>,
+) {
+    if a != b {
+        out.push(finding(code, field, msg));
+    }
+}
+fn validate_project(v: &str) -> Result<(), MatrixContractError> {
+    let p = v.split('/').collect::<Vec<_>>();
+    if p.len() != 2 || p.iter().any(|x| x.is_empty() || !valid_name(x)) {
+        Err(MatrixContractError::InvalidField("project"))
+    } else {
+        Ok(())
+    }
+}
+fn valid_name(v: &str) -> bool {
+    !v.is_empty()
+        && v.len() <= 128
+        && v.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+fn validate_digest(v: &str, f: &'static str) -> Result<(), MatrixContractError> {
+    if v.strip_prefix("sha256:").is_some_and(|x| {
+        x.len() == 64
+            && x.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !(b'A'..=b'F').contains(&b))
+    }) {
+        Ok(())
+    } else {
+        Err(MatrixContractError::InvalidField(f))
+    }
+}
+fn validate_image_reference(v: &str) -> Result<(), MatrixContractError> {
+    let Some((n, d)) = v.rsplit_once('@') else {
+        return Err(MatrixContractError::InvalidField("image_reference"));
+    };
+    if n.is_empty() || n.contains('@') || n.chars().any(char::is_control) {
+        return Err(MatrixContractError::InvalidField("image_reference"));
+    }
+    validate_digest(d, "image_reference")
 }

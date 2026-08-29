@@ -44,6 +44,19 @@ Local commit: `refactor: add pure matrix plan core`.
 
 # Task 4B2 report: pure Matrix receipt/policy core
 
+## Task 4B1 parity completion (2026-08-29)
+
+RED fixture (exact pre-B1 HEAD `7bcaeb12d39cf36c5880f7063d9b90df7d88f4f7`): corrected parity used a valid resealed runtime-image mismatch and failed because old core omitted `policy.runtime_image`; invalid-policy and adapter tests also failed as intended. Active GREEN: all three new tests passed.
+
+Final gate counts: matrix 19/19, verification 21 passed plus 1 explicit ignored, receipt 11/11, independent 7/7, core 46/46, fmt check PASS, diff check PASS.
+
+- Core Matrix policy validation now enforces project/digest/image/freshness/platform constraints and complete runtime coverage, matching the root policy contract.
+- Core receipt verification now preserves root finding order and semantics for repository, commit, dirty state, configuration, runtime set/configuration/image/platform, required checks, and freshness.
+- The root adapter preserves the nominal core `VerificationError` directly (`Core::Verification(error) => Self::Verification(error)`).
+- `rtk env CARGO_TARGET_DIR=/private/tmp/ccp-independent-task4-b1 cargo test -p ccp-core --locked`: PASS (46 passed, 0 failed).
+- `rtk env CARGO_TARGET_DIR=/private/tmp/ccp-independent-task4-b1 cargo test --locked --test matrix_contract --test receipt_contract --test independent_verifier_contract`: PASS (34 passed, 0 failed; existing dead-code warnings only).
+- `rtk git diff --check`: PASS. `rtk cargo fmt --all` remains blocked by worktree `Operation not permitted` while writing `crates/ccp-core/src/matrix.rs`; no formatter changes were applied.
+
 Implemented the bounded receipt, policy, verification, historical digest, and
 schema slice in `ccp-core`, retaining root compatibility definitions for B3.
 

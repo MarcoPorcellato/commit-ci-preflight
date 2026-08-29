@@ -1342,9 +1342,7 @@ impl From<ccp_core::matrix::MatrixContractError> for MatrixError {
             Core::Parse(error) => Self::Parse(error),
             Core::Config(error) => Self::Config(error),
             Core::Receipt(error) => Self::Receipt(error),
-            Core::Verification(error) => {
-                Self::Verification(crate::verify::VerificationError::Matrix(error.to_string()))
-            }
+            Core::Verification(error) => Self::Verification(error),
             Core::UnsupportedSchemaVersion(value) => Self::UnsupportedSchemaVersion(value),
             Core::ConfigTooLarge => Self::ConfigTooLarge,
             Core::InvalidField(value) => Self::InvalidField(value),

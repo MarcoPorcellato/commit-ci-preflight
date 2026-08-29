@@ -3,6 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
+use ccp_core::errors::VerificationError;
 use ccp_core::matrix::MatrixContractError;
 use commit_ci_preflight::config::{
     ArtifactKind, NormalizedArtifactContract, NormalizedFixedEnvironment,
@@ -158,6 +159,91 @@ fn platforms() -> Vec<AcceptedPlatformV1> {
         host_arch: "aarch64".to_owned(),
         runtime_kind: "docker_compatible".to_owned(),
     }]
+}
+
+fn core_policy() -> ccp_core::matrix::MatrixVerificationPolicyV2 {
+    ccp_core::matrix::MatrixVerificationPolicyV2 {
+        schema_version: MATRIX_POLICY_SCHEMA_VERSION.to_owned(),
+        project: "example/project".to_owned(),
+        configuration_digest: DIGEST.to_owned(),
+        required_checks: vec![
+            ccp_core::matrix::MatrixRequiredCheckV2 {
+                id: "compat-py311".to_owned(),
+                runtime_id: "python311".to_owned(),
+            },
+            ccp_core::matrix::MatrixRequiredCheckV2 {
+                id: "repository-check".to_owned(),
+                runtime_id: "python312".to_owned(),
+            },
+        ],
+        max_age_seconds: 300,
+        runtimes: vec![
+            ccp_core::matrix::MatrixRuntimePolicyV2 {
+                id: "python311".to_owned(),
+                configuration_digest: DIGEST.to_owned(),
+                image_reference: IMAGE_311.to_owned(),
+                platforms: platforms(),
+            },
+            ccp_core::matrix::MatrixRuntimePolicyV2 {
+                id: "python312".to_owned(),
+                configuration_digest: DIGEST.to_owned(),
+                image_reference: IMAGE_312.to_owned(),
+                platforms: platforms(),
+            },
+        ],
+    }
+}
+
+#[test]
+fn root_and_core_reject_invalid_policy() {
+    let invalid = LEGACY_COMPATIBLE_POLICY.replace("@sha256:", "");
+    assert!(MatrixVerificationPolicyV2::parse(&invalid).is_err());
+    assert!(ccp_core::matrix::MatrixVerificationPolicyV2::parse(&invalid).is_err());
+}
+
+#[test]
+fn root_and_core_matrix_reports_are_identical() {
+    let unexpected_digest =
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let unexpected_image = format!("example.invalid/unexpected@{unexpected_digest}");
+    let mut envelope = receipt();
+    let mut first = envelope.receipt.runtime_receipts[0].receipt.receipt.clone();
+    first.platform.image_reference = unexpected_image;
+    first.platform.image_digest = unexpected_digest.to_owned();
+    envelope.receipt.runtime_receipts[0].receipt =
+        ReceiptEnvelopeV1::seal(first).expect("reseal inner receipt");
+    let envelope = MatrixReceiptEnvelopeV2::seal(envelope.receipt).expect("reseal matrix receipt");
+    let bytes = envelope.canonical_bytes().expect("receipt bytes");
+    let root = verify_matrix_receipt_document(&bytes, &policy(), COMMIT, "2026-08-16T10:01:00Z")
+        .expect("root report");
+    let core = ccp_core::matrix::verify_matrix_receipt_document(
+        &bytes,
+        &core_policy(),
+        COMMIT,
+        "2026-08-16T10:01:00Z",
+    )
+    .expect("core report");
+    assert_eq!(
+        serde_json::to_vec(&root).unwrap(),
+        serde_json::to_vec(&core).unwrap()
+    );
+}
+
+#[test]
+fn core_verification_error_adapter_preserves_variant() {
+    let core = MatrixContractError::Verification(VerificationError::InvalidExpectedCommit);
+    let root: MatrixError = core.into();
+    match root {
+        MatrixError::Verification(error) => {
+            assert!(matches!(error, VerificationError::InvalidExpectedCommit));
+            assert_eq!(
+                error.to_string(),
+                "expected commit must be lowercase Git SHA-1 or SHA-256"
+            );
+            assert!(std::error::Error::source(&error).is_none());
+        }
+        other => panic!("unexpected adapter result: {other}"),
+    }
 }
 
 #[test]
