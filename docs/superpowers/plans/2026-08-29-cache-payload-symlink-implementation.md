@@ -1242,15 +1242,16 @@ Run:
 ```console
 git status --short --branch
 git rev-parse HEAD
+cargo build --locked --bin commit-ci-preflight
 shasum -a 256 target/debug/commit-ci-preflight
 git log -1 --format='%H%n%s'
 ```
 
-If the deterministic suite did not build `target/debug/commit-ci-preflight`,
-run `cargo build --locked --bin commit-ci-preflight` and then repeat only the
-hash command. Record the exact HEAD, binary path, binary SHA-256, platform,
-Rust version, gate commands, and results in the private operator handoff. Do
-not commit absolute paths or host identity.
+The explicit build is mandatory even when `target/debug/commit-ci-preflight`
+already exists, so the recorded hash cannot name a stale binary from an older
+HEAD. Record the exact HEAD, binary path, binary SHA-256, platform, Rust
+version, gate commands, and results in the private operator handoff. Do not
+commit absolute paths or host identity.
 
 - [ ] **Step 8: Stop at the native qualification boundary**
 
