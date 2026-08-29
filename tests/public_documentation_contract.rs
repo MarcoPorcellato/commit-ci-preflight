@@ -140,8 +140,12 @@ fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
     if bytes.len() < SIGNATURE.len() || &bytes[..8] != SIGNATURE {
         return Err("invalid PNG signature".into());
     }
-    if bytes.len() < 24 || &bytes[12..16] != b"IHDR" {
+    if bytes.len() < 16 || &bytes[12..16] != b"IHDR" {
         return Err("missing IHDR chunk".into());
+    }
+    let chunk_length = u32::from_be_bytes(bytes[8..12].try_into().expect("chunk length"));
+    if chunk_length != 13 || bytes.len() < 8 + 4 + 4 + 13 + 4 {
+        return Err("truncated IHDR chunk".into());
     }
     let width = u32::from_be_bytes(bytes[16..20].try_into().expect("width"));
     let height = u32::from_be_bytes(bytes[20..24].try_into().expect("height"));
@@ -183,6 +187,11 @@ fn png_dimensions_rejects_invalid_or_truncated_bytes() {
     assert_eq!(
         png_dimensions(b"\x89PNG\r\n\x1a\n"),
         Err("missing IHDR chunk".into())
+    );
+    let truncated_ihdr = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\x00\x00\x00\x01\x00\x00\x00\x01";
+    assert_eq!(
+        png_dimensions(truncated_ihdr),
+        Err("truncated IHDR chunk".into())
     );
 }
 
