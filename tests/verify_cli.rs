@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -24,13 +25,35 @@ const LEGACY_MATRIX_POLICY: &str = "tests/fixtures/policy-v2-legacy-compatible.t
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
 
-fn verifier_parity(args: &[&str]) {
+fn build_verifier_candidate() -> PathBuf {
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "build",
+            "--locked",
+            "-p",
+            "ccp-verifier",
+            "--bin",
+            "ccp-verifier",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("build independent verifier candidate");
+    assert!(
+        output.status.success(),
+        "ccp-verifier candidate build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path =
+        PathBuf::from(env!("CARGO_BIN_EXE_commit-ci-preflight")).with_file_name("ccp-verifier");
+    assert!(path.is_file(), "Cargo did not produce {}", path.display());
+    path
+}
+
+fn verifier_parity(verifier_path: &Path, args: &[&str]) {
     let root = Command::new(env!("CARGO_BIN_EXE_commit-ci-preflight"))
         .args(args)
         .output()
         .expect("root verify");
-    let verifier_path =
-        PathBuf::from(env!("CARGO_BIN_EXE_commit-ci-preflight")).with_file_name("ccp-verifier");
     let verifier = Command::new(verifier_path)
         .args(args)
         .output()
@@ -49,89 +72,134 @@ fn verifier_parity(args: &[&str]) {
 
 #[test]
 fn independent_verifier_matches_root_for_representative_outcomes() {
-    verifier_parity(&[
-        "verify",
-        "--receipt",
-        RECEIPT,
-        "--policy",
-        POLICY,
-        "--expected-commit",
-        COMMIT,
-        "--evaluated-at-utc",
-        EVALUATED_AT,
-        "--json",
-    ]);
-    verifier_parity(&[
-        "verify",
-        "--receipt",
-        RECEIPT,
-        "--policy",
-        POLICY,
-        "--expected-commit",
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "--evaluated-at-utc",
-        EVALUATED_AT,
-        "--json",
-    ]);
-    verifier_parity(&[
-        "verify",
-        "--receipt",
-        "tests/fixtures/does-not-exist.json",
-        "--policy",
-        POLICY,
-        "--expected-commit",
-        COMMIT,
-        "--evaluated-at-utc",
-        EVALUATED_AT,
-        "--json",
-    ]);
-    verifier_parity(&[
-        "verify",
-        "--receipt",
-        RECEIPT,
-        "--policy",
-        POLICY,
-        "--expected-commit",
-        "HEAD",
-        "--evaluated-at-utc",
-        EVALUATED_AT,
-    ]);
-    verifier_parity(&[
-        "verify",
-        "--receipt",
-        RECEIPT_V2,
-        "--policy",
-        TRUSTED_PLAN_POLICY,
-        "--expected-commit",
-        COMMIT,
-        "--evaluated-at-utc",
-        EVALUATED_AT,
-        "--json",
-    ]);
-    verifier_parity(&[
-        "verify",
-        "--receipt",
-        "tests/fixtures/does-not-exist.json",
-        "--policy",
-        LEGACY_MATRIX_POLICY,
-        "--expected-commit",
-        COMMIT,
-        "--evaluated-at-utc",
-        EVALUATED_AT,
-        "--json",
-    ]);
-    verifier_parity(&[
-        "verify",
-        "--receipt",
-        "tests/fixtures/does-not-exist.json",
-        "--policy",
-        INVALID_TRUSTED_PLAN_POLICY,
-        "--expected-commit",
-        COMMIT,
-        "--evaluated-at-utc",
-        EVALUATED_AT,
-        "--json",
-    ]);
+    let verifier = build_verifier_candidate();
+    verifier_parity(
+        &verifier,
+        &[
+            "verify",
+            "--receipt",
+            RECEIPT,
+            "--policy",
+            POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ],
+    );
+    verifier_parity(
+        &verifier,
+        &[
+            "verify",
+            "--receipt",
+            RECEIPT,
+            "--policy",
+            POLICY,
+            "--expected-commit",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ],
+    );
+    verifier_parity(
+        &verifier,
+        &[
+            "verify",
+            "--receipt",
+            "tests/fixtures/does-not-exist.json",
+            "--policy",
+            POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ],
+    );
+    verifier_parity(
+        &verifier,
+        &[
+            "verify",
+            "--receipt",
+            RECEIPT,
+            "--policy",
+            POLICY,
+            "--expected-commit",
+            "HEAD",
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+        ],
+    );
+    verifier_parity(
+        &verifier,
+        &[
+            "verify",
+            "--receipt",
+            RECEIPT_V2,
+            "--policy",
+            TRUSTED_PLAN_POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ],
+    );
+    verifier_parity(
+        &verifier,
+        &[
+            "verify",
+            "--receipt",
+            "tests/fixtures/does-not-exist.json",
+            "--policy",
+            LEGACY_MATRIX_POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ],
+    );
+    verifier_parity(
+        &verifier,
+        &[
+            "verify",
+            "--receipt",
+            "tests/fixtures/does-not-exist.json",
+            "--policy",
+            INVALID_TRUSTED_PLAN_POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ],
+    );
+
+    let malformed = std::env::temp_dir().join(format!(
+        "ccp-verifier-malformed-receipt-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&malformed, b"{").expect("write malformed receipt fixture");
+    let malformed_path = malformed.to_str().expect("temporary path UTF-8");
+    verifier_parity(
+        &verifier,
+        &[
+            "verify",
+            "--receipt",
+            malformed_path,
+            "--policy",
+            POLICY,
+            "--expected-commit",
+            COMMIT,
+            "--evaluated-at-utc",
+            EVALUATED_AT,
+            "--json",
+        ],
+    );
+    std::fs::remove_file(&malformed).expect("remove malformed receipt fixture");
 }
 
 fn verify_command(expected_commit: &str) -> Command {

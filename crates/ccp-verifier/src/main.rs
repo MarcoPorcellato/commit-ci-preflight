@@ -71,12 +71,11 @@ fn main() {
 
 fn verify(args: VerifyArgs) -> Result<(), (i32, String)> {
     ccp_core::verify::validate_verification_policy_path(&args.policy)
-        .map_err(|error| (2, error.to_string()))?;
+        .map_err(|error| (verification_error_exit_code(&error), error.to_string()))?;
     let evaluated = match args.evaluated_at_utc {
         Some(value) => value,
-        None => {
-            ccp_core::verify::system_evaluated_at_utc().map_err(|error| (2, error.to_string()))?
-        }
+        None => ccp_core::verify::system_evaluated_at_utc()
+            .map_err(|error| (verification_error_exit_code(&error), error.to_string()))?,
     };
     let bytes = std::fs::read(&args.receipt);
     let report = match bytes {
@@ -86,9 +85,9 @@ fn verify(args: VerifyArgs) -> Result<(), (i32, String)> {
             &args.expected_commit,
             &evaluated,
         )
-        .map_err(|error| (2, error.to_string()))?,
+        .map_err(|error| (verification_error_exit_code(&error), error.to_string()))?,
         Err(_) => ccp_core::verify::receipt_input_failure_report(&args.expected_commit, &evaluated)
-            .map_err(|error| (70, error.to_string()))?,
+            .map_err(|error| (verification_error_exit_code(&error), error.to_string()))?,
     };
     let output = if args.json {
         let mut bytes = report
@@ -115,6 +114,41 @@ fn verify(args: VerifyArgs) -> Result<(), (i32, String)> {
         Ok(())
     } else {
         Err((3, "verification completed with Fail".to_owned()))
+    }
+}
+
+fn verification_error_exit_code(error: &ccp_core::verify::VerificationError) -> i32 {
+    match error {
+        ccp_core::verify::VerificationError::Receipt(_) => 70,
+        ccp_core::verify::VerificationError::Policy(_)
+        | ccp_core::verify::VerificationError::PolicyDocument(_)
+        | ccp_core::verify::VerificationError::TrustedPlan(_)
+        | ccp_core::verify::VerificationError::TrustedPolicyPathRequired
+        | ccp_core::verify::VerificationError::InvalidExpectedCommit
+        | ccp_core::verify::VerificationError::InvalidEvaluationTime
+        | ccp_core::verify::VerificationError::Matrix(_) => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn verification_exit_code_preserves_root_mapping() {
+        use ccp_core::verify::VerificationError;
+        assert_eq!(
+            super::verification_error_exit_code(&VerificationError::Receipt(
+                ccp_core::errors::ReceiptError::EmptyField("x"),
+            )),
+            70
+        );
+        assert_eq!(
+            super::verification_error_exit_code(&VerificationError::InvalidExpectedCommit),
+            2
+        );
+        assert_eq!(
+            super::verification_error_exit_code(&VerificationError::Matrix("x".into())),
+            2
+        );
     }
 }
 
