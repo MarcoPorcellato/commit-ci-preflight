@@ -107,7 +107,7 @@ automatic eviction.
 
 ## Control plane and opaque payload links
 
-The cache has a strict control plane and an opaque payload plane. control-plane and payload-root links still fail closed; permitted payload-descendant links remain opaque. Inventory counts a link's stored target
+The cache has a strict control plane and an opaque payload plane; control-plane and payload-root links still fail closed, while permitted payload-descendant links remain opaque. Inventory counts a link's stored target
 length as bytes, never target content, never follows a payload link target on
 the host, and retains the 100,000-node bound. Payload inspection covers
 relative, absolute, broken, recursive, and outside-root links. CCP never follows a payload link target on the host.
