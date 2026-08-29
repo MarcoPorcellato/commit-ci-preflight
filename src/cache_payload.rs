@@ -1,4 +1,4 @@
-use crate::cache::CacheError;
+use crate::cache::{CacheError, PayloadLinkPolicy};
 #[cfg(test)]
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -16,6 +16,15 @@ pub(crate) fn measure_payload_tree(
     nodes: &mut usize,
     node_limit: usize,
 ) -> Result<PayloadTreeStats, CacheError> {
+    measure_payload_tree_with_policy(root, nodes, node_limit, PayloadLinkPolicy::current())
+}
+
+fn measure_payload_tree_with_policy(
+    root: &Path,
+    nodes: &mut usize,
+    node_limit: usize,
+    payload_link_policy: PayloadLinkPolicy,
+) -> Result<PayloadTreeStats, CacheError> {
     let metadata = traced_symlink_metadata(root).map_err(CacheError::Io)?;
     if metadata.file_type().is_symlink() {
         return Err(CacheError::SymlinkInManagedRoot(root.to_path_buf()));
@@ -23,7 +32,7 @@ pub(crate) fn measure_payload_tree(
     if !metadata.is_dir() {
         return Err(CacheError::UnexpectedEntry(root.to_path_buf()));
     }
-    walk_payload(root, nodes, node_limit)
+    walk_payload_with_policy(root, nodes, node_limit, payload_link_policy)
 }
 
 pub(crate) fn validate_payload_tree(
@@ -34,11 +43,37 @@ pub(crate) fn validate_payload_tree(
     measure_payload_tree(root, nodes, node_limit).map(|_| ())
 }
 
+pub(crate) fn validate_payload_tree_with_policy(
+    root: &Path,
+    nodes: &mut usize,
+    node_limit: usize,
+    payload_link_policy: PayloadLinkPolicy,
+) -> Result<(), CacheError> {
+    measure_payload_tree_with_policy(root, nodes, node_limit, payload_link_policy).map(|_| ())
+}
+
+#[cfg(test)]
 pub(crate) fn copy_payload_tree(
     source: &Path,
     destination: &Path,
     nodes: &mut usize,
     node_limit: usize,
+) -> Result<(), CacheError> {
+    copy_payload_tree_with_policy(
+        source,
+        destination,
+        nodes,
+        node_limit,
+        PayloadLinkPolicy::current(),
+    )
+}
+
+pub(crate) fn copy_payload_tree_with_policy(
+    source: &Path,
+    destination: &Path,
+    nodes: &mut usize,
+    node_limit: usize,
+    payload_link_policy: PayloadLinkPolicy,
 ) -> Result<(), CacheError> {
     let metadata = traced_symlink_metadata(source).map_err(CacheError::Io)?;
     if metadata.file_type().is_symlink() {
@@ -52,7 +87,7 @@ pub(crate) fn copy_payload_tree(
         Err(error) => return Err(CacheError::Io(error)),
         Ok(_) => return Err(CacheError::UnexpectedEntry(destination.to_path_buf())),
     }
-    copy_payload_node(source, destination, nodes, node_limit)
+    copy_payload_node(source, destination, nodes, node_limit, payload_link_policy)
 }
 
 fn copy_payload_node(
@@ -60,6 +95,7 @@ fn copy_payload_node(
     destination: &Path,
     nodes: &mut usize,
     node_limit: usize,
+    payload_link_policy: PayloadLinkPolicy,
 ) -> Result<(), CacheError> {
     *nodes = nodes
         .checked_add(1)
@@ -70,7 +106,7 @@ fn copy_payload_node(
 
     let metadata = traced_symlink_metadata(source).map_err(CacheError::Io)?;
     if metadata.file_type().is_symlink() {
-        return recreate_payload_link(source, destination);
+        return recreate_payload_link(source, destination, payload_link_policy);
     }
     if metadata.is_file() {
         traced_copy_file(source, destination).map_err(CacheError::Io)?;
@@ -92,15 +128,17 @@ fn copy_payload_node(
             &destination.join(entry.file_name()),
             nodes,
             node_limit,
+            payload_link_policy,
         )?;
     }
     Ok(())
 }
 
-fn walk_payload(
+fn walk_payload_with_policy(
     path: &Path,
     nodes: &mut usize,
     node_limit: usize,
+    payload_link_policy: PayloadLinkPolicy,
 ) -> Result<PayloadTreeStats, CacheError> {
     *nodes = nodes
         .checked_add(1)
@@ -111,7 +149,7 @@ fn walk_payload(
 
     let metadata = traced_symlink_metadata(path).map_err(CacheError::Io)?;
     if metadata.file_type().is_symlink() {
-        return measure_symlink(path);
+        return measure_symlink(path, payload_link_policy);
     }
     if metadata.is_file() {
         return Ok(PayloadTreeStats {
@@ -131,7 +169,8 @@ fn walk_payload(
 
     let mut stats = PayloadTreeStats { bytes: 0, files: 0 };
     for entry in entries {
-        let child = walk_payload(&entry.path(), nodes, node_limit)?;
+        let child =
+            walk_payload_with_policy(&entry.path(), nodes, node_limit, payload_link_policy)?;
         stats.bytes = stats
             .bytes
             .checked_add(child.bytes)
@@ -145,7 +184,13 @@ fn walk_payload(
 }
 
 #[cfg(unix)]
-fn measure_symlink(path: &Path) -> Result<PayloadTreeStats, CacheError> {
+fn measure_symlink(
+    path: &Path,
+    payload_link_policy: PayloadLinkPolicy,
+) -> Result<PayloadTreeStats, CacheError> {
+    if payload_link_policy == PayloadLinkPolicy::Reject {
+        return Err(CacheError::PayloadSymlinkUnsupported(path.to_path_buf()));
+    }
     use std::os::unix::ffi::OsStrExt;
 
     let target = traced_read_link(path).map_err(|source| CacheError::PayloadSymlinkRead {
@@ -159,7 +204,14 @@ fn measure_symlink(path: &Path) -> Result<PayloadTreeStats, CacheError> {
 }
 
 #[cfg(unix)]
-fn recreate_payload_link(source: &Path, destination: &Path) -> Result<(), CacheError> {
+fn recreate_payload_link(
+    source: &Path,
+    destination: &Path,
+    payload_link_policy: PayloadLinkPolicy,
+) -> Result<(), CacheError> {
+    if payload_link_policy == PayloadLinkPolicy::Reject {
+        return Err(CacheError::PayloadSymlinkUnsupported(source.to_path_buf()));
+    }
     let target =
         traced_read_link(source).map_err(|source_error| CacheError::PayloadSymlinkRead {
             path: source.to_path_buf(),
@@ -179,12 +231,19 @@ fn recreate_payload_link(source: &Path, destination: &Path) -> Result<(), CacheE
 }
 
 #[cfg(not(unix))]
-fn recreate_payload_link(source: &Path, _destination: &Path) -> Result<(), CacheError> {
+fn recreate_payload_link(
+    source: &Path,
+    _destination: &Path,
+    _payload_link_policy: PayloadLinkPolicy,
+) -> Result<(), CacheError> {
     Err(CacheError::PayloadSymlinkUnsupported(source.to_path_buf()))
 }
 
 #[cfg(not(unix))]
-fn measure_symlink(path: &Path) -> Result<PayloadTreeStats, CacheError> {
+fn measure_symlink(
+    path: &Path,
+    _payload_link_policy: PayloadLinkPolicy,
+) -> Result<PayloadTreeStats, CacheError> {
     Err(CacheError::PayloadSymlinkUnsupported(path.to_path_buf()))
 }
 
