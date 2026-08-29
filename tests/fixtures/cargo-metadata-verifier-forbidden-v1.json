@@ -1,0 +1,10 @@
+{
+  "packages": [
+    {"id":"path+file:///workspace#ccp-verifier@0.1.0","name":"ccp-verifier","source":null},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#ctrlc@3.5.2","name":"ctrlc","source":"registry+https://github.com/rust-lang/crates.io-index"}
+  ],
+  "resolve":{"nodes":[
+    {"id":"path+file:///workspace#ccp-verifier@0.1.0","deps":[{"pkg":"registry+https://github.com/rust-lang/crates.io-index#ctrlc@3.5.2","dep_kinds":[{"kind":null}]}]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#ctrlc@3.5.2","deps":[]}
+  ]}
+}

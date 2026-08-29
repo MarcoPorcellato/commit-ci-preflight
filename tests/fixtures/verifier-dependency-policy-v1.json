@@ -1,0 +1,7 @@
+{
+  "verifier": "ccp-verifier",
+  "allowed_direct": ["ccp-core", "clap"],
+  "forbidden_names": ["commit-ci-preflight", "ctrlc", "fs2", "process-wrap", "nix", "saphyr", "saphyr-parser"],
+  "forbidden_ids": ["path+file:///workspace#commit-ci-preflight"],
+  "allowed_source_prefixes": ["registry+https://github.com/rust-lang/crates.io-index", "path+"]
+}

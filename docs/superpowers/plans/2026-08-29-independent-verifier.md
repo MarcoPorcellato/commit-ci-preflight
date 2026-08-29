@@ -461,7 +461,7 @@
 - [ ] **Step 3: Run graph proof and correct only real leakage**
 
   ```console
-  rtk cargo tree --locked -p ccp-verifier --edges normal,no-dev,no-build
+  rtk cargo tree --locked -p ccp-verifier --edges normal
   rtk cargo tree --locked -p ccp-verifier --depth 1
   rtk cargo metadata --locked --format-version 1
   rtk cargo test --locked --test independent_verifier_contract

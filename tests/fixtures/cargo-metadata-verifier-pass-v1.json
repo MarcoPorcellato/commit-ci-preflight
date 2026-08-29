@@ -1,0 +1,15 @@
+{
+  "packages": [
+    {"id":"path+file:///workspace#ccp-verifier@0.1.0","name":"ccp-verifier","source":null},
+    {"id":"path+file:///workspace#ccp-core@0.1.0","name":"ccp-core","source":null},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#clap@4.6.6","name":"clap","source":"registry+https://github.com/rust-lang/crates.io-index"},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0","name":"serde","source":"registry+https://github.com/rust-lang/crates.io-index"},
+    {"id":"path+file:///workspace#commit-ci-preflight@0.1.0","name":"commit-ci-preflight","source":null}
+  ],
+  "resolve":{"nodes":[
+    {"id":"path+file:///workspace#ccp-verifier@0.1.0","deps":[{"pkg":"path+file:///workspace#ccp-core@0.1.0","dep_kinds":[{"kind":null}]},{"pkg":"registry+https://github.com/rust-lang/crates.io-index#clap@4.6.6","dep_kinds":[{"kind":null}]},{"pkg":"path+file:///workspace#commit-ci-preflight@0.1.0","dep_kinds":[{"kind":"dev"}]}]},
+    {"id":"path+file:///workspace#ccp-core@0.1.0","deps":[{"pkg":"registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0","dep_kinds":[{"kind":null,"target":"cfg(any(target_os = \"linux\", target_os = \"macos\"))"}]}]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#clap@4.6.6","deps":[]},
+    {"id":"registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0","deps":[]}
+  ]}
+}

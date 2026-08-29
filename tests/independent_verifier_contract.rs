@@ -504,3 +504,187 @@ fn policy_document_error_source_and_display_are_compatible() {
     );
     assert!(core_v2.source().is_none());
 }
+
+#[derive(serde::Deserialize)]
+struct DependencyPolicy {
+    verifier: String,
+    allowed_direct: BTreeSet<String>,
+    forbidden_names: BTreeSet<String>,
+    forbidden_ids: BTreeSet<String>,
+    allowed_source_prefixes: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct Metadata {
+    packages: Vec<Package>,
+    resolve: Resolve,
+}
+#[derive(serde::Deserialize)]
+struct Package {
+    id: String,
+    name: String,
+    source: Option<String>,
+}
+#[derive(serde::Deserialize)]
+struct Resolve {
+    nodes: Vec<Node>,
+}
+#[derive(serde::Deserialize)]
+struct Node {
+    id: String,
+    deps: Vec<Dep>,
+}
+#[derive(serde::Deserialize)]
+struct Dep {
+    pkg: String,
+    dep_kinds: Vec<DepKind>,
+}
+#[derive(serde::Deserialize)]
+struct DepKind {
+    kind: Option<String>,
+}
+
+fn assert_dependency_graph(metadata: &str, policy: &DependencyPolicy) {
+    let graph: Metadata = serde_json::from_str(metadata).unwrap();
+    let package = graph
+        .packages
+        .iter()
+        .find(|p| p.name == policy.verifier)
+        .unwrap();
+    let nodes: std::collections::HashMap<_, _> = graph
+        .resolve
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut direct = BTreeSet::new();
+    let mut stack = vec![package.id.as_str()];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        assert!(id != "path+file:///workspace#commit-ci-preflight");
+        let node = nodes.get(id).unwrap();
+        for dep in &node.deps {
+            if !dep.dep_kinds.iter().any(|k| k.kind.is_none()) {
+                continue;
+            }
+            let target = graph.packages.iter().find(|p| p.id == dep.pkg).unwrap();
+            assert!(
+                !policy.forbidden_names.contains(&target.name),
+                "forbidden dependency {}",
+                target.name
+            );
+            assert!(
+                !policy.forbidden_ids.contains(&target.id),
+                "forbidden dependency id {}",
+                target.id
+            );
+            if id == package.id {
+                direct.insert(target.name.clone());
+                assert!(
+                    policy.allowed_direct.contains(&target.name),
+                    "unexpected direct dependency {}",
+                    target.name
+                );
+            }
+            if let Some(source) = &target.source {
+                assert!(
+                    policy
+                        .allowed_source_prefixes
+                        .iter()
+                        .any(|p| source.starts_with(p)),
+                    "invalid source {source}"
+                );
+            }
+            stack.push(target.id.as_str());
+        }
+    }
+    assert_eq!(
+        direct, policy.allowed_direct,
+        "direct dependency set mismatch"
+    );
+}
+
+#[test]
+fn verifier_dependency_policy_rejects_forbidden_and_accepts_normal_graph() {
+    let policy: DependencyPolicy =
+        serde_json::from_str(include_str!("fixtures/verifier-dependency-policy-v1.json")).unwrap();
+    assert_dependency_graph(
+        include_str!("fixtures/cargo-metadata-verifier-pass-v1.json"),
+        &policy,
+    );
+    let forbidden = std::panic::catch_unwind(|| {
+        assert_dependency_graph(
+            include_str!("fixtures/cargo-metadata-verifier-forbidden-v1.json"),
+            &policy,
+        )
+    });
+    assert!(forbidden.is_err());
+}
+
+#[test]
+fn verifier_dependency_policy_controls_fail_independently() {
+    let policy: DependencyPolicy =
+        serde_json::from_str(include_str!("fixtures/verifier-dependency-policy-v1.json")).unwrap();
+    let forbidden_id = DependencyPolicy {
+        forbidden_names: BTreeSet::new(),
+        forbidden_ids: [
+            "registry+https://github.com/rust-lang/crates.io-index#ctrlc@3.5.2".to_owned(),
+        ]
+        .into_iter()
+        .collect(),
+        ..policy
+    };
+    let id_failure = std::panic::catch_unwind(|| {
+        assert_dependency_graph(
+            include_str!("fixtures/cargo-metadata-verifier-forbidden-v1.json"),
+            &forbidden_id,
+        )
+    });
+    let id_message = id_failure.unwrap_err().downcast::<String>().unwrap();
+    assert!(id_message.contains("forbidden dependency id"));
+
+    let invalid_source = DependencyPolicy {
+        allowed_source_prefixes: vec!["path+".to_owned()],
+        ..serde_json::from_str(include_str!("fixtures/verifier-dependency-policy-v1.json")).unwrap()
+    };
+    let source_failure = std::panic::catch_unwind(|| {
+        assert_dependency_graph(
+            include_str!("fixtures/cargo-metadata-verifier-pass-v1.json"),
+            &invalid_source,
+        )
+    });
+    let source_message = source_failure.unwrap_err().downcast::<String>().unwrap();
+    assert!(source_message.contains("invalid source"));
+
+    let unexpected_direct = DependencyPolicy {
+        allowed_direct: ["ccp-core".to_owned()].into_iter().collect(),
+        ..serde_json::from_str(include_str!("fixtures/verifier-dependency-policy-v1.json")).unwrap()
+    };
+    let direct_failure = std::panic::catch_unwind(|| {
+        assert_dependency_graph(
+            include_str!("fixtures/cargo-metadata-verifier-pass-v1.json"),
+            &unexpected_direct,
+        )
+    });
+    let direct_message = direct_failure.unwrap_err().downcast::<String>().unwrap();
+    assert!(direct_message.contains("unexpected direct dependency"));
+}
+
+#[test]
+fn verifier_dependency_policy_checks_live_locked_metadata() {
+    let policy: DependencyPolicy =
+        serde_json::from_str(include_str!("fixtures/verifier-dependency-policy-v1.json")).unwrap();
+    let output = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_dependency_graph(std::str::from_utf8(&output.stdout).unwrap(), &policy);
+}
