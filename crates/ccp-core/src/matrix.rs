@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::canonical::{canonical_digest, canonical_json};
 use crate::config::{
-    CacheConfig, CheckConfig, ConfigError, ConfigV1, EnvironmentConfig, NormalizedCache,
-    NormalizedCheck, NormalizedEnvironment, NormalizedReceipt, NormalizedRuntime, ReceiptConfig,
-    RuntimeConfig, RuntimeKind, validate_identifier,
+    CacheConfig, CheckConfig, ConfigError, ConfigV1, EnvironmentConfig, ExecutionPlanEnvelopeV1,
+    ExecutionPlanV1, NormalizedCache, NormalizedCheck, NormalizedEnvironment, NormalizedReceipt,
+    NormalizedRuntime, ReceiptConfig, RuntimeConfig, RuntimeKind, validate_identifier,
 };
 use crate::errors::{EvidenceStatus, ReceiptError};
 use crate::verification_model::{
@@ -329,6 +329,52 @@ impl MatrixPlanEnvelopeV2 {
         canonical_json(self).map_err(MatrixContractError::Receipt)
     }
 
+    /// Project each runtime into the v1 execution envelope consumed by the
+    /// runner.  This is intentionally a pure operation: the independent
+    /// verifier can expose the same plan contract without linking execution.
+    pub fn runtime_envelopes(
+        &self,
+    ) -> Result<Vec<(String, ExecutionPlanEnvelopeV1)>, MatrixContractError> {
+        self.validate_profile_binding()?;
+        self.plan
+            .runtimes
+            .iter()
+            .map(|runtime| {
+                let plan = ExecutionPlanV1 {
+                    schema_version: "1.0".to_owned(),
+                    project: self.plan.project.clone(),
+                    runtime: runtime.runtime.clone(),
+                    receipt: self.plan.receipt.clone(),
+                    environment: self.plan.environment.clone(),
+                    caches: self.plan.caches.clone(),
+                    storage: None,
+                    checks: runtime.checks.clone(),
+                };
+                let plan_digest = match self.profile {
+                    MatrixPlanProfile::CurrentV2 => {
+                        canonical_digest(&plan).map_err(MatrixContractError::Receipt)?
+                    }
+                    MatrixPlanProfile::LegacyV1 => {
+                        self.runtime_configuration_digest(&runtime.id)?.to_owned()
+                    }
+                };
+                if self.profile == MatrixPlanProfile::CurrentV2
+                    && plan_digest != runtime.configuration_digest
+                {
+                    return Err(MatrixContractError::PlanDigestMismatch);
+                }
+                Ok((
+                    runtime.id.clone(),
+                    ExecutionPlanEnvelopeV1 {
+                        plan_digest,
+                        plan,
+                        fixed_environment: BTreeMap::new(),
+                    },
+                ))
+            })
+            .collect()
+    }
+
     pub fn legacy_digest_basis_value(
         &self,
     ) -> Result<Option<serde_json::Value>, MatrixContractError> {
@@ -346,7 +392,9 @@ impl MatrixPlanEnvelopeV2 {
                     .legacy_basis
                     .as_ref()
                     .ok_or(MatrixContractError::PlanDigestMismatch)?;
-                if basis.outer_digest()? != self.plan_digest {
+                let projected = crate::matrix_legacy::project_legacy_basis(&self.plan)
+                    .map_err(MatrixContractError::from)?;
+                if &projected != basis || projected.outer_digest()? != self.plan_digest {
                     return Err(MatrixContractError::PlanDigestMismatch);
                 }
                 for runtime in &self.plan.runtimes {

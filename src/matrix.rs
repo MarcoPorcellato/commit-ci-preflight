@@ -1729,3 +1729,32 @@ impl fmt::Display for MatrixError {
 }
 
 impl std::error::Error for MatrixError {}
+
+impl From<ccp_core::matrix::MatrixContractError> for MatrixError {
+    fn from(error: ccp_core::matrix::MatrixContractError) -> Self {
+        use ccp_core::matrix::MatrixContractError as Core;
+        match error {
+            Core::Io(error) => Self::Io(error),
+            Core::Json(error) => Self::Json(error),
+            Core::Parse(error) => Self::Parse(error),
+            Core::Config(error) => Self::Config(error),
+            Core::Receipt(error) => Self::Receipt(error),
+            Core::Verification(error) => {
+                Self::Verification(crate::verify::VerificationError::Matrix(error.to_string()))
+            }
+            Core::UnsupportedSchemaVersion(value) => Self::UnsupportedSchemaVersion(value),
+            Core::ConfigTooLarge => Self::ConfigTooLarge,
+            Core::InvalidField(value) => Self::InvalidField(value),
+            Core::DuplicateValue(value) => Self::DuplicateValue(value),
+            Core::UnknownRuntime(value) => Self::UnknownRuntime(value),
+            Core::RuntimeWithoutRequiredCheck(value) => Self::RuntimeWithoutRequiredCheck(value),
+            Core::CrossRuntimeDependency { check, dependency } => {
+                Self::CrossRuntimeDependency { check, dependency }
+            }
+            Core::PlanDigestMismatch => Self::PlanDigestMismatch,
+            Core::InvalidReceipt => Self::InvalidReceipt,
+            Core::ReceiptIdMismatch => Self::ReceiptIdMismatch,
+            Core::InvalidEvaluationTime => Self::InvalidEvaluationTime,
+        }
+    }
+}
