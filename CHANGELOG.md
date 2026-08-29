@@ -9,9 +9,9 @@ Semantic Versioning after its first public release.
 
 ### Added
 
-- Added a structured adoption-help issue form and a 1280 × 640 social-preview
-  PNG upload candidate. Remote issue-form activation and preview upload remain
-  owner-only follow-up gates.
+- Added the adoption-help issue-form source and a 1280 × 640 social-preview PNG
+  upload candidate. GitHub form rendering/live chooser remains unverified until
+  the remote gate; preview upload is owner-only and pending.
 
 - Added a benefit-led visitor journey, bounded PR #71 case study, and public
   support routing for adoption, defects, security reports, and proposals.

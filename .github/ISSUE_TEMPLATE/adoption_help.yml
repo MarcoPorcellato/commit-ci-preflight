@@ -9,18 +9,26 @@ body:
       value: |
         Use this form for setup, fit, or first-run questions. This is not an evidence report: do not attach private receipts, raw logs, secrets, or customer data.
   - type: input
-    id: runtime
+    id: ccp_version
     attributes:
-      label: Runtime and version
-      description: Which CCP version and runtime (for example, macOS-v4) are you using?
-      placeholder: commit-ci-preflight 0.1.0, macOS-v4
+      label: CCP version
+      description: Which commit-ci-preflight version are you using?
+      placeholder: commit-ci-preflight 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: project_runtime
+    attributes:
+      label: Project runtime
+      description: Which language runtime, toolchain, or interpreter does the repository use?
+      placeholder: Rust 1.96 with Cargo
     validations:
       required: true
   - type: input
     id: platform
     attributes:
       label: Platform
-      description: Include OS, architecture, and relevant container runtime.
+      description: Include OS, architecture, and relevant container runtime; policy/resource profiles are separate from the project runtime.
       placeholder: macOS 15, Apple Silicon, Docker Desktop
     validations:
       required: true

@@ -240,6 +240,8 @@ fn issue_template_yaml_is_present_and_safe() {
     assert!(contains_field(ADOPTION_HELP_FORM, "title", true));
     assert!(contains_field(ADOPTION_HELP_FORM, "labels", true));
     assert!(contains_field(ADOPTION_HELP_FORM, "body", true));
+    assert_yaml_labels_include_question(ADOPTION_HELP_FORM);
+    assert_adoption_help_body_contract(ADOPTION_HELP_FORM);
 }
 
 #[test]
@@ -359,6 +361,76 @@ fn contains_field(raw_yaml: &str, field: &str, assert_scalar_or_array: bool) -> 
         }
         Some(_) => true,
         None => false,
+    }
+}
+
+fn assert_yaml_labels_include_question(raw_yaml: &str) {
+    let documents = YamlOwned::load_from_str(raw_yaml).expect("yaml");
+    let mapping = documents[0].as_mapping().expect("mapping");
+    let labels = mapping_get(mapping, "labels")
+        .and_then(YamlOwned::as_sequence)
+        .expect("adoption help labels sequence");
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.as_str() == Some("question"))
+    );
+}
+
+fn assert_adoption_help_body_contract(raw_yaml: &str) {
+    let documents = YamlOwned::load_from_str(raw_yaml).expect("yaml");
+    let mapping = documents[0].as_mapping().expect("mapping");
+    let body = mapping_get(mapping, "body")
+        .and_then(YamlOwned::as_sequence)
+        .expect("adoption help body sequence");
+    let required_ids = [
+        "ccp_version",
+        "project_runtime",
+        "platform",
+        "repository_language",
+        "attempted_step",
+        "error_summary",
+        "expected_outcome",
+        "privacy_confirmation",
+    ];
+    for id in required_ids {
+        let item = body.iter().find(|item| {
+            item.as_mapping()
+                .and_then(|item| mapping_get(item, "id"))
+                .and_then(YamlOwned::as_str)
+                == Some(id)
+        });
+        let item = item.unwrap_or_else(|| panic!("missing adoption-help field {id}"));
+        let item_mapping = item.as_mapping().expect("body item mapping");
+        let item_type = mapping_get(item_mapping, "type")
+            .and_then(YamlOwned::as_str)
+            .expect("body item type");
+        if id == "privacy_confirmation" {
+            assert_eq!(item_type, "checkboxes");
+            let attributes = mapping_get(item_mapping, "attributes")
+                .and_then(YamlOwned::as_mapping)
+                .expect("checkbox attributes");
+            let options = mapping_get(attributes, "options")
+                .and_then(YamlOwned::as_sequence)
+                .expect("checkbox options");
+            assert!(options.iter().any(|option| {
+                option
+                    .as_mapping()
+                    .and_then(|option| mapping_get(option, "required"))
+                    .and_then(YamlOwned::as_bool)
+                    == Some(true)
+            }));
+        } else {
+            assert!(matches!(item_type, "input" | "textarea"));
+            let validations = mapping_get(item_mapping, "validations")
+                .and_then(YamlOwned::as_mapping)
+                .expect("required field validations");
+            assert_eq!(
+                mapping_get(validations, "required").and_then(YamlOwned::as_bool),
+                Some(true),
+                "{id} must be required"
+            );
+        }
     }
 }
 
