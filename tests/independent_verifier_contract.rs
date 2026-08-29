@@ -479,3 +479,27 @@ fn core_and_root_verification_share_report_identity() {
     };
     assert_eq!(report.exit_code(), 3);
 }
+
+#[test]
+fn policy_document_error_source_and_display_are_compatible() {
+    use std::error::Error;
+
+    let root_io = commit_ci_preflight::verify::VerificationPolicyDocumentError::Io(
+        std::io::Error::other("synthetic"),
+    );
+    assert!(root_io.source().is_none());
+    assert_eq!(root_io.to_string(), "cannot read verification policy");
+
+    let core_io =
+        ccp_core::verify::VerificationPolicyDocumentError::Io(std::io::Error::other("synthetic"));
+    assert!(core_io.source().is_none());
+
+    let root_v2 = commit_ci_preflight::verify::VerificationPolicyDocumentError::V2(
+        commit_ci_preflight::matrix::MatrixError::InvalidReceipt,
+    );
+    assert!(root_v2.source().is_none());
+    let core_v2 = ccp_core::verify::VerificationPolicyDocumentError::V2(
+        ccp_core::matrix::MatrixContractError::InvalidReceipt,
+    );
+    assert!(core_v2.source().is_none());
+}
