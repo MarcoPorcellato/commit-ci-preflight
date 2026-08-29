@@ -1,13 +1,18 @@
 # Commit CI Preflight
 
-Proof-carrying CI for developer-owned execution. Commit CI Preflight runs a
-reviewed, pinned execution contract on your hardware, writes a commit-bound
-receipt, and lets GitHub verify that evidence instead of rerunning heavy work.
+> **Run heavy CI locally. Prove the exact commit on GitHub.**
 
-Commit CI Preflight is an independent, vendor-neutral Apache-2.0 project with a
-Rust core. It is designed for teams whose remote CI cost or queue time is
-growing, but who do not want cost control to weaken review, security, or
-platform coverage.
+Commit CI Preflight (CCP) is an independent, vendor-neutral Apache-2.0 Rust
+project that turns expensive, deterministic checks into commit-bound evidence:
+run a reviewed plan on your machine, then let a small GitHub gate verify the
+exact pull-request head. It is for teams whose remote CI cost or queue time is
+growing without weakening review, security, or platform coverage.
+
+Start here:
+
+- [PR #71 case study](docs/CASE_STUDY_PR71.md) — a bounded, public example.
+- [Clean-room tutorial](docs/TUTORIAL.md) — produce and verify a first receipt.
+- [Adoption guide](docs/ADOPTION_GUIDE.md) — decide whether CCP fits your repository.
 
 > Status: **v0.1.0-rc.1 prerelease**. The source implementation and native
 > benchmark evidence are complete. The
@@ -65,6 +70,14 @@ absolute home paths, and personal or machine identity fields.
 A receipt is integrity and policy evidence. It is not an identity attestation,
 a signature, or proof that arbitrary local and hosted workflows are identical.
 
+## Is CCP for this repository?
+
+| If your repository has… | CCP fit |
+|---|---|
+| deterministic, container-friendly checks and pinned runtime images | **Yes — start with a clean-room trial** |
+| trusted secrets, deployments, or platform-specific behavior | **Partial — retain the relevant remote/native jobs** |
+| a requirement for signed identity-bound attestations | **No — CCP is not that attestation system** |
+
 ## Quick start
 
 Adopting CCP in another repository? Start with the
@@ -87,92 +100,25 @@ cargo build --locked
 The first build can take longer when Rust dependencies are not cached. `plan`
 normalizes the contract, `doctor` performs a bounded runtime probe, and
 `dry-run` renders the exact container command and mounts. None of these three
-commands executes project code or emits an attestable receipt.
+commands executes project code or emits an attestable receipt. For admission,
+resource, cache, and guarded-workflow details, read the
+[coordination runbook](docs/COORDINATION_RUNBOOK.md),
+[local run contract](docs/LOCAL_RUN.md), and
+[resource observation history](docs/RESOURCE_OBSERVATION_HISTORY.md).
+
+The planned agent admission mode is an owner-approved safety exception for
+orphan prevention, not a second scheduler. `agent mode opt-in` must remain
+explicit: operators must never bypass unknown ownership, never revive a terminated chat,
+and never auto-execute a command. An official launcher is a shell-free wrapper around one explicit program argv.
+Official launchers must pass through `guard exec` to be covered. See the
+coordination runbook, local run contract, and adoption guide above for the
+complete safety contract.
 
 For a real PASS and receipt, use the [clean-room tutorial](docs/TUTORIAL.md).
 It first creates a separate Git repository for the fixture; running the example
 configuration against this source checkout would validate the wrong repository.
 
-### 2. Inspect a configuration without running checks
-
-```console
-./target/debug/commit-ci-preflight plan   --config examples/projects/rust/.commit-ci-preflight.toml
-./target/debug/commit-ci-preflight doctor   --config examples/projects/rust/.commit-ci-preflight.toml
-./target/debug/commit-ci-preflight dry-run   --config examples/projects/rust/.commit-ci-preflight.toml
-```
-
-`doctor` performs a bounded read-only runtime probe. `dry-run` prints the
-exact container argv and mounts but does not execute project code.
-
-`run` and `benchmark` are serialized through a default-on host-wide single-slot
-queue so independent local agents cannot start both heavy workloads at once.
-The planned agent admission mode is an owner-approved safety exception for
-orphan prevention, not a second scheduler.
-This agent mode opt-in must never bypass unknown ownership.
-This agent mode opt-in must never revive a terminated chat.
-This agent mode opt-in must never auto-execute a command.
-A live activity must make an explicit claim before it invokes its own guarded
-command.
-Use `--admission-timeout-seconds` to select the bounded wait. The
-`admission status --json` result distinguishes the transient `queue_lock` from
-the heavy-work `slot_lock`, and reports the slot's opaque owner/run identifier,
-acquisition time, heartbeat time, and lease state when available. A missing
-owner record, a malformed lease, or a contradiction between the OS lock and
-the lease is reported as `unknown` and is never treated as inactivity. The
-status also states explicitly that absence of a process in one local shell
-does not prove global inactivity across Codex activities or users. On macOS, the queue is followed by a strict `macos-v4`
-host-memory admission sample, and `run` has a two-second watchdog that cancels
-only on sustained compound or critical pressure. Admission requires at least 20% available memory and
-3 GiB reclaimable uncompressed memory, and caps swap at the smaller of 8 GiB
-and 30% of physical RAM. Compression alone is advisory both before and during
-the run; at pre-start it denies only when at least 70% compression accompanies
-another pressure signal. The in-run watchdog treats compression the same way:
-soft cancellation needs
-at least two converging signals for about 30 seconds, while critical available,
-reclaimable, swap, or compound-compression conditions remain immediate stops.
-`resource status --json` reports bounded metrics and
-capability; Linux and Windows report `unsupported_not_enforced`. Resource and
-admission evidence are not part of receipts yet.
-
-Wrap any other long local workflow with the same protection by passing one
-explicit argv after `--`:
-
-```console
-commit-ci-preflight guard exec \
-  --admission-timeout-seconds 21600 \
-  --timeout-seconds 21600 \
-  --resource-profile ready \
-  --resource-workload-family brain-linux-ci-v1 \
-  --resource-executor orbstack \
-  --resource-execution-mode emulated \
-  --resource-target-platform linux-amd64 \
-  -- make all
-```
-
-The wrapper never invokes a shell, runs the child from the caller's current
-working directory, never creates a receipt, and keeps the admission slot until
-the supervised process tree has stopped. Both waits
-default to six hours for `guard exec` and are capped at 24 hours. On macOS it
-retains at most 500 local, privacy-bounded v2 summaries with workload,
-executor, cache, execution-mode, target and optional requested-limit context.
-The history changes no policy decision and can be disabled
-with `--no-resource-history`; see the
-[resource observation history contract](docs/RESOURCE_OBSERVATION_HISTORY.md).
-Official launchers must pass through `guard exec` to be covered. CCP does not
-claim visibility into direct Docker or OrbStack processes that bypass it; see
-the [coverage and adoption inventory](docs/ORBSTACK_TELEMETRY_COVERAGE.md).
-When multiple agent activities or repositories share the Mac, follow the
-[cross-activity coordination runbook](docs/COORDINATION_RUNBOOK.md). It defines
-the owner/lease interpretation, reservation handoff, worktree isolation, and
-safe recovery rules; a process list from one terminal is not a host-wide
-ownership proof.
-Inspect the bounded local records without starting work:
-
-```console
-commit-ci-preflight resource history --json
-```
-
-### 3. Run the clean-room demo
+### 2. Run the clean-room demo
 
 Follow the [end-to-end tutorial](docs/TUTORIAL.md). It copies a tiny public Rust
 fixture into its own Git repository, runs its test through a pinned container,
@@ -181,6 +127,12 @@ repository policy.
 
 For installation, checksum verification, and local candidate archives, see
 [the installation guide](docs/INSTALLATION.md).
+
+## Dogfooding proof
+
+This repository uses CCP for its own bounded qualification workflow. See the
+[PR #71 case study](docs/CASE_STUDY_PR71.md) for the exact public anchors and
+the limits of what that evidence proves.
 
 ## What makes it different
 
