@@ -106,6 +106,14 @@ resource, cache, and guarded-workflow details, read the
 [local run contract](docs/LOCAL_RUN.md), and
 [resource observation history](docs/RESOURCE_OBSERVATION_HISTORY.md).
 
+The planned agent admission mode is an owner-approved safety exception for
+orphan prevention, not a second scheduler. `agent mode opt-in` must remain
+explicit: operators must never bypass unknown ownership, never revive a terminated chat,
+and never auto-execute a command. An official launcher is a shell-free wrapper around one explicit program argv;
+Official launchers must pass through `guard exec` to be covered. See the
+coordination runbook, local run contract, and adoption guide above for the
+complete safety contract.
+
 For a real PASS and receipt, use the [clean-room tutorial](docs/TUTORIAL.md).
 It first creates a separate Git repository for the fixture; running the example
 configuration against this source checkout would validate the wrong repository.

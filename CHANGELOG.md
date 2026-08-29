@@ -14,7 +14,8 @@ Semantic Versioning after its first public release.
   the remote gate; preview upload is owner-only and pending.
 
 - Added a benefit-led visitor journey, bounded PR #71 case study, and public
-  support routing for adoption, defects, security reports, and proposals.
+  support routing for adoption, defects, security reports, and proposals,
+  including concise operator-safety routing for agent-mode questions.
 
 - Shared terminal owned-resource finalization now routes historical and matrix
   runs, benchmarks, and guarded execution through completion-before-release,
