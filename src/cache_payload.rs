@@ -1,6 +1,6 @@
 use crate::cache::CacheError;
 #[cfg(test)]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -73,14 +73,14 @@ fn copy_payload_node(
         return recreate_payload_link(source, destination);
     }
     if metadata.is_file() {
-        fs::copy(source, destination).map_err(CacheError::Io)?;
+        traced_copy_file(source, destination).map_err(CacheError::Io)?;
         return Ok(());
     }
     if !metadata.is_dir() {
         return Err(CacheError::UnexpectedEntry(source.to_path_buf()));
     }
 
-    fs::create_dir(destination).map_err(CacheError::Io)?;
+    traced_create_directory(destination).map_err(CacheError::Io)?;
     let mut entries = traced_read_directory(source)
         .map_err(CacheError::Io)?
         .collect::<Result<Vec<_>, _>>()
@@ -160,8 +160,6 @@ fn measure_symlink(path: &Path) -> Result<PayloadTreeStats, CacheError> {
 
 #[cfg(unix)]
 fn recreate_payload_link(source: &Path, destination: &Path) -> Result<(), CacheError> {
-    use std::os::unix::fs::symlink;
-
     let target =
         traced_read_link(source).map_err(|source_error| CacheError::PayloadSymlinkRead {
             path: source.to_path_buf(),
@@ -172,9 +170,11 @@ fn recreate_payload_link(source: &Path, destination: &Path) -> Result<(), CacheE
         Err(error) => return Err(CacheError::Io(error)),
         Ok(_) => return Err(CacheError::UnexpectedEntry(destination.to_path_buf())),
     }
-    symlink(&target, destination).map_err(|source_error| CacheError::PayloadSymlinkCreate {
-        path: destination.to_path_buf(),
-        source: source_error,
+    traced_create_link(&target, destination).map_err(|source_error| {
+        CacheError::PayloadSymlinkCreate {
+            path: destination.to_path_buf(),
+            source: source_error,
+        }
     })
 }
 
@@ -200,6 +200,30 @@ fn traced_read_directory(path: &Path) -> std::io::Result<fs::ReadDir> {
     fs::read_dir(path)
 }
 
+fn traced_copy_file(source: &Path, destination: &Path) -> std::io::Result<u64> {
+    #[cfg(test)]
+    {
+        record_payload_operation(PayloadOperation::CopyFile(destination.to_path_buf()));
+        if take_payload_copy_failure_for_test() {
+            return Err(io::Error::other("injected payload copy failure"));
+        }
+    }
+    fs::copy(source, destination)
+}
+
+fn traced_create_directory(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    record_payload_operation(PayloadOperation::CreateDirectory(path.to_path_buf()));
+    fs::create_dir(path)
+}
+
+#[cfg(unix)]
+fn traced_create_link(target: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    record_payload_operation(PayloadOperation::CreateLink(destination.to_path_buf()));
+    std::os::unix::fs::symlink(target, destination)
+}
+
 #[cfg(unix)]
 fn traced_read_link(path: &Path) -> std::io::Result<PathBuf> {
     #[cfg(test)]
@@ -213,13 +237,21 @@ enum PayloadOperation {
     SymlinkMetadata(PathBuf),
     ReadDirectory(PathBuf),
     ReadLink(PathBuf),
+    CopyFile(PathBuf),
+    CreateDirectory(PathBuf),
+    CreateLink(PathBuf),
 }
 
 #[cfg(test)]
 impl PayloadOperation {
     fn filesystem_path(&self) -> &Path {
         match self {
-            Self::SymlinkMetadata(path) | Self::ReadDirectory(path) | Self::ReadLink(path) => path,
+            Self::SymlinkMetadata(path)
+            | Self::ReadDirectory(path)
+            | Self::ReadLink(path)
+            | Self::CopyFile(path)
+            | Self::CreateDirectory(path)
+            | Self::CreateLink(path) => path,
         }
     }
 }
@@ -229,6 +261,22 @@ thread_local! {
     static PAYLOAD_OPERATIONS: RefCell<Vec<PayloadOperation>> = const {
         RefCell::new(Vec::new())
     };
+    static PAYLOAD_COPY_FAILURE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_payload_copy_for_test() {
+    PAYLOAD_COPY_FAILURE.with(|failure| failure.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn clear_payload_copy_failure_for_test() {
+    PAYLOAD_COPY_FAILURE.with(|failure| failure.set(false));
+}
+
+#[cfg(test)]
+fn take_payload_copy_failure_for_test() -> bool {
+    PAYLOAD_COPY_FAILURE.with(|failure| failure.replace(false))
 }
 
 #[cfg(test)]
@@ -416,6 +464,55 @@ mod tests {
             fs::read(&outside).expect("read external sentinel"),
             b"outside"
         );
+        remove_fixture(&source, &outside);
+        fs::remove_dir_all(destination).expect("remove copy destination");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_copy_records_only_payload_paths_and_every_copy_operation() {
+        use std::os::unix::fs::symlink;
+
+        let source = payload_fixture("copy-trace-source");
+        let destination = source
+            .parent()
+            .expect("fixture parent")
+            .join("copy-trace-destination");
+        let outside = source
+            .parent()
+            .expect("fixture parent")
+            .join("copy-trace-sentinel");
+        fs::create_dir(source.join("nested")).expect("create nested payload directory");
+        fs::write(source.join("nested/regular"), b"payload").expect("write regular payload");
+        fs::write(&outside, b"outside").expect("write external sentinel");
+        symlink(&outside, source.join("nested/external")).expect("create external link");
+
+        clear_payload_operations();
+        let mut nodes = 0;
+        copy_payload_tree(&source, &destination, &mut nodes, 100).expect("copy payload");
+        let operations = take_payload_operations();
+
+        assert!(
+            operations
+                .iter()
+                .any(|operation| matches!(operation, PayloadOperation::CopyFile(_)))
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| matches!(operation, PayloadOperation::CreateDirectory(_)))
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|operation| matches!(operation, PayloadOperation::CreateLink(_)))
+        );
+        assert!(
+            operations
+                .iter()
+                .all(|operation| !operation.filesystem_path().starts_with(&outside))
+        );
+
         remove_fixture(&source, &outside);
         fs::remove_dir_all(destination).expect("remove copy destination");
     }

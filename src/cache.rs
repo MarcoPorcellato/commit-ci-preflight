@@ -35,6 +35,8 @@ use crate::cache_payload::{copy_payload_tree, validate_payload_tree};
 use crate::config::{ExecutionPlanEnvelopeV1, NormalizedCache};
 use crate::durable_fs::{DurableFileSystem, DurableFsError};
 use crate::receipt::{ReceiptError, canonical_json};
+#[cfg(test)]
+use std::cell::Cell;
 
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const OWNER_FILE: &str = ".ccp-cache-root-v1.json";
@@ -744,6 +746,14 @@ impl ManagedCache {
             if !is_cache_directory_name(&name) && !name.starts_with(".entry-tmp-") {
                 return Err(CacheError::UnexpectedEntry(entry.path()));
             }
+            // A valid entry can be changed by its legitimate owner while it is
+            // prepared. Inventory must take the same cooperative lock before
+            // inspecting either status or payload descendants.
+            let _entry_lock = if is_cache_directory_name(&name) {
+                Some(acquire_existing_entry_lock(&entry.path())?)
+            } else {
+                None
+            };
             let mut nodes = 0;
             let (bytes, files) = bounded_entry_size(&entry.path(), &mut nodes)?;
             let status = entry_status(&entry.path(), &name)?;
@@ -1296,8 +1306,15 @@ fn write_complete_marker(path: &Path) -> Result<(), CacheError> {
 fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError> {
     let mut nodes = 0;
     validate_payload_tree(source, &mut nodes, MAX_INVENTORY_NODES)?;
+    #[cfg(test)]
+    if take_forced_clone_fallback_for_test() {
+        record_clone_operation_for_test(CloneOperation::ForcedFallback);
+        return Ok(false);
+    }
     #[cfg(target_os = "macos")]
     {
+        #[cfg(test)]
+        record_clone_operation_for_test(CloneOperation::Attempted);
         let source = CString::new(
             source
                 .to_str()
@@ -1328,6 +1345,46 @@ fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError>
         let _ = (source, destination);
         Ok(false)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_CLONE_FALLBACK: Cell<bool> = const { Cell::new(false) };
+    static CLONE_OPERATIONS: std::cell::RefCell<Vec<CloneOperation>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloneOperation {
+    Attempted,
+    ForcedFallback,
+}
+
+#[cfg(test)]
+fn force_clone_fallback_for_test() {
+    FORCE_CLONE_FALLBACK.with(|forced| forced.set(true));
+}
+
+#[cfg(test)]
+fn take_forced_clone_fallback_for_test() -> bool {
+    FORCE_CLONE_FALLBACK.with(|forced| forced.replace(false))
+}
+
+#[cfg(test)]
+fn record_clone_operation_for_test(operation: CloneOperation) {
+    CLONE_OPERATIONS.with(|operations| operations.borrow_mut().push(operation));
+}
+
+#[cfg(test)]
+fn clear_clone_operations_for_test() {
+    CLONE_OPERATIONS.with(|operations| operations.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn take_clone_operations_for_test() -> Vec<CloneOperation> {
+    CLONE_OPERATIONS.with(|operations| std::mem::take(&mut *operations.borrow_mut()))
 }
 
 fn wait_for_concurrent_initializer(root: &Path, marker: &Path) -> Result<(), CacheError> {
@@ -1690,16 +1747,25 @@ fn bounded_entry_size_at(
 }
 
 fn is_payload_root(entry_root: &Path, candidate: &Path) -> bool {
+    let Some(entry_name) = entry_root.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !is_cache_directory_name(entry_name) {
+        return false;
+    }
     let Ok(relative) = candidate.strip_prefix(entry_root) else {
         return false;
     };
     let components: Vec<_> = relative.components().collect();
     match components.as_slice() {
-        [Component::Normal(data)] => *data == "data",
+        [Component::Normal(data)] => data.to_str() == Some("data"),
         [Component::Normal(generation), Component::Normal(data)] => {
-            let generation = generation.to_string_lossy();
-            *data == "data"
-                && (generation.starts_with(".staging-") || generation.starts_with(".backup-"))
+            let Some(generation) = generation.to_str() else {
+                return false;
+            };
+            data.to_str() == Some("data")
+                && (validate_owned_name(generation, ".staging-").is_ok()
+                    || validate_owned_name(generation, ".backup-").is_ok())
         }
         _ => false,
     }
@@ -1875,6 +1941,49 @@ mod tests {
     use super::*;
     use crate::config::ConfigV1;
     use std::sync::{Arc, Barrier};
+
+    #[cfg(unix)]
+    const SHORT_SOCKET_DIRECTORY_RETRIES: usize = 16;
+
+    #[cfg(unix)]
+    struct ShortSocketFixtureDirectory {
+        path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl ShortSocketFixtureDirectory {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ShortSocketFixtureDirectory {
+        fn drop(&mut self) {
+            match fs::symlink_metadata(&self.path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    let _ = fs::remove_dir_all(&self.path);
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn short_socket_fixture_directory() -> ShortSocketFixtureDirectory {
+        let process_id = std::process::id();
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        for attempt in 0..SHORT_SOCKET_DIRECTORY_RETRIES {
+            let path =
+                PathBuf::from("/tmp").join(format!("ccp-cs-{process_id}-{sequence}-{attempt}"));
+            match fs::create_dir(&path) {
+                Ok(()) => return ShortSocketFixtureDirectory { path },
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create short socket fixture directory: {error}"),
+            }
+        }
+        panic!("claim unique short socket fixture directory")
+    }
 
     fn test_root(name: &str) -> PathBuf {
         std::env::var_os("CCP_TEST_ROOT")
@@ -2162,6 +2271,7 @@ timeout_seconds = 60
         let key = CacheKey::for_plan_cache(&envelope(), &envelope().plan.caches[0]).expect("key");
         let complete = cache.entry_path(&key);
         fs::create_dir_all(complete.join("data")).expect("complete data");
+        drop(acquire_entry_lock(&complete).expect("entry lock"));
         fs::write(complete.join("data/value"), b"cache").expect("cache data");
         fs::write(complete.join(COMPLETE_FILE), COMPLETE_BYTES).expect("complete marker");
         let incomplete = resolved
@@ -2205,7 +2315,10 @@ timeout_seconds = 60
     #[test]
     fn inventory_counts_each_payload_root_once() {
         let (_repo, resolved) = resolved_fixture("inventory-node-count");
-        let entry = resolved.path.join(ENTRIES_DIR).join("entry");
+        let entry = resolved
+            .path
+            .join(ENTRIES_DIR)
+            .join("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         fs::create_dir_all(entry.join("data")).unwrap();
         fs::write(entry.join("data/payload"), b"payload").unwrap();
         let mut nodes = 0;
@@ -2243,6 +2356,7 @@ timeout_seconds = 60
         let backup = entry.join(".backup-1-1");
         fs::create_dir_all(staging.join("data")).unwrap();
         fs::create_dir_all(backup.join("data")).unwrap();
+        drop(acquire_entry_lock(&entry).expect("entry lock"));
         let outside = repo.join("generation-sentinel");
         fs::write(&outside, b"sentinel").unwrap();
         symlink(&outside, staging.join("data/external")).unwrap();
@@ -2257,6 +2371,59 @@ timeout_seconds = 60
         ));
         clean(&resolved.path);
         clean(&repo);
+    }
+
+    #[test]
+    fn payload_root_classifier_requires_a_valid_entry_and_owned_generation_name() {
+        let root = PathBuf::from("/owned/entries");
+        let valid =
+            root.join("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        for candidate in [
+            valid.join("data"),
+            valid.join(".staging-1-1").join("data"),
+            valid.join(".backup-1-1").join("data"),
+        ] {
+            assert!(
+                is_payload_root(&valid, &candidate),
+                "accepted {candidate:?}"
+            );
+        }
+        for (entry, candidate) in [
+            (root.join(".entry-tmp-1"), root.join(".entry-tmp-1/data")),
+            (root.join("not-a-key"), root.join("not-a-key/data")),
+            (valid.clone(), valid.join(".staging-/data")),
+            (valid.clone(), valid.join(".staging-invalid/name/data")),
+            (valid.clone(), valid.join(".backup-/data")),
+            (valid.clone(), valid.join(".backup-invalid/name/data")),
+        ] {
+            assert!(
+                !is_payload_root(&entry, &candidate),
+                "unexpected payload root {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_fails_closed_while_a_valid_entry_lock_is_held() {
+        let fixture = completed_entry_fixture("inventory-entry-lock");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let prepared = fixture
+            .cache
+            .prepare_entry(&key, &plan.plan_digest, 2)
+            .expect("hold entry lock");
+
+        assert!(matches!(
+            fixture.cache.inventory(),
+            Err(CacheError::LockBusy(_))
+        ));
+
+        drop(prepared);
+        fixture
+            .cache
+            .inventory()
+            .expect("inventory after lock release");
+        finish_fixture(fixture);
     }
 
     #[cfg(unix)]
@@ -2343,11 +2510,8 @@ timeout_seconds = 60
         let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
         let prepared = cache.prepare_entry(&key, &plan.plan_digest, 1).unwrap();
         let socket_path = prepared.data_path.join("socket");
-        let socket_parent = PathBuf::from("/private/tmp").join(format!(
-            "ccp-socket-{}-{}",
-            std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+        let socket_directory = short_socket_fixture_directory();
+        let socket_parent = socket_directory.path().join("fixture");
         symlink(&prepared.data_path, &socket_parent).unwrap();
         let listener = UnixListener::bind(socket_parent.join("socket")).unwrap();
 
@@ -2361,6 +2525,7 @@ timeout_seconds = 60
         drop(listener);
         fs::remove_file(socket_path).unwrap();
         fs::remove_file(socket_parent).unwrap();
+        drop(socket_directory);
         drop(prepared);
         clean(&resolved.path);
         clean(&repo);
@@ -2459,11 +2624,8 @@ timeout_seconds = 60
         let plan = envelope();
         let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
         let socket_path = fixture.data_path.join("unsupported.socket");
-        let socket_parent = PathBuf::from("/private/tmp").join(format!(
-            "ccp-socket-{}-{}",
-            std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
+        let socket_directory = short_socket_fixture_directory();
+        let socket_parent = socket_directory.path().join("fixture");
         symlink(&fixture.data_path, &socket_parent).unwrap();
         let listener = UnixListener::bind(socket_parent.join("unsupported.socket")).unwrap();
 
@@ -2476,10 +2638,67 @@ timeout_seconds = 60
         drop(listener);
         fs::remove_file(socket_path).unwrap();
         fs::remove_file(socket_parent).unwrap();
+        drop(socket_directory);
         finish_fixture(fixture);
 
         assert!(matches!(preparation, Err(CacheError::UnexpectedEntry(_))));
         assert!(staging.is_empty(), "failed preparation leaked {staging:?}");
+    }
+
+    #[test]
+    fn forced_fallback_copy_failure_removes_only_its_owned_staging_generation() {
+        let fixture = completed_entry_fixture("forced-fallback-copy-cleanup");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        fs::write(fixture.data_path.join("second"), b"second payload").expect("second payload");
+
+        force_clone_fallback_for_test();
+        crate::cache_payload::fail_next_payload_copy_for_test();
+        let preparation = fixture.cache.prepare_entry(&key, &plan.plan_digest, 2);
+        crate::cache_payload::clear_payload_copy_failure_for_test();
+
+        let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
+            .expect("entry directory")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .collect();
+        assert!(matches!(preparation, Err(CacheError::Io(_))));
+        assert!(staging.is_empty(), "failed fallback leaked {staging:?}");
+        assert!(fixture.data_path.join("payload").is_file());
+        assert!(fixture.data_path.join("second").is_file());
+        finish_fixture(fixture);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_clone_attempt_and_forced_fallback_are_distinguishable() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = completed_entry_fixture("macos-clone-and-fallback");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        symlink("payload", fixture.data_path.join("relative")).expect("relative link");
+
+        clear_clone_operations_for_test();
+        let cloned = fixture
+            .cache
+            .prepare_entry(&key, &plan.plan_digest, 2)
+            .expect("clone preparation");
+        assert!(take_clone_operations_for_test().contains(&CloneOperation::Attempted));
+        drop(cloned);
+
+        force_clone_fallback_for_test();
+        let fallback = fixture
+            .cache
+            .prepare_entry(&key, &plan.plan_digest, 3)
+            .expect("forced fallback preparation");
+        assert!(take_clone_operations_for_test().contains(&CloneOperation::ForcedFallback));
+        assert_eq!(
+            fs::read_link(fallback.data_path.join("relative")).expect("fallback link"),
+            Path::new("payload")
+        );
+        drop(fallback);
+        finish_fixture(fixture);
     }
 
     #[cfg(unix)]
