@@ -44,7 +44,7 @@ GitHub state, native receipts, released artifacts, and user-visible instructions
 | Product authority | `docs/PRODUCT_ROADMAP.md` | staged PR 1-10 roadmap |
 | Current public release | `v0.1.0-rc.1` | unsigned macOS arm64 archive plus checksum |
 | Current release drift | public tag is 39 commits behind `main` at programme creation | GitHub compare API |
-| Active global producer | source `3fccc197e5055a2759ee7afe51b91133938ec904`, binary SHA-256 `b8d26013800c99ba806506a0539a9ddc781bfab52f95c8f1dbdff1b65c2fcd4c` | global CCP operator contract |
+| Active global producer | source `faf587890e4f899803f027660bc66452623f405e`, binary SHA-256 `7cde4c2888721d72fbb8c86b4fdcc75f992050979c5175a5bf10b0cecfa7c6f8` | live global CCP operator contract, reverified 2026-08-29 |
 | Current programme milestone | M0, in delivery | this specification and master plan |
 
 Every drift-prone anchor must be reverified before a commit, push, CCP

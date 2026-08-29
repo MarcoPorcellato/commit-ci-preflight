@@ -101,19 +101,15 @@
 
   Read the live files and write `docs/superpowers/plans/YYYY-MM-DD-m1-conversion-surface.md` with exact line anchors, copy, local-link tests, render command, and commit boundaries. Do not change the README in this step.
 
-- [ ] **Step 2: Add failing contract tests for the new visitor path**
+- [ ] **Step 2: Add failing executable documentation contracts**
 
-  Extend `tests/repository_hygiene_contract.rs` to require:
-
-  ```rust
-  assert!(readme.contains("Run heavy CI locally. Prove the exact commit on GitHub."));
-  assert!(readme.contains("See a real receipt"));
-  assert!(readme.contains("Check whether CCP fits your repository"));
-  assert!(readme.contains("What a receipt proves"));
-  assert!(readme.contains("What stays on GitHub"));
-  ```
-
-  Add a local Markdown-link walk that rejects missing repository-relative targets without requiring network.
+  Add a local Markdown-link checker that resolves repository-relative targets
+  from each public document and rejects missing files or invalid fragments
+  without requiring network. Add an asset check that parses the rendered social
+  preview and requires 1280x640 dimensions and a file smaller than 1 MiB.
+  Exercise both helpers against controlled broken fixtures before applying them
+  to the repository files. Human-facing wording is reviewed against the M1 copy
+  checklist; it is not frozen with exact-string change-detector tests.
 
 - [ ] **Step 3: Verify the new tests fail for the intended missing anchors**
 
@@ -121,7 +117,8 @@
   rtk cargo test --locked --test repository_hygiene_contract -- --nocapture
   ```
 
-  Expected: FAIL only on the newly required conversion anchors or link contract.
+  Expected: FAIL because the controlled missing link and invalid preview fixture
+  are detected, not because an exact prose sentence changed.
 
 - [ ] **Step 4: Implement the benefit-led README path**
 
