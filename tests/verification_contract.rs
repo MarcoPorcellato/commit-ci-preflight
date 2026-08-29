@@ -27,6 +27,7 @@ use commit_ci_preflight::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, ReceiptEnvelopeV1,
     ReceiptEnvelopeV2, ReceiptV1, RepositoryEvidence, RunEvidence,
 };
+use commit_ci_preflight::verify::VerificationReportV1;
 use commit_ci_preflight::verify::{
     PolicyError, VerificationDecision, VerificationError, VerificationPolicyDocument,
     VerificationPolicyV1, VerificationPolicyV1_1, VerificationStatus,
@@ -34,7 +35,6 @@ use commit_ci_preflight::verify::{
     verification_policy_schema_json, verification_report_schema_json, verify_receipt_document,
     verify_receipt_document_for_policy_path,
 };
-use commit_ci_preflight::verify::VerificationReportV1;
 
 const RECEIPT: &[u8] = include_bytes!("fixtures/receipt-v1-pass.json");
 const RECEIPT_V2: &[u8] = include_bytes!("fixtures/receipt-v2-pass.json");
