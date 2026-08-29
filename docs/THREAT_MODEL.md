@@ -97,7 +97,7 @@ Boundary rules:
 | T13 | Marketplace action execution during migration | Migration assistant parses bounded YAML as data and emits inert classifications | Human reviewers can still make a bad manual translation |
 | T14 | GitHub expression or secret misinterpretation | Unsupported expressions, permissions, secrets, reusable workflows, and arbitrary actions fail closed or require review | Compatibility is deliberately incomplete |
 | T15 | Cache poisoning or cache-use race | Versioned ownership marker, content-addressed keys, completion marker, active-run lock, opt-in managed-cache pin with spawn-boundary revalidation; opaque payload links are separated from link-free control paths | Caches are mutable, unattested performance state; undeclared paths are not pinned, and payload links are not trusted content |
-| T16 | Destructive cleanup | 0.1.0 exposes preview-only cleanup; resolved-root and containment checks | Operators retain responsibility for manual filesystem deletion |
+| T16 | Destructive cleanup | 0.1.0 exposes preview-only cleanup; resolved-root and containment checks | Operators retain responsibility for manual filesystem deletion; manual deletion remains unsupported |
 | T17 | Image drift | OCI digest is mandatory and included in plan, receipt, and policy | A multi-platform index can resolve to different platform manifests by design |
 | T18 | Dependency compromise | Committed lockfile, exact critical pins, SPDX SBOM, bundled notices, advisory review | Registry and compiler compromise cannot be eliminated locally |
 | T19 | Platform overclaim | Native receipts name OS/architecture; emulation and runtime probes are separate; PASS/PENDING/NOT_RUN are explicit | Benchmark qualification is narrower than full runtime qualification |
