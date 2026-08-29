@@ -1,6 +1,6 @@
 # ADR 0006: Treat cache-payload symbolic links as opaque objects
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-29
 - Decision owner: Marco Porcellato
 - Design:
@@ -107,4 +107,4 @@ Costs:
    qualification pass before any installed producer replacement.
 
 No cache mutation, installed producer replacement, adopter run, receipt
-publication, push, PR, merge, or release is authorized by this proposed ADR.
+publication, push, PR, merge, or release is authorized by this ADR.
