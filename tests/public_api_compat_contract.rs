@@ -266,21 +266,181 @@ fn assert_all_error_families_are_constructible_and_stable() {
         ),
     ];
     for (error, expected) in receipt_cases {
-        assert_eq!(error.to_string(), expected);
-        assert!(error.source().is_some() == matches!(error, ReceiptError::Serialization(_)));
+        let source = matches!(&error, ReceiptError::Serialization(_));
+        assert_error(error, expected, source);
+    }
+    let config_cases = vec![
+        (
+            ConfigError::Io {
+                path: PathBuf::from("x"),
+                source: std::io::Error::new(std::io::ErrorKind::Other, "e"),
+            },
+            "cannot read configuration x: e",
+            true,
+        ),
+        (
+            ConfigError::Parse(toml::from_str::<toml::Value>("[").unwrap_err()),
+            "invalid TOML configuration: TOML parse error at line 1, column 2\n  |\n1 | [\n  |  ^\nunquoted keys cannot be empty, expected letters, numbers, `-`, `_`\n",
+            true,
+        ),
+        (
+            ConfigError::Receipt(ReceiptError::NoChecks),
+            "cannot canonicalize execution plan: receipt contains no checks",
+            true,
+        ),
+        (
+            ConfigError::UnsupportedSchemaVersion("x".into()),
+            "unsupported configuration schema version: x",
+            false,
+        ),
+        (
+            ConfigError::ConfigTooLarge {
+                actual: 2,
+                maximum: 1,
+            },
+            "configuration is 2 bytes; maximum is 1",
+            false,
+        ),
+        (
+            ConfigError::InvalidField("x"),
+            "invalid configuration field: x",
+            false,
+        ),
+        (
+            ConfigError::OutOfRange {
+                field: "x",
+                minimum: 1,
+                maximum: 2,
+                actual: 3,
+            },
+            "configuration field x is 3; expected 1..=2",
+            false,
+        ),
+        (
+            ConfigError::TooManyItems {
+                field: "x",
+                actual: 3,
+                maximum: 2,
+            },
+            "configuration has 3 x; maximum is 2",
+            false,
+        ),
+        (
+            ConfigError::NoChecks,
+            "configuration contains no checks",
+            false,
+        ),
+        (
+            ConfigError::NoRequiredChecks,
+            "configuration contains no required checks",
+            false,
+        ),
+        (
+            ConfigError::DuplicateId {
+                field: "x",
+                id: "y".into(),
+            },
+            "duplicate x: y",
+            false,
+        ),
+        (
+            ConfigError::DuplicateValue("x"),
+            "duplicate value in x",
+            false,
+        ),
+        (
+            ConfigError::DuplicateArtifact("x".into()),
+            "duplicate artifact path: x",
+            false,
+        ),
+        (
+            ConfigError::PathOverlap {
+                first: "a".into(),
+                second: "b".into(),
+            },
+            "configuration paths overlap: a and b",
+            false,
+        ),
+        (
+            ConfigError::SelfDependency("x".into()),
+            "check depends on itself: x",
+            false,
+        ),
+        (
+            ConfigError::UnknownDependency {
+                check: "a".into(),
+                dependency: "b".into(),
+            },
+            "check a depends on unknown check b",
+            false,
+        ),
+        (
+            ConfigError::UnknownEnvironmentCache {
+                name: "a".into(),
+                cache_id: "b".into(),
+            },
+            "runtime-internal environment a references unknown cache b",
+            false,
+        ),
+        (
+            ConfigError::MissingStoragePolicy,
+            "schemas 1.2 and 1.3 require an explicit storage policy",
+            false,
+        ),
+        (
+            ConfigError::MissingRuntimeCapabilityPolicy,
+            "schema 1.3 requires pull_policy = never and swap_mode = disabled",
+            false,
+        ),
+        (
+            ConfigError::DependencyCycle(vec!["a".into(), "b".into()]),
+            "check dependency cycle involves: a, b",
+            false,
+        ),
+        (
+            ConfigError::PlanDigestMismatch,
+            "execution plan digest mismatch",
+            false,
+        ),
+    ];
+    for (error, expected, source) in config_cases {
+        assert_error(error, expected, source);
     }
     let policy_cases = [
-        (PolicyError::Io(io), true),
-        (PolicyError::TooLarge, false),
-        (PolicyError::InvalidUtf8, false),
-        (PolicyError::Parse(toml), true),
-        (PolicyError::UnsupportedSchemaVersion, false),
-        (PolicyError::InvalidField("x"), false),
-        (PolicyError::DuplicateValue("x"), false),
+        (PolicyError::Io(io), "cannot read verification policy", true),
+        (
+            PolicyError::TooLarge,
+            "verification policy exceeds size limit",
+            false,
+        ),
+        (
+            PolicyError::InvalidUtf8,
+            "verification policy is not UTF-8",
+            false,
+        ),
+        (
+            PolicyError::Parse(toml),
+            "verification policy is not valid strict TOML",
+            true,
+        ),
+        (
+            PolicyError::UnsupportedSchemaVersion,
+            "verification policy schema version is unsupported",
+            false,
+        ),
+        (
+            PolicyError::InvalidField("x"),
+            "invalid policy field: x",
+            false,
+        ),
+        (
+            PolicyError::DuplicateValue("x"),
+            "duplicate policy value: x",
+            false,
+        ),
     ];
-    for (error, source) in policy_cases {
-        assert!(error.source().is_some() == source);
-        assert!(!error.to_string().is_empty());
+    for (error, expected, source) in policy_cases {
+        assert_error(error, expected, source);
     }
     let verification_cases = [
         VerificationError::Policy(PolicyError::TooLarge),
@@ -292,8 +452,27 @@ fn assert_all_error_families_are_constructible_and_stable() {
         VerificationError::Receipt(ReceiptError::NoChecks),
         VerificationError::Matrix("x".into()),
     ];
-    for error in verification_cases {
-        assert!(!error.to_string().is_empty());
+    let expected = [
+        "verification policy exceeds size limit",
+        "x",
+        "trusted policy path has no parent directory",
+        "trusted-plan policy verification requires the policy file path",
+        "expected commit must be lowercase Git SHA-1 or SHA-256",
+        "verification time is not representable as strict UTC",
+        "verification report serialization failed",
+        "matrix verification failed: x",
+    ];
+    for (error, expected) in verification_cases.into_iter().zip(expected) {
+        assert_error(
+            error,
+            expected,
+            matches!(
+                expected,
+                "verification policy exceeds size limit"
+                    | "trusted policy path has no parent directory"
+                    | "verification report serialization failed"
+            ),
+        );
     }
     // MatrixError has no source() implementation; every variant is publicly constructible.
     let matrix_cases = vec![
@@ -322,9 +501,36 @@ fn assert_all_error_families_are_constructible_and_stable() {
         MatrixError::InvalidReceipt,
         MatrixError::InvalidEvaluationTime,
     ];
-    for error in matrix_cases {
-        assert!(!error.to_string().is_empty());
+    let expected = [
+        "matrix I/O failed: x",
+        "matrix configuration parse failed: TOML parse error",
+        "matrix JSON serialization failed: EOF while parsing a list at line 1 column 1",
+        "matrix configuration invalid: configuration contains no checks",
+        "matrix receipt invalid: receipt contains no checks",
+        "matrix policy invalid: x",
+        "matrix verification invalid: expected commit must be lowercase Git SHA-1 or SHA-256",
+        "matrix runtime invalid: Docker-compatible runtime is unavailable",
+        "matrix run failed: Git returned an invalid commit identifier",
+        "unsupported matrix schema version: x",
+        "matrix configuration exceeds the bounded input size",
+        "invalid matrix field: x",
+        "duplicate matrix value: x",
+        "matrix check references unknown runtime: x",
+        "matrix runtime has no required check: x",
+        "matrix cross-runtime dependency is unsupported: a -> b",
+        "matrix legacy plan cannot represent: x",
+        "matrix plan digest mismatch",
+        "matrix receipt identifier mismatch",
+        "matrix receipt violates semantic invariants",
+        "matrix evaluation time is invalid",
+    ];
+    for (error, prefix) in matrix_cases.into_iter().zip(expected) {
         assert!(error.source().is_none());
+        assert!(
+            error.to_string().starts_with(prefix),
+            "{} != {prefix}",
+            error
+        );
     }
     let _ = PathBuf::new();
 }
