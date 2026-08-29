@@ -1362,8 +1362,11 @@ thread_local! {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloneOperation {
+    #[cfg(target_os = "macos")]
     Attempted,
+    #[cfg(target_os = "macos")]
     Succeeded,
+    #[cfg(target_os = "macos")]
     NaturalFallback,
     ForcedFallback,
 }
@@ -1383,12 +1386,12 @@ fn record_clone_operation_for_test(operation: CloneOperation) {
     CLONE_OPERATIONS.with(|operations| operations.borrow_mut().push(operation));
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 fn clear_clone_operations_for_test() {
     CLONE_OPERATIONS.with(|operations| operations.borrow_mut().clear());
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 fn take_clone_operations_for_test() -> Vec<CloneOperation> {
     CLONE_OPERATIONS.with(|operations| std::mem::take(&mut *operations.borrow_mut()))
 }
