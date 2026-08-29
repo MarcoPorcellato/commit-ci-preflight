@@ -109,7 +109,7 @@ resource, cache, and guarded-workflow details, read the
 The planned agent admission mode is an owner-approved safety exception for
 orphan prevention, not a second scheduler. `agent mode opt-in` must remain
 explicit: operators must never bypass unknown ownership, never revive a terminated chat,
-and never auto-execute a command. An official launcher is a shell-free wrapper around one explicit program argv;
+and never auto-execute a command. An official launcher is a shell-free wrapper around one explicit program argv.
 Official launchers must pass through `guard exec` to be covered. See the
 coordination runbook, local run contract, and adoption guide above for the
 complete safety contract.
