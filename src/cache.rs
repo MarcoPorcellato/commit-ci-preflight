@@ -730,7 +730,7 @@ impl ManagedCache {
                 return Err(CacheError::UnexpectedEntry(entry.path()));
             }
             let mut nodes = 0;
-            let (bytes, files) = bounded_tree_size(&entry.path(), &mut nodes)?;
+            let (bytes, files) = bounded_entry_size(&entry.path(), &mut nodes)?;
             let status = entry_status(&entry.path(), &name)?;
             entries.push(CacheEntryInventory {
                 directory: name,
@@ -1608,6 +1608,63 @@ fn sorted_directory_entries(path: &Path) -> Result<Vec<fs::DirEntry>, CacheError
     Ok(entries)
 }
 
+fn bounded_entry_size(path: &Path, nodes: &mut usize) -> Result<(u64, u64), CacheError> {
+    bounded_entry_size_at(path, path, nodes)
+}
+
+fn bounded_entry_size_at(
+    entry_root: &Path,
+    path: &Path,
+    nodes: &mut usize,
+) -> Result<(u64, u64), CacheError> {
+    *nodes = nodes.checked_add(1).ok_or(CacheError::SizeOverflow)?;
+    if *nodes > MAX_INVENTORY_NODES {
+        return Err(CacheError::InventoryLimitExceeded);
+    }
+    let metadata = fs::symlink_metadata(path).map_err(CacheError::Io)?;
+    if metadata.file_type().is_symlink() {
+        return Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()));
+    }
+    if metadata.is_file() {
+        return Ok((metadata.len(), 1));
+    }
+    if !metadata.is_dir() {
+        return Err(CacheError::UnexpectedEntry(path.to_path_buf()));
+    }
+    if is_payload_root(entry_root, path) {
+        let stats = crate::cache_payload::measure_payload_tree(path, nodes, MAX_INVENTORY_NODES)?;
+        return Ok((stats.bytes, stats.files));
+    }
+    let mut bytes = 0_u64;
+    let mut files = 0_u64;
+    for entry in sorted_directory_entries(path)? {
+        let (entry_bytes, entry_files) = bounded_entry_size_at(entry_root, &entry.path(), nodes)?;
+        bytes = bytes
+            .checked_add(entry_bytes)
+            .ok_or(CacheError::SizeOverflow)?;
+        files = files
+            .checked_add(entry_files)
+            .ok_or(CacheError::SizeOverflow)?;
+    }
+    Ok((bytes, files))
+}
+
+fn is_payload_root(entry_root: &Path, candidate: &Path) -> bool {
+    let Ok(relative) = candidate.strip_prefix(entry_root) else {
+        return false;
+    };
+    let components: Vec<_> = relative.components().collect();
+    match components.as_slice() {
+        [Component::Normal(data)] => *data == "data",
+        [Component::Normal(generation), Component::Normal(data)] => {
+            let generation = generation.to_string_lossy();
+            *data == "data"
+                && (generation.starts_with(".staging-") || generation.starts_with(".backup-"))
+        }
+        _ => false,
+    }
+}
+
 fn bounded_tree_size(path: &Path, nodes: &mut usize) -> Result<(u64, u64), CacheError> {
     *nodes = nodes.checked_add(1).ok_or(CacheError::SizeOverflow)?;
     if *nodes > MAX_INVENTORY_NODES {
@@ -2117,16 +2174,59 @@ timeout_seconds = 60
 
     #[cfg(unix)]
     #[test]
-    fn inventory_never_follows_symlinks() {
+    fn inventory_counts_payload_links_without_following_targets() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let fixture = completed_entry_fixture("inventory-payload-links");
+        let before = fixture.cache.inventory().unwrap().entries.remove(0);
+        let outside = fixture.repo.join("inventory-sentinel");
+        fs::write(&outside, b"sentinel").unwrap();
+        symlink(&outside, fixture.data_path.join("external-link")).unwrap();
+        let after = fixture.cache.inventory().unwrap().entries.remove(0);
+        assert_eq!(after.files, before.files + 1);
+        assert_eq!(
+            after.bytes,
+            before.bytes + outside.as_os_str().as_bytes().len() as u64
+        );
+        assert_eq!(fs::read(&outside).unwrap(), b"sentinel");
+        finish_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_rejects_a_symlink_at_the_payload_root() {
         use std::os::unix::fs::symlink;
+        let fixture = completed_entry_fixture("inventory-payload-root-link");
+        let real = fixture.entry_path.join("real-data");
+        fs::rename(&fixture.data_path, &real).unwrap();
+        symlink(&real, &fixture.data_path).unwrap();
+        assert!(matches!(
+            fixture.cache.inventory(),
+            Err(CacheError::SymlinkInManagedRoot(_))
+        ));
+        finish_fixture(fixture);
+    }
 
-        let (repo, resolved) = resolved_fixture("inventory-symlink");
-        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
-        let key = CacheKey::for_plan_cache(&envelope(), &envelope().plan.caches[0]).expect("key");
+    #[cfg(unix)]
+    #[test]
+    fn inventory_switches_mode_only_at_exact_generation_data_roots() {
+        use std::os::unix::fs::symlink;
+        let (repo, resolved) = resolved_fixture("inventory-generation-payloads");
+        let cache = ManagedCache::initialize(resolved.clone()).unwrap();
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
         let entry = cache.entry_path(&key);
-        fs::create_dir_all(&entry).expect("entry");
-        symlink(&repo, entry.join("escape")).expect("escape symlink");
-
+        let staging = entry.join(".staging-1-1");
+        let backup = entry.join(".backup-1-1");
+        fs::create_dir_all(staging.join("data")).unwrap();
+        fs::create_dir_all(backup.join("data")).unwrap();
+        let outside = repo.join("generation-sentinel");
+        fs::write(&outside, b"sentinel").unwrap();
+        symlink(&outside, staging.join("data/external")).unwrap();
+        symlink(&outside, backup.join("data/external")).unwrap();
+        let accepted = cache.inventory().unwrap();
+        assert_eq!(accepted.entries.len(), 1);
+        assert!(accepted.entries[0].files >= 2);
+        symlink(&outside, staging.join("control-link")).unwrap();
         assert!(matches!(
             cache.inventory(),
             Err(CacheError::SymlinkInManagedRoot(_))
