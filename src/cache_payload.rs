@@ -411,11 +411,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unsupported_payload_object_fails_without_traversal() {
-        use std::os::unix::net::UnixListener;
+        use std::os::unix::{fs::symlink, net::UnixListener};
 
         let fixture = payload_fixture("unsupported-object");
         let socket = fixture.join("listener.socket");
-        let listener = UnixListener::bind(&socket).expect("bind listener");
+        let socket_parent = PathBuf::from("/private/tmp").join(format!(
+            "ccp-payload-socket-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_file(&socket_parent);
+        symlink(&fixture, &socket_parent).expect("link short socket parent");
+        let listener =
+            UnixListener::bind(socket_parent.join("listener.socket")).expect("bind listener");
         clear_payload_operations();
         let mut nodes = 0;
         assert!(matches!(
@@ -432,6 +440,7 @@ mod tests {
         );
         drop(listener);
         fs::remove_file(socket).expect("remove listener socket");
+        fs::remove_file(socket_parent).expect("remove short socket parent");
         fs::remove_dir(fixture).expect("remove fixture");
     }
 
