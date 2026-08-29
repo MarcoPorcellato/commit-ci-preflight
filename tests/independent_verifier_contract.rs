@@ -438,3 +438,44 @@ fn collect_rs(root: &Path, files: &mut Vec<PathBuf>) {
         }
     }
 }
+#[test]
+fn core_and_root_verification_share_report_identity() {
+    use ccp_core::verification_model::VerificationReportV1 as CoreReport;
+    use commit_ci_preflight::verify::VerificationReportV1 as RootReport;
+    fn assert_same_type<T>() {}
+    assert_same_type::<RootReport>();
+    assert_same_type::<CoreReport>();
+    let _: fn(
+        &[u8],
+        &commit_ci_preflight::verify::VerificationPolicyV1,
+        &str,
+        &str,
+    ) -> Result<RootReport, _> = commit_ci_preflight::verify::verify_receipt_document;
+    let _: fn(
+        &[u8],
+        &commit_ci_preflight::verify::VerificationPolicyV1,
+        &str,
+        &str,
+    ) -> Result<CoreReport, _> = ccp_core::verify::verify_receipt_document;
+
+    let root_error = commit_ci_preflight::verify::VerificationError::InvalidExpectedCommit;
+    let core_error = ccp_core::errors::VerificationError::InvalidExpectedCommit;
+    assert_eq!(root_error.to_string(), core_error.to_string());
+    assert_eq!(
+        root_error.to_string(),
+        "expected commit must be lowercase Git SHA-1 or SHA-256"
+    );
+
+    let report = ccp_core::verification_model::VerificationReportV1 {
+        schema_version: "1.0".to_owned(),
+        assurance_scope: "test".to_owned(),
+        evaluated_at_utc: "2026-08-29T00:00:00Z".to_owned(),
+        expected_commit: "0".repeat(40),
+        receipt_id: None,
+        integrity_status: ccp_core::verification_model::VerificationStatus::Fail,
+        policy_status: ccp_core::verification_model::VerificationStatus::NotRun,
+        decision: ccp_core::verification_model::VerificationDecision::Fail,
+        findings: Vec::new(),
+    };
+    assert_eq!(report.exit_code(), 3);
+}

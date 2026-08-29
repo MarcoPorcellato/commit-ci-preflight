@@ -8,3 +8,4 @@ pub mod receipt;
 pub mod runtime_evidence;
 pub mod schema;
 pub mod verification_model;
+pub mod verify;
