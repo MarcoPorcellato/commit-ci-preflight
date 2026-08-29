@@ -4,3 +4,4 @@ pub mod config;
 pub mod errors;
 pub mod receipt;
 pub mod runtime_evidence;
+pub mod verification_model;

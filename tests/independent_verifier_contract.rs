@@ -31,6 +31,47 @@ fn core_runtime_to_root(
     value
 }
 
+fn root_model_to_core(
+    value: commit_ci_preflight::verify::VerificationReportV1,
+) -> ccp_core::verification_model::VerificationReportV1 {
+    value
+}
+fn core_model_to_root(
+    value: ccp_core::verification_model::AcceptedPlatformV1,
+) -> commit_ci_preflight::verify::AcceptedPlatformV1 {
+    value
+}
+fn core_status_to_root(
+    value: ccp_core::verification_model::VerificationStatus,
+) -> commit_ci_preflight::verify::VerificationStatus {
+    value
+}
+fn core_decision_to_root(
+    value: ccp_core::verification_model::VerificationDecision,
+) -> commit_ci_preflight::verify::VerificationDecision {
+    value
+}
+fn core_finding_to_root(
+    value: ccp_core::verification_model::VerificationFindingV1,
+) -> commit_ci_preflight::verify::VerificationFindingV1 {
+    value
+}
+fn root_policy_error_to_core(
+    value: commit_ci_preflight::verify::PolicyError,
+) -> ccp_core::errors::PolicyError {
+    value
+}
+fn root_trusted_error_to_core(
+    value: commit_ci_preflight::verify::TrustedPlanError,
+) -> ccp_core::errors::TrustedPlanError {
+    value
+}
+fn root_verification_error_to_core(
+    value: commit_ci_preflight::verify::VerificationError,
+) -> ccp_core::errors::VerificationError {
+    value
+}
+
 #[test]
 fn protocol_types_are_nominally_identical_across_root_and_core_paths() {
     let _: fn(
@@ -43,6 +84,47 @@ fn protocol_types_are_nominally_identical_across_root_and_core_paths() {
     let _: fn(
         ccp_core::runtime_evidence::RuntimeCapabilityEvidenceV1,
     ) -> commit_ci_preflight::runtime::RuntimeCapabilityEvidenceV1 = core_runtime_to_root;
+    let _: fn(
+        commit_ci_preflight::verify::VerificationReportV1,
+    ) -> ccp_core::verification_model::VerificationReportV1 = root_model_to_core;
+    let _: fn(
+        ccp_core::verification_model::AcceptedPlatformV1,
+    ) -> commit_ci_preflight::verify::AcceptedPlatformV1 = core_model_to_root;
+    let _: fn(
+        ccp_core::verification_model::VerificationStatus,
+    ) -> commit_ci_preflight::verify::VerificationStatus = core_status_to_root;
+    let _: fn(
+        ccp_core::verification_model::VerificationDecision,
+    ) -> commit_ci_preflight::verify::VerificationDecision = core_decision_to_root;
+    let _: fn(
+        ccp_core::verification_model::VerificationFindingV1,
+    ) -> commit_ci_preflight::verify::VerificationFindingV1 = core_finding_to_root;
+    let _: fn(commit_ci_preflight::verify::PolicyError) -> ccp_core::errors::PolicyError =
+        root_policy_error_to_core;
+    let _: fn(commit_ci_preflight::verify::TrustedPlanError) -> ccp_core::errors::TrustedPlanError =
+        root_trusted_error_to_core;
+    let _: fn(
+        commit_ci_preflight::verify::VerificationError,
+    ) -> ccp_core::errors::VerificationError = root_verification_error_to_core;
+}
+
+#[test]
+fn root_verify_is_a_compatibility_facade_for_moved_models_and_errors() {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/verify.rs")).unwrap();
+    for token in [
+        "pub enum VerificationStatus",
+        "pub enum VerificationDecision",
+        "pub struct VerificationReportV1",
+        "pub enum PolicyError",
+        "pub enum TrustedPlanError",
+        "pub enum VerificationError",
+    ] {
+        assert!(
+            !source.contains(token),
+            "duplicate definition remains: {token}"
+        );
+    }
 }
 
 #[test]

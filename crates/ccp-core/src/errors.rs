@@ -1,7 +1,10 @@
 use std::fmt;
+use std::io;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::config::ConfigError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -156,6 +159,113 @@ impl std::error::Error for ReceiptError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Serialization(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum PolicyError {
+    Io(io::Error),
+    TooLarge,
+    InvalidUtf8,
+    Parse(toml::de::Error),
+    UnsupportedSchemaVersion,
+    InvalidField(&'static str),
+    DuplicateValue(&'static str),
+}
+
+impl fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(_) => f.write_str("cannot read verification policy"),
+            Self::TooLarge => f.write_str("verification policy exceeds size limit"),
+            Self::InvalidUtf8 => f.write_str("verification policy is not UTF-8"),
+            Self::Parse(_) => f.write_str("verification policy is not valid strict TOML"),
+            Self::UnsupportedSchemaVersion => {
+                f.write_str("verification policy schema version is unsupported")
+            }
+            Self::InvalidField(field) => write!(f, "invalid policy field: {field}"),
+            Self::DuplicateValue(field) => write!(f, "duplicate policy value: {field}"),
+        }
+    }
+}
+impl std::error::Error for PolicyError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Parse(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TrustedPlanError {
+    PolicyPath,
+    Io(io::Error),
+    UnsafeConfigurationPath,
+    Config(ConfigError),
+}
+impl fmt::Display for TrustedPlanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PolicyPath => f.write_str("trusted policy path has no parent directory"),
+            Self::Io(_) => f.write_str("cannot read trusted configuration"),
+            Self::UnsafeConfigurationPath => {
+                f.write_str("trusted configuration path is not a regular local file")
+            }
+            Self::Config(e) => write!(f, "trusted configuration is invalid: {e}"),
+        }
+    }
+}
+impl std::error::Error for TrustedPlanError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Config(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum VerificationError {
+    Policy(PolicyError),
+    PolicyDocument(String),
+    TrustedPlan(TrustedPlanError),
+    TrustedPolicyPathRequired,
+    InvalidExpectedCommit,
+    InvalidEvaluationTime,
+    Receipt(ReceiptError),
+    Matrix(String),
+}
+impl fmt::Display for VerificationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Policy(e) => write!(f, "{e}"),
+            Self::PolicyDocument(e) => write!(f, "{e}"),
+            Self::TrustedPlan(e) => write!(f, "{e}"),
+            Self::TrustedPolicyPathRequired => {
+                f.write_str("trusted-plan policy verification requires the policy file path")
+            }
+            Self::InvalidExpectedCommit => {
+                f.write_str("expected commit must be lowercase Git SHA-1 or SHA-256")
+            }
+            Self::InvalidEvaluationTime => {
+                f.write_str("verification time is not representable as strict UTC")
+            }
+            Self::Receipt(_) => f.write_str("verification report serialization failed"),
+            Self::Matrix(e) => write!(f, "matrix verification failed: {e}"),
+        }
+    }
+}
+impl std::error::Error for VerificationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Policy(e) => Some(e),
+            Self::TrustedPlan(e) => Some(e),
+            Self::Receipt(e) => Some(e),
             _ => None,
         }
     }
