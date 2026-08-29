@@ -1477,7 +1477,7 @@ fn print_matrix_run(
                     .as_mut()
                     .expect("matrix execution must own a completion barrier"),
             )
-            .map_err(|error| CliError::Matrix(error.into()))
+            .map_err(CliError::Matrix)
         },
         complete: |result| {
             let mut barrier = completion_barrier.borrow_mut();
@@ -1513,8 +1513,7 @@ fn print_matrix_run(
                 .borrow_mut()
                 .transition(RunLifecyclePhase::Finalizing)
                 .map_err(CliError::Run)?;
-            seal_matrix_run_material(&envelope, material)
-                .map_err(|error| CliError::Matrix(error.into()))
+            seal_matrix_run_material(&envelope, material).map_err(CliError::Matrix)
         },
         write: |receipt| {
             let receipt_path = write_matrix_receipt(
@@ -1522,7 +1521,7 @@ fn print_matrix_run(
                 &envelope.plan.receipt.output,
                 &receipt,
             )
-            .map_err(|error| CliError::Matrix(error.into()))?;
+            .map_err(CliError::Matrix)?;
             Ok(MatrixRunOutcomeV2 {
                 receipt,
                 receipt_path,
@@ -1680,7 +1679,7 @@ fn load_matrix_plan(
         return Err(CliError::usage(MatrixPlanProfileSchemaError));
     }
     let config = MatrixConfigV2::load(path).map_err(|error| CliError::Matrix(error.into()))?;
-    build_matrix_plan(config, profile).map_err(|error| CliError::Matrix(error.into()))
+    build_matrix_plan(config, profile).map_err(CliError::Matrix)
 }
 
 #[derive(Debug)]

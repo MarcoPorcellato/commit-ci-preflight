@@ -273,7 +273,7 @@ fn assert_all_error_families_are_constructible_and_stable() {
         (
             ConfigError::Io {
                 path: PathBuf::from("x"),
-                source: std::io::Error::new(std::io::ErrorKind::Other, "e"),
+                source: std::io::Error::other("e"),
             },
             "cannot read configuration x: e",
             true,
@@ -507,7 +507,7 @@ fn assert_all_error_families_are_constructible_and_stable() {
     let matrix_cases =
         vec![
         (
-            MatrixError::Io(std::io::Error::new(std::io::ErrorKind::Other, "x")),
+            MatrixError::Io(std::io::Error::other("x")),
             "matrix I/O failed: x".to_owned(),
         ),
         (MatrixError::Parse(matrix_toml), matrix_toml_display),
@@ -590,17 +590,15 @@ fn root_public_api_and_error_contract_is_compile_checked() {
         ExecutionPlanV1,
         NormalizedRuntime,
         VerificationPolicyDocument,
+    )> = None;
+    let _: Option<(
         VerificationPolicyV1,
         VerificationPolicyV1_1,
         MatrixPlanV2,
         VerificationReportV1,
-        ReceiptError,
-        ConfigError,
-        PolicyError,
-        TrustedPlanError,
-        VerificationError,
-        MatrixError,
     )> = None;
+    let _: Option<(ReceiptError, ConfigError, PolicyError)> = None;
+    let _: Option<(TrustedPlanError, VerificationError, MatrixError)> = None;
     assert_type_contracts();
     receipt_witness(ReceiptError::NoChecks);
     config_witness(ConfigError::NoChecks);
