@@ -1,6 +1,6 @@
 # Opaque cache-payload symbolic-link design
 
-Status: approved by owner on 2026-08-29  
+Status: approved by owner on 2026-08-29
 Date: 2026-08-29  
 Baseline: `820a7fa6ce83a7ac8593c2800f8be4f44ab82ebc`  
 Scope: make completed cache generations reusable when ordinary package-manager
