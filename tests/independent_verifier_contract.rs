@@ -536,6 +536,7 @@ struct Node {
 }
 #[derive(serde::Deserialize)]
 struct Dep {
+    name: String,
     pkg: String,
     dep_kinds: Vec<DepKind>,
 }
@@ -544,19 +545,35 @@ struct DepKind {
     kind: Option<String>,
 }
 
-fn assert_dependency_graph(metadata: &str, policy: &DependencyPolicy) {
-    let graph: Metadata = serde_json::from_str(metadata).unwrap();
-    let package = graph
+fn check_dependency_graph(metadata: &str, policy: &DependencyPolicy) -> Result<(), String> {
+    let graph: Metadata =
+        serde_json::from_str(metadata).map_err(|e| format!("invalid metadata: {e}"))?;
+    let packages: std::collections::HashMap<_, _> =
+        graph.packages.iter().map(|p| (p.id.as_str(), p)).collect();
+    if packages.len() != graph.packages.len() {
+        return Err("duplicate package ID".into());
+    }
+    let matches: Vec<_> = graph
         .packages
         .iter()
-        .find(|p| p.name == policy.verifier)
-        .unwrap();
+        .filter(|p| p.name == policy.verifier)
+        .collect();
+    if matches.is_empty() {
+        return Err("missing verifier package".into());
+    }
+    if matches.len() > 1 {
+        return Err("duplicate verifier package".into());
+    }
+    let package = matches[0];
     let nodes: std::collections::HashMap<_, _> = graph
         .resolve
         .nodes
         .iter()
         .map(|n| (n.id.as_str(), n))
         .collect();
+    if nodes.len() != graph.resolve.nodes.len() {
+        return Err("duplicate node ID".into());
+    }
     let mut seen = BTreeSet::new();
     let mut direct = BTreeSet::new();
     let mut stack = vec![package.id.as_str()];
@@ -564,47 +581,58 @@ fn assert_dependency_graph(metadata: &str, policy: &DependencyPolicy) {
         if !seen.insert(id) {
             continue;
         }
-        assert!(id != "path+file:///workspace#commit-ci-preflight");
-        let node = nodes.get(id).unwrap();
+        let pkg = packages
+            .get(id)
+            .ok_or_else(|| format!("missing package for {id}"))?;
+        if policy.forbidden_names.contains(&pkg.name) {
+            return Err(format!("forbidden dependency {}", pkg.name));
+        }
+        if policy.forbidden_ids.contains(id) {
+            return Err(format!("forbidden dependency id {id}"));
+        }
+        let node = nodes
+            .get(id)
+            .ok_or_else(|| format!("missing node for {id}"))?;
         for dep in &node.deps {
+            if dep.dep_kinds.is_empty() {
+                return Err(format!("empty dep_kinds for {}", dep.name));
+            }
             if !dep.dep_kinds.iter().any(|k| k.kind.is_none()) {
                 continue;
             }
-            let target = graph.packages.iter().find(|p| p.id == dep.pkg).unwrap();
-            assert!(
-                !policy.forbidden_names.contains(&target.name),
-                "forbidden dependency {}",
-                target.name
-            );
-            assert!(
-                !policy.forbidden_ids.contains(&target.id),
-                "forbidden dependency id {}",
-                target.id
-            );
+            let target = packages
+                .get(dep.pkg.as_str())
+                .ok_or_else(|| format!("missing package for {}", dep.pkg))?;
             if id == package.id {
-                direct.insert(target.name.clone());
-                assert!(
-                    policy.allowed_direct.contains(&target.name),
-                    "unexpected direct dependency {}",
-                    target.name
-                );
+                if !direct.insert(dep.name.clone()) {
+                    return Err(format!("duplicate direct dependency {}", dep.name));
+                }
+                if !policy.allowed_direct.contains(&dep.name) {
+                    return Err(format!("unexpected direct dependency {}", dep.name));
+                }
             }
             if let Some(source) = &target.source {
-                assert!(
-                    policy
-                        .allowed_source_prefixes
-                        .iter()
-                        .any(|p| source.starts_with(p)),
-                    "invalid source {source}"
-                );
+                if !policy
+                    .allowed_source_prefixes
+                    .iter()
+                    .any(|p| source.starts_with(p))
+                {
+                    return Err(format!("invalid source {source}"));
+                }
+            } else if !target.id.starts_with("path+") {
+                return Err(format!("missing source for {}", target.name));
             }
             stack.push(target.id.as_str());
         }
     }
-    assert_eq!(
-        direct, policy.allowed_direct,
-        "direct dependency set mismatch"
-    );
+    if direct != policy.allowed_direct {
+        return Err("direct dependency set mismatch".into());
+    }
+    Ok(())
+}
+
+fn assert_dependency_graph(metadata: &str, policy: &DependencyPolicy) {
+    check_dependency_graph(metadata, policy).unwrap();
 }
 
 #[test]
@@ -615,13 +643,15 @@ fn verifier_dependency_policy_rejects_forbidden_and_accepts_normal_graph() {
         include_str!("fixtures/cargo-metadata-verifier-pass-v1.json"),
         &policy,
     );
-    let forbidden = std::panic::catch_unwind(|| {
-        assert_dependency_graph(
-            include_str!("fixtures/cargo-metadata-verifier-forbidden-v1.json"),
-            &policy,
-        )
-    });
-    assert!(forbidden.is_err());
+    let forbidden = check_dependency_graph(
+        include_str!("fixtures/cargo-metadata-verifier-forbidden-v1.json"),
+        &DependencyPolicy {
+            allowed_direct: ["ctrlc".to_owned()].into_iter().collect(),
+            ..policy
+        },
+    )
+    .unwrap_err();
+    assert!(forbidden.contains("forbidden dependency ctrlc"));
 }
 
 #[test]
@@ -629,6 +659,7 @@ fn verifier_dependency_policy_controls_fail_independently() {
     let policy: DependencyPolicy =
         serde_json::from_str(include_str!("fixtures/verifier-dependency-policy-v1.json")).unwrap();
     let forbidden_id = DependencyPolicy {
+        allowed_direct: ["ctrlc".to_owned()].into_iter().collect(),
         forbidden_names: BTreeSet::new(),
         forbidden_ids: [
             "registry+https://github.com/rust-lang/crates.io-index#ctrlc@3.5.2".to_owned(),
@@ -637,39 +668,33 @@ fn verifier_dependency_policy_controls_fail_independently() {
         .collect(),
         ..policy
     };
-    let id_failure = std::panic::catch_unwind(|| {
-        assert_dependency_graph(
-            include_str!("fixtures/cargo-metadata-verifier-forbidden-v1.json"),
-            &forbidden_id,
-        )
-    });
-    let id_message = id_failure.unwrap_err().downcast::<String>().unwrap();
+    let id_message = check_dependency_graph(
+        include_str!("fixtures/cargo-metadata-verifier-forbidden-v1.json"),
+        &forbidden_id,
+    )
+    .unwrap_err();
     assert!(id_message.contains("forbidden dependency id"));
 
     let invalid_source = DependencyPolicy {
         allowed_source_prefixes: vec!["path+".to_owned()],
         ..serde_json::from_str(include_str!("fixtures/verifier-dependency-policy-v1.json")).unwrap()
     };
-    let source_failure = std::panic::catch_unwind(|| {
-        assert_dependency_graph(
-            include_str!("fixtures/cargo-metadata-verifier-pass-v1.json"),
-            &invalid_source,
-        )
-    });
-    let source_message = source_failure.unwrap_err().downcast::<String>().unwrap();
+    let source_message = check_dependency_graph(
+        include_str!("fixtures/cargo-metadata-verifier-pass-v1.json"),
+        &invalid_source,
+    )
+    .unwrap_err();
     assert!(source_message.contains("invalid source"));
 
     let unexpected_direct = DependencyPolicy {
         allowed_direct: ["ccp-core".to_owned()].into_iter().collect(),
         ..serde_json::from_str(include_str!("fixtures/verifier-dependency-policy-v1.json")).unwrap()
     };
-    let direct_failure = std::panic::catch_unwind(|| {
-        assert_dependency_graph(
-            include_str!("fixtures/cargo-metadata-verifier-pass-v1.json"),
-            &unexpected_direct,
-        )
-    });
-    let direct_message = direct_failure.unwrap_err().downcast::<String>().unwrap();
+    let direct_message = check_dependency_graph(
+        include_str!("fixtures/cargo-metadata-verifier-pass-v1.json"),
+        &unexpected_direct,
+    )
+    .unwrap_err();
     assert!(direct_message.contains("unexpected direct dependency"));
 }
 
