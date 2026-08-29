@@ -227,6 +227,7 @@
 
 **Files:**
 - Create: `.github/ISSUE_TEMPLATE/adoption_help.yml`
+- Modify: `SUPPORT.md`
 - Modify: `tests/repository_hygiene_contract.rs`
 - Create: `docs/assets/social-preview.png`
 - Modify: `tests/public_documentation_contract.rs`
@@ -263,6 +264,11 @@
 
   Use label `question`, which already exists remotely. Require runtime/platform, repository language, attempted step, bounded error summary, expected outcome, and confirmation that no secrets/private logs are included. Explain that adoption help is not an evidence report.
 
+  Update `SUPPORT.md` so the adoption route says the dedicated form is
+  available from the public issue chooser. Remove the temporary “being added”
+  language, but do not claim that GitHub has already rendered or activated the
+  form before the later live-page verification gate.
+
 - [ ] **Step 4: Render and inspect the preview**
 
   Render into an owned temporary directory:
@@ -297,7 +303,7 @@
   Add an `Added` entry for adoption-help intake and the uploadable preview candidate, explicitly not its remote activation.
 
   ```console
-  rtk git add .github/ISSUE_TEMPLATE/adoption_help.yml docs/assets/social-preview.png docs/REPOSITORY_PRESENTATION.md tests/repository_hygiene_contract.rs tests/public_documentation_contract.rs CHANGELOG.md
+  rtk git add .github/ISSUE_TEMPLATE/adoption_help.yml SUPPORT.md docs/assets/social-preview.png docs/REPOSITORY_PRESENTATION.md tests/repository_hygiene_contract.rs tests/public_documentation_contract.rs CHANGELOG.md
   rtk git commit -m "docs: complete public intake and preview assets"
   ```
 
