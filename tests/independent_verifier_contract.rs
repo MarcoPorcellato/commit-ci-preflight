@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fs, path::Path};
 use sha2::{Digest, Sha256};
-use serde::{Deserializer, de::{self, IgnoredAny, MapAccess, Visitor}};
+use serde::{Deserializer, de::{self, MapAccess, Visitor}};
 use std::fmt;
 
 const MANIFEST: &str = include_str!("fixtures/m2-compatibility-envelope-v1.json");
@@ -12,6 +12,13 @@ fn reject_duplicate_keys(input: &str) -> Result<(), serde_json::Error> {
     impl<'de> Visitor<'de> for V { type Value = (); fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result { f.write_str("object") }
         fn visit_map<A: MapAccess<'de>>(self, mut m: A) -> Result<(), A::Error> { let mut seen=HashSet::new(); while let Some(k)=m.next_key::<String>()? { if !seen.insert(k.clone()) { return Err(de::Error::custom(format!("duplicate key: {k}"))); } m.next_value_seed(S)?; } Ok(()) }
         fn visit_seq<A: de::SeqAccess<'de>>(self, mut s:A)->Result<(),A::Error>{while s.next_element_seed(S)?.is_some(){} Ok(())}
+        fn visit_str<E: de::Error>(self,_:&str)->Result<(),E>{Ok(())}
+        fn visit_string<E: de::Error>(self,_:String)->Result<(),E>{Ok(())}
+        fn visit_bool<E: de::Error>(self,_:bool)->Result<(),E>{Ok(())}
+        fn visit_i64<E: de::Error>(self,_:i64)->Result<(),E>{Ok(())}
+        fn visit_u64<E: de::Error>(self,_:u64)->Result<(),E>{Ok(())}
+        fn visit_f64<E: de::Error>(self,_:f64)->Result<(),E>{Ok(())}
+        fn visit_unit<E: de::Error>(self)->Result<(),E>{Ok(())}
     }
     let mut d=serde_json::Deserializer::from_str(input); d.deserialize_map(V)
 }
