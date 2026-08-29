@@ -407,8 +407,7 @@ impl MatrixPlanEnvelopeV2 {
                     .legacy_basis
                     .as_ref()
                     .ok_or(MatrixContractError::PlanDigestMismatch)?;
-                let projected = crate::matrix_legacy::project_legacy_basis(&self.plan)
-                    .map_err(MatrixContractError::from)?;
+                let projected = crate::matrix_legacy::project_legacy_basis(&self.plan)?;
                 if &projected != basis || projected.outer_digest()? != self.plan_digest {
                     return Err(MatrixContractError::PlanDigestMismatch);
                 }

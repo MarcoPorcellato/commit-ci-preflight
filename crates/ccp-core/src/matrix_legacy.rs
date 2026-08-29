@@ -66,7 +66,7 @@ impl LegacyMatrixDigestBasisV1 {
             .ok_or_else(|| MatrixContractError::UnknownRuntime(id.into()))
     }
     pub fn report_value(&self) -> Result<serde_json::Value, MatrixContractError> {
-        serde_json::to_value(&self.plan).map_err(|e| MatrixContractError::Json(e))
+        serde_json::to_value(&self.plan).map_err(MatrixContractError::Json)
     }
 }
 pub fn project_legacy_basis(
