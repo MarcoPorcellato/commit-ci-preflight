@@ -27,6 +27,33 @@ const ISSUE_CONFIG: &str = include_str!("../.github/ISSUE_TEMPLATE/config.yml");
 const PR_TEMPLATE: &str = include_str!("../.github/PULL_REQUEST_TEMPLATE.md");
 const ROADMAP: &str = include_str!("../ROADMAP.md");
 const SOCIAL_PREVIEW: &str = include_str!("../docs/assets/social-preview.svg");
+const CACHE_AND_WORKSPACE: &str = include_str!("../docs/CACHE_AND_WORKSPACE.md");
+const TESTING_AND_FAULT_INJECTION: &str = include_str!("../docs/TESTING_AND_FAULT_INJECTION.md");
+
+#[test]
+fn cache_payload_documentation_contract() {
+    for phrase in [
+        "control plane",
+        "payload plane",
+        "never follows a payload link target on the host",
+        "relative, absolute, broken, recursive, and outside-root",
+        "Windows link-bearing payload reuse remains unsupported",
+        "one node and one non-directory object",
+        "control-plane and payload-root links still fail closed",
+    ] {
+        assert!(CACHE_AND_WORKSPACE.contains(phrase), "missing {phrase}");
+    }
+    for reference in [
+        "src/cache.rs::complete_payload_symlinks_are_preserved_across_generation_reuse",
+        "src/cache.rs::failed_payload_preflight_removes_the_new_staging_generation",
+        "src/cache.rs::staging_cleanup_unlinks_payload_links_without_touching_targets",
+    ] {
+        assert!(
+            TESTING_AND_FAULT_INJECTION.contains(reference),
+            "missing {reference}"
+        );
+    }
+}
 
 #[test]
 fn matrix_legacy_profile_is_documented_without_production_digest_constants() {

@@ -22,7 +22,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::Duration;
@@ -31,9 +31,14 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::cache_payload::{
+    copy_payload_tree_with_policy, validate_payload_tree, validate_payload_tree_with_policy,
+};
 use crate::config::{ExecutionPlanEnvelopeV1, NormalizedCache};
 use crate::durable_fs::{DurableFileSystem, DurableFsError};
 use crate::receipt::{ReceiptError, canonical_json};
+#[cfg(test)]
+use std::cell::Cell;
 
 pub const DEFAULT_DISK_BUDGET_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const OWNER_FILE: &str = ".ccp-cache-root-v1.json";
@@ -53,6 +58,9 @@ const PROMOTION_SCHEMA_VERSION: &str = "1.0";
 const MAX_INVENTORY_NODES: usize = 100_000;
 const INIT_RETRIES: usize = 40;
 const INIT_RETRY_DELAY: Duration = Duration::from_millis(5);
+const PREPARED_PHASE_PREPARING: u8 = 0;
+const PREPARED_PHASE_STAGING: u8 = 1;
+const PREPARED_PHASE_PROMOTED: u8 = 2;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
@@ -77,6 +85,25 @@ pub enum PlatformFamily {
     MacOs,
     Windows,
     Unix,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PayloadLinkPolicy {
+    Preserve,
+    Reject,
+}
+
+impl PayloadLinkPolicy {
+    pub(crate) const fn current() -> Self {
+        #[cfg(unix)]
+        {
+            Self::Preserve
+        }
+        #[cfg(not(unix))]
+        {
+            Self::Reject
+        }
+    }
 }
 
 impl PlatformFamily {
@@ -402,6 +429,37 @@ impl ManagedCache {
         plan_digest: &str,
         generation: u64,
     ) -> Result<PreparedCacheEntry, CacheError> {
+        self.prepare_entry_with_payload_link_policy(
+            key,
+            plan_digest,
+            generation,
+            PayloadLinkPolicy::current(),
+        )
+    }
+
+    #[cfg(test)]
+    fn prepare_entry_with_payload_link_policy_for_test(
+        &self,
+        key: &CacheKey,
+        plan_digest: &str,
+        generation: u64,
+        payload_link_policy: PayloadLinkPolicy,
+    ) -> Result<PreparedCacheEntry, CacheError> {
+        self.prepare_entry_with_payload_link_policy(
+            key,
+            plan_digest,
+            generation,
+            payload_link_policy,
+        )
+    }
+
+    fn prepare_entry_with_payload_link_policy(
+        &self,
+        key: &CacheKey,
+        plan_digest: &str,
+        generation: u64,
+        payload_link_policy: PayloadLinkPolicy,
+    ) -> Result<PreparedCacheEntry, CacheError> {
         validate_owner_marker(&self.root.path.join(OWNER_FILE))?;
         let entries_root = self.root.path.join(ENTRIES_DIR);
         validate_plain_directory(&entries_root)?;
@@ -425,14 +483,35 @@ impl ManagedCache {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let staging_path = path.join(format!(".staging-{}-{sequence}", std::process::id()));
         ensure_managed_directory(&staging_path)?;
+        let owner = Arc::new(PreparedCacheGenerationOwner {
+            entry_path: path.clone(),
+            staging_path: staging_path.clone(),
+            key_digest: key.digest.clone(),
+            plan_digest: plan_digest.to_owned(),
+            generation,
+            phase: AtomicU8::new(PREPARED_PHASE_PREPARING),
+            _entry_lock: entry_lock,
+        });
         let data_path = staging_path.join("data");
+        #[cfg(test)]
+        if take_staging_data_directory_preparation_failure_for_test() {
+            return Err(CacheError::Io(io::Error::other(
+                "injected staging data directory preparation failure",
+            )));
+        }
         ensure_managed_directory(&data_path)?;
         if complete {
             let source = path.join("data");
             remove_if_present(&data_path)?;
-            if !try_clone_tree(&source, &data_path)? {
-                ensure_managed_directory(&data_path)?;
-                copy_tree(&source, &data_path)?;
+            if !try_clone_tree(&source, &data_path, payload_link_policy)? {
+                let mut nodes = 0;
+                copy_payload_tree_with_policy(
+                    &source,
+                    &data_path,
+                    &mut nodes,
+                    MAX_INVENTORY_NODES,
+                    payload_link_policy,
+                )?;
             }
         }
         let manifest = CacheGenerationManifestV1 {
@@ -443,13 +522,7 @@ impl ManagedCache {
             state: "staging".to_owned(),
         };
         write_generation_manifest(&staging_path, &manifest)?;
-        let owner = Arc::new(PreparedCacheGenerationOwner {
-            staging_path: staging_path.clone(),
-            key_digest: key.digest.clone(),
-            plan_digest: plan_digest.to_owned(),
-            generation,
-            _entry_lock: entry_lock,
-        });
+        owner.phase.store(PREPARED_PHASE_STAGING, Ordering::Release);
         Ok(PreparedCacheEntry {
             path,
             data_path,
@@ -562,6 +635,8 @@ impl ManagedCache {
         {
             return Err(CacheError::GenerationMismatch);
         }
+        let mut nodes = 0;
+        validate_payload_tree(&prepared.data_path, &mut nodes, MAX_INVENTORY_NODES)?;
         Ok(())
     }
 
@@ -587,6 +662,10 @@ impl ManagedCache {
             fs::rename(&prepared.data_path, &current).map_err(CacheError::Io)?;
             fs::rename(&manifest_path, &previous_manifest_path).map_err(CacheError::Io)?;
             write_complete_marker(&marker)?;
+            prepared
+                ._generation_owner
+                .phase
+                .store(PREPARED_PHASE_PROMOTED, Ordering::Release);
         }
         Ok(())
     }
@@ -673,6 +752,8 @@ impl ManagedCache {
         let entry = self.entry_path(key);
         validate_plain_directory(&entry)?;
         validate_plain_directory(&entry.join("data"))?;
+        let mut nodes = 0;
+        validate_payload_tree(&entry.join("data"), &mut nodes, MAX_INVENTORY_NODES)?;
         let marker = entry.join(COMPLETE_FILE);
         match fs::symlink_metadata(&marker) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -729,8 +810,16 @@ impl ManagedCache {
             if !is_cache_directory_name(&name) && !name.starts_with(".entry-tmp-") {
                 return Err(CacheError::UnexpectedEntry(entry.path()));
             }
+            // A valid entry can be changed by its legitimate owner while it is
+            // prepared. Inventory must take the same cooperative lock before
+            // inspecting either status or payload descendants.
+            let _entry_lock = if is_cache_directory_name(&name) {
+                Some(acquire_existing_entry_lock_readonly(&entry.path())?)
+            } else {
+                None
+            };
             let mut nodes = 0;
-            let (bytes, files) = bounded_tree_size(&entry.path(), &mut nodes)?;
+            let (bytes, files) = bounded_entry_size(&entry.path(), &mut nodes)?;
             let status = entry_status(&entry.path(), &name)?;
             entries.push(CacheEntryInventory {
                 directory: name,
@@ -935,28 +1024,43 @@ pub struct PreparedCacheEntry {
 
 #[derive(Debug)]
 struct PreparedCacheGenerationOwner {
+    entry_path: PathBuf,
     staging_path: PathBuf,
     key_digest: String,
     plan_digest: String,
     generation: u64,
+    phase: AtomicU8,
     _entry_lock: Arc<File>,
 }
 
 impl Drop for PreparedCacheGenerationOwner {
     fn drop(&mut self) {
-        let Ok(manifest) =
-            read_generation_manifest(&self.staging_path.join(GENERATION_MANIFEST_FILE))
-        else {
+        let phase = self.phase.load(Ordering::Acquire);
+        if phase == PREPARED_PHASE_PROMOTED {
             return;
-        };
-        if manifest.schema_version == GENERATION_SCHEMA_VERSION
-            && manifest.key_digest == self.key_digest
-            && manifest.plan_digest == self.plan_digest
-            && manifest.generation == self.generation
-            && manifest.state == "staging"
-        {
-            let _ = fs::remove_dir_all(&self.staging_path);
         }
+        if phase != PREPARED_PHASE_PREPARING && phase != PREPARED_PHASE_STAGING {
+            return;
+        }
+        if validate_owned_staging_root(&self.entry_path, &self.staging_path).is_err() {
+            return;
+        }
+        if phase == PREPARED_PHASE_STAGING {
+            let Ok(manifest) =
+                read_generation_manifest(&self.staging_path.join(GENERATION_MANIFEST_FILE))
+            else {
+                return;
+            };
+            if manifest.schema_version != GENERATION_SCHEMA_VERSION
+                || manifest.key_digest != self.key_digest
+                || manifest.plan_digest != self.plan_digest
+                || manifest.generation != self.generation
+                || manifest.state != "staging"
+            {
+                return;
+            }
+        }
+        let _ = remove_owned_generation_directory(&self.staging_path);
     }
 }
 
@@ -1141,6 +1245,12 @@ fn write_generation_manifest(
     manifest: &CacheGenerationManifestV1,
 ) -> Result<(), CacheError> {
     let bytes = canonical_json(manifest).map_err(CacheError::Canonical)?;
+    #[cfg(test)]
+    if take_generation_manifest_write_failure_for_test() {
+        return Err(CacheError::Io(io::Error::other(
+            "injected generation manifest write failure",
+        )));
+    }
     let path = staging_path.join(GENERATION_MANIFEST_FILE);
     let mut file = OpenOptions::new()
         .write(true)
@@ -1230,6 +1340,29 @@ fn remove_if_present(path: &Path) -> Result<(), CacheError> {
     }
 }
 
+fn remove_owned_generation_directory(path: &Path) -> Result<(), CacheError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()))
+        }
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path).map_err(CacheError::Io),
+        Ok(_) => Err(CacheError::UnexpectedEntry(path.to_path_buf())),
+        Err(error) => Err(CacheError::Io(error)),
+    }
+}
+
+fn validate_owned_staging_root(entry_path: &Path, staging_path: &Path) -> Result<(), CacheError> {
+    if staging_path.parent() != Some(entry_path) {
+        return Err(CacheError::GenerationMismatch);
+    }
+    let name = staging_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(CacheError::GenerationMismatch)?;
+    validate_owned_name(name, ".staging-")?;
+    validate_plain_directory(staging_path)
+}
+
 fn write_complete_marker(path: &Path) -> Result<(), CacheError> {
     let mut file = OpenOptions::new()
         .write(true)
@@ -1240,11 +1373,27 @@ fn write_complete_marker(path: &Path) -> Result<(), CacheError> {
     file.sync_all().map_err(CacheError::Io)
 }
 
-fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError> {
+fn try_clone_tree(
+    source: &Path,
+    destination: &Path,
+    payload_link_policy: PayloadLinkPolicy,
+) -> Result<bool, CacheError> {
     let mut nodes = 0;
-    bounded_tree_size(source, &mut nodes)?;
+    validate_payload_tree_with_policy(
+        source,
+        &mut nodes,
+        MAX_INVENTORY_NODES,
+        payload_link_policy,
+    )?;
+    #[cfg(test)]
+    if take_forced_clone_fallback_for_test() {
+        record_clone_operation_for_test(CloneOperation::ForcedFallback);
+        return Ok(false);
+    }
     #[cfg(target_os = "macos")]
     {
+        #[cfg(test)]
+        record_clone_operation_for_test(CloneOperation::Attempted);
         let source = CString::new(
             source
                 .to_str()
@@ -1258,13 +1407,17 @@ fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError>
         )
         .map_err(|_| CacheError::UnsafePath("cache path contains NUL"))?;
         // clonefile is an optimization only. Unsupported filesystems fall
-        // back to the deterministic symlink-rejecting copy path below.
+        // back to the deterministic link-preserving copy path below.
         let result = unsafe { clonefile(source.as_ptr(), destination_c.as_ptr(), 0) };
         if result == 0 {
+            #[cfg(test)]
+            record_clone_operation_for_test(CloneOperation::Succeeded);
             return Ok(true);
         }
         let error = io::Error::last_os_error();
         if matches!(error.raw_os_error(), Some(18 | 22 | 45 | 95)) {
+            #[cfg(test)]
+            record_clone_operation_for_test(CloneOperation::NaturalFallback);
             remove_if_present(destination)?;
             return Ok(false);
         }
@@ -1277,24 +1430,71 @@ fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError>
     }
 }
 
-fn copy_tree(source: &Path, destination: &Path) -> Result<(), CacheError> {
-    let metadata = fs::symlink_metadata(source).map_err(CacheError::Io)?;
-    if metadata.file_type().is_symlink() {
-        return Err(CacheError::SymlinkInManagedRoot(source.to_path_buf()));
-    }
-    if metadata.is_file() {
-        fs::copy(source, destination).map_err(CacheError::Io)?;
-        return Ok(());
-    }
-    if !metadata.is_dir() {
-        return Err(CacheError::UnexpectedEntry(source.to_path_buf()));
-    }
-    ensure_managed_directory(destination)?;
-    for entry in sorted_directory_entries(source)? {
-        let name = entry.file_name();
-        copy_tree(&entry.path(), &destination.join(name))?;
-    }
-    Ok(())
+#[cfg(test)]
+thread_local! {
+    static FORCE_CLONE_FALLBACK: Cell<bool> = const { Cell::new(false) };
+    static FAIL_STAGING_DATA_DIRECTORY_PREPARATION_ONCE: Cell<bool> = const { Cell::new(false) };
+    static FAIL_GENERATION_MANIFEST_WRITE_ONCE: Cell<bool> = const { Cell::new(false) };
+    static CLONE_OPERATIONS: std::cell::RefCell<Vec<CloneOperation>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+fn fail_staging_data_directory_preparation_once_for_test() {
+    FAIL_STAGING_DATA_DIRECTORY_PREPARATION_ONCE.with(|failure| failure.set(true));
+}
+
+#[cfg(test)]
+fn take_staging_data_directory_preparation_failure_for_test() -> bool {
+    FAIL_STAGING_DATA_DIRECTORY_PREPARATION_ONCE.with(|failure| failure.replace(false))
+}
+
+#[cfg(test)]
+fn fail_generation_manifest_write_once_for_test() {
+    FAIL_GENERATION_MANIFEST_WRITE_ONCE.with(|failure| failure.set(true));
+}
+
+#[cfg(test)]
+fn take_generation_manifest_write_failure_for_test() -> bool {
+    FAIL_GENERATION_MANIFEST_WRITE_ONCE.with(|failure| failure.replace(false))
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloneOperation {
+    #[cfg(target_os = "macos")]
+    Attempted,
+    #[cfg(target_os = "macos")]
+    Succeeded,
+    #[cfg(target_os = "macos")]
+    NaturalFallback,
+    ForcedFallback,
+}
+
+#[cfg(test)]
+fn force_clone_fallback_for_test() {
+    FORCE_CLONE_FALLBACK.with(|forced| forced.set(true));
+}
+
+#[cfg(test)]
+fn take_forced_clone_fallback_for_test() -> bool {
+    FORCE_CLONE_FALLBACK.with(|forced| forced.replace(false))
+}
+
+#[cfg(test)]
+fn record_clone_operation_for_test(operation: CloneOperation) {
+    CLONE_OPERATIONS.with(|operations| operations.borrow_mut().push(operation));
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn clear_clone_operations_for_test() {
+    CLONE_OPERATIONS.with(|operations| operations.borrow_mut().clear());
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn take_clone_operations_for_test() -> Vec<CloneOperation> {
+    CLONE_OPERATIONS.with(|operations| std::mem::take(&mut *operations.borrow_mut()))
 }
 
 fn wait_for_concurrent_initializer(root: &Path, marker: &Path) -> Result<(), CacheError> {
@@ -1427,25 +1627,34 @@ fn acquire_existing_entry_lock(entry: &Path) -> Result<Arc<File>, CacheError> {
     acquire_advisory_lock_existing(&entry.join(ENTRY_LOCK_FILE), "cache entry")
 }
 
+fn acquire_existing_entry_lock_readonly(entry: &Path) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock_existing_readonly(&entry.join(ENTRY_LOCK_FILE))
+}
+
 fn acquire_promotion_lock(root: &Path) -> Result<Arc<File>, CacheError> {
     acquire_advisory_lock(&root.join(PROMOTION_LOCK_FILE), "cache promotion")
 }
 
 fn acquire_advisory_lock(path: &Path, label: &'static str) -> Result<Arc<File>, CacheError> {
-    acquire_advisory_lock_with_mode(path, label, true)
+    acquire_advisory_lock_with_mode(path, label, true, true)
 }
 
 fn acquire_advisory_lock_existing(
     path: &Path,
     label: &'static str,
 ) -> Result<Arc<File>, CacheError> {
-    acquire_advisory_lock_with_mode(path, label, false)
+    acquire_advisory_lock_with_mode(path, label, false, true)
+}
+
+fn acquire_advisory_lock_existing_readonly(path: &Path) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock_with_mode(path, "cache entry", false, false)
 }
 
 fn acquire_advisory_lock_with_mode(
     path: &Path,
     label: &'static str,
     create: bool,
+    write_owner: bool,
 ) -> Result<Arc<File>, CacheError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1470,13 +1679,15 @@ fn acquire_advisory_lock_with_mode(
         }
         return Err(CacheError::Io(error));
     }
-    file.set_len(0).map_err(CacheError::Io)?;
-    let owner = format!(
-        "{{\"schema_version\":\"1.0\",\"owner\":\"commit-ci-preflight\",\"purpose\":\"{label}\",\"pid\":{}}}\n",
-        std::process::id()
-    );
-    file.write_all(owner.as_bytes()).map_err(CacheError::Io)?;
-    file.sync_all().map_err(CacheError::Io)?;
+    if write_owner {
+        file.set_len(0).map_err(CacheError::Io)?;
+        let owner = format!(
+            "{{\"schema_version\":\"1.0\",\"owner\":\"commit-ci-preflight\",\"purpose\":\"{label}\",\"pid\":{}}}\n",
+            std::process::id()
+        );
+        file.write_all(owner.as_bytes()).map_err(CacheError::Io)?;
+        file.sync_all().map_err(CacheError::Io)?;
+    }
     Ok(Arc::new(file))
 }
 
@@ -1608,7 +1819,26 @@ fn sorted_directory_entries(path: &Path) -> Result<Vec<fs::DirEntry>, CacheError
     Ok(entries)
 }
 
-fn bounded_tree_size(path: &Path, nodes: &mut usize) -> Result<(u64, u64), CacheError> {
+fn bounded_entry_size(path: &Path, nodes: &mut usize) -> Result<(u64, u64), CacheError> {
+    bounded_entry_size_at(path, path, nodes)
+}
+
+fn bounded_entry_size_at(
+    entry_root: &Path,
+    path: &Path,
+    nodes: &mut usize,
+) -> Result<(u64, u64), CacheError> {
+    if is_payload_root(entry_root, path) {
+        let metadata = fs::symlink_metadata(path).map_err(CacheError::Io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(CacheError::SymlinkInManagedRoot(path.to_path_buf()));
+        }
+        if !metadata.is_dir() {
+            return Err(CacheError::UnexpectedEntry(path.to_path_buf()));
+        }
+        let stats = crate::cache_payload::measure_payload_tree(path, nodes, MAX_INVENTORY_NODES)?;
+        return Ok((stats.bytes, stats.files));
+    }
     *nodes = nodes.checked_add(1).ok_or(CacheError::SizeOverflow)?;
     if *nodes > MAX_INVENTORY_NODES {
         return Err(CacheError::InventoryLimitExceeded);
@@ -1626,7 +1856,7 @@ fn bounded_tree_size(path: &Path, nodes: &mut usize) -> Result<(u64, u64), Cache
     let mut bytes = 0_u64;
     let mut files = 0_u64;
     for entry in sorted_directory_entries(path)? {
-        let (entry_bytes, entry_files) = bounded_tree_size(&entry.path(), nodes)?;
+        let (entry_bytes, entry_files) = bounded_entry_size_at(entry_root, &entry.path(), nodes)?;
         bytes = bytes
             .checked_add(entry_bytes)
             .ok_or(CacheError::SizeOverflow)?;
@@ -1635,6 +1865,31 @@ fn bounded_tree_size(path: &Path, nodes: &mut usize) -> Result<(u64, u64), Cache
             .ok_or(CacheError::SizeOverflow)?;
     }
     Ok((bytes, files))
+}
+
+fn is_payload_root(entry_root: &Path, candidate: &Path) -> bool {
+    let Some(entry_name) = entry_root.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !is_cache_directory_name(entry_name) {
+        return false;
+    }
+    let Ok(relative) = candidate.strip_prefix(entry_root) else {
+        return false;
+    };
+    let components: Vec<_> = relative.components().collect();
+    match components.as_slice() {
+        [Component::Normal(data)] => data.to_str() == Some("data"),
+        [Component::Normal(generation), Component::Normal(data)] => {
+            let Some(generation) = generation.to_str() else {
+                return false;
+            };
+            data.to_str() == Some("data")
+                && (validate_owned_name(generation, ".staging-").is_ok()
+                    || validate_owned_name(generation, ".backup-").is_ok())
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1701,6 +1956,9 @@ pub enum CacheError {
     InvalidOwnershipMarker(PathBuf),
     SymlinkInManagedRoot(PathBuf),
     UnexpectedEntry(PathBuf),
+    PayloadSymlinkUnsupported(PathBuf),
+    PayloadSymlinkRead { path: PathBuf, source: io::Error },
+    PayloadSymlinkCreate { path: PathBuf, source: io::Error },
     InventoryLimitExceeded,
     InvalidBudget,
     InvalidDigest,
@@ -1730,6 +1988,9 @@ impl CacheError {
             | Self::SizeOverflow
             | Self::Canonical(_)
             | Self::Io(_) => 70,
+            Self::PayloadSymlinkUnsupported(_)
+            | Self::PayloadSymlinkRead { .. }
+            | Self::PayloadSymlinkCreate { .. } => 70,
         }
     }
 }
@@ -1770,6 +2031,15 @@ impl fmt::Display for CacheError {
             Self::SizeOverflow => formatter.write_str("cache size accounting overflowed"),
             Self::Canonical(_) => formatter.write_str("cache key could not be canonicalized"),
             Self::Io(_) => formatter.write_str("cache filesystem operation failed"),
+            Self::PayloadSymlinkUnsupported(_) => {
+                formatter.write_str("cache payload symbolic links are unsupported on this platform")
+            }
+            Self::PayloadSymlinkRead { .. } => {
+                formatter.write_str("cache payload symbolic-link target could not be read")
+            }
+            Self::PayloadSymlinkCreate { .. } => {
+                formatter.write_str("cache payload symbolic link could not be created")
+            }
         }
     }
 }
@@ -1779,6 +2049,9 @@ impl std::error::Error for CacheError {
         match self {
             Self::Canonical(source) => Some(source),
             Self::Io(source) => Some(source),
+            Self::PayloadSymlinkRead { source, .. } | Self::PayloadSymlinkCreate { source, .. } => {
+                Some(source)
+            }
             _ => None,
         }
     }
@@ -1789,6 +2062,49 @@ mod tests {
     use super::*;
     use crate::config::ConfigV1;
     use std::sync::{Arc, Barrier};
+
+    #[cfg(unix)]
+    const SHORT_SOCKET_DIRECTORY_RETRIES: usize = 16;
+
+    #[cfg(unix)]
+    struct ShortSocketFixtureDirectory {
+        path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl ShortSocketFixtureDirectory {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ShortSocketFixtureDirectory {
+        fn drop(&mut self) {
+            match fs::symlink_metadata(&self.path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    let _ = fs::remove_dir_all(&self.path);
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn short_socket_fixture_directory() -> ShortSocketFixtureDirectory {
+        let process_id = std::process::id();
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        for attempt in 0..SHORT_SOCKET_DIRECTORY_RETRIES {
+            let path =
+                PathBuf::from("/tmp").join(format!("ccp-cs-{process_id}-{sequence}-{attempt}"));
+            match fs::create_dir(&path) {
+                Ok(()) => return ShortSocketFixtureDirectory { path },
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create short socket fixture directory: {error}"),
+            }
+        }
+        panic!("claim unique short socket fixture directory")
+    }
 
     fn test_root(name: &str) -> PathBuf {
         std::env::var_os("CCP_TEST_ROOT")
@@ -2076,6 +2392,7 @@ timeout_seconds = 60
         let key = CacheKey::for_plan_cache(&envelope(), &envelope().plan.caches[0]).expect("key");
         let complete = cache.entry_path(&key);
         fs::create_dir_all(complete.join("data")).expect("complete data");
+        drop(acquire_entry_lock(&complete).expect("entry lock"));
         fs::write(complete.join("data/value"), b"cache").expect("cache data");
         fs::write(complete.join(COMPLETE_FILE), COMPLETE_BYTES).expect("complete marker");
         let incomplete = resolved
@@ -2099,22 +2416,186 @@ timeout_seconds = 60
 
     #[cfg(unix)]
     #[test]
-    fn inventory_never_follows_symlinks() {
+    fn inventory_counts_payload_links_without_following_targets() {
+        use std::os::unix::{ffi::OsStrExt, fs::symlink};
+        let fixture = completed_entry_fixture("inventory-payload-links");
+        let before = fixture.cache.inventory().unwrap().entries.remove(0);
+        let outside = fixture.repo.join("inventory-sentinel");
+        fs::write(&outside, b"sentinel").unwrap();
+        symlink(&outside, fixture.data_path.join("external-link")).unwrap();
+        let after = fixture.cache.inventory().unwrap().entries.remove(0);
+        assert_eq!(after.files, before.files + 1);
+        assert_eq!(
+            after.bytes,
+            before.bytes + outside.as_os_str().as_bytes().len() as u64
+        );
+        assert_eq!(fs::read(&outside).unwrap(), b"sentinel");
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn inventory_counts_each_payload_root_once() {
+        let (_repo, resolved) = resolved_fixture("inventory-node-count");
+        let entry = resolved
+            .path
+            .join(ENTRIES_DIR)
+            .join("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        fs::create_dir_all(entry.join("data")).unwrap();
+        fs::write(entry.join("data/payload"), b"payload").unwrap();
+        let mut nodes = 0;
+        let stats = bounded_entry_size(&entry, &mut nodes).unwrap();
+        assert_eq!(nodes, 3);
+        assert_eq!(stats, (7, 1));
+        clean(&resolved.path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_rejects_a_symlink_at_the_payload_root() {
         use std::os::unix::fs::symlink;
+        let fixture = completed_entry_fixture("inventory-payload-root-link");
+        let real = fixture.entry_path.join("real-data");
+        fs::rename(&fixture.data_path, &real).unwrap();
+        symlink(&real, &fixture.data_path).unwrap();
+        assert!(matches!(
+            fixture.cache.inventory(),
+            Err(CacheError::SymlinkInManagedRoot(_))
+        ));
+        finish_fixture(fixture);
+    }
 
-        let (repo, resolved) = resolved_fixture("inventory-symlink");
-        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
-        let key = CacheKey::for_plan_cache(&envelope(), &envelope().plan.caches[0]).expect("key");
+    #[cfg(unix)]
+    #[test]
+    fn inventory_switches_mode_only_at_exact_generation_data_roots() {
+        use std::os::unix::fs::symlink;
+        let (repo, resolved) = resolved_fixture("inventory-generation-payloads");
+        let cache = ManagedCache::initialize(resolved.clone()).unwrap();
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
         let entry = cache.entry_path(&key);
-        fs::create_dir_all(&entry).expect("entry");
-        symlink(&repo, entry.join("escape")).expect("escape symlink");
-
+        let staging = entry.join(".staging-1-1");
+        let backup = entry.join(".backup-1-1");
+        fs::create_dir_all(staging.join("data")).unwrap();
+        fs::create_dir_all(backup.join("data")).unwrap();
+        drop(acquire_entry_lock(&entry).expect("entry lock"));
+        let outside = repo.join("generation-sentinel");
+        fs::write(&outside, b"sentinel").unwrap();
+        symlink(&outside, staging.join("data/external")).unwrap();
+        symlink(&outside, backup.join("data/external")).unwrap();
+        let accepted = cache.inventory().unwrap();
+        assert_eq!(accepted.entries.len(), 1);
+        assert!(accepted.entries[0].files >= 2);
+        symlink(&outside, staging.join("control-link")).unwrap();
         assert!(matches!(
             cache.inventory(),
             Err(CacheError::SymlinkInManagedRoot(_))
         ));
         clean(&resolved.path);
         clean(&repo);
+    }
+
+    #[test]
+    fn payload_root_classifier_requires_a_valid_entry_and_owned_generation_name() {
+        let root = PathBuf::from("/owned/entries");
+        let valid =
+            root.join("sha256-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        for candidate in [
+            valid.join("data"),
+            valid.join(".staging-1-1").join("data"),
+            valid.join(".backup-1-1").join("data"),
+        ] {
+            assert!(
+                is_payload_root(&valid, &candidate),
+                "accepted {candidate:?}"
+            );
+        }
+        for (entry, candidate) in [
+            (root.join(".entry-tmp-1"), root.join(".entry-tmp-1/data")),
+            (root.join("not-a-key"), root.join("not-a-key/data")),
+            (valid.clone(), valid.join(".staging-/data")),
+            (valid.clone(), valid.join(".staging-invalid/name/data")),
+            (valid.clone(), valid.join(".backup-/data")),
+            (valid.clone(), valid.join(".backup-invalid/name/data")),
+        ] {
+            assert!(
+                !is_payload_root(&entry, &candidate),
+                "unexpected payload root {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inventory_fails_closed_while_a_valid_entry_lock_is_held() {
+        let fixture = completed_entry_fixture("inventory-entry-lock");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let prepared = fixture
+            .cache
+            .prepare_entry(&key, &plan.plan_digest, 2)
+            .expect("hold entry lock");
+
+        assert!(matches!(
+            fixture.cache.inventory(),
+            Err(CacheError::LockBusy(_))
+        ));
+        assert!(matches!(
+            fixture.cache.cleanup_dry_run(),
+            Err(CacheError::LockBusy(_))
+        ));
+
+        drop(prepared);
+        fixture
+            .cache
+            .inventory()
+            .expect("inventory after lock release");
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn inventory_and_cleanup_preserve_existing_entry_lock_bytes_and_metadata() {
+        let fixture = completed_entry_fixture("inventory-read-only-lock");
+        let lock = fixture.entry_path.join(ENTRY_LOCK_FILE);
+        fs::write(&lock, b"immutable inventory lock bytes\n").expect("write lock fixture");
+        let before_bytes = fs::read(&lock).expect("read lock before");
+        let before_metadata = fs::metadata(&lock).expect("lock metadata before");
+
+        fixture.cache.inventory().expect("inventory");
+        assert_eq!(
+            fs::read(&lock).expect("read lock after inventory"),
+            before_bytes
+        );
+        let after_inventory = fs::metadata(&lock).expect("lock metadata after inventory");
+        assert_eq!(after_inventory.len(), before_metadata.len());
+        assert_eq!(
+            after_inventory.modified().unwrap(),
+            before_metadata.modified().unwrap()
+        );
+
+        fixture.cache.cleanup_dry_run().expect("cleanup dry run");
+        assert_eq!(
+            fs::read(&lock).expect("read lock after cleanup"),
+            before_bytes
+        );
+        let after_cleanup = fs::metadata(&lock).expect("lock metadata after cleanup");
+        assert_eq!(after_cleanup.len(), before_metadata.len());
+        assert_eq!(
+            after_cleanup.modified().unwrap(),
+            before_metadata.modified().unwrap()
+        );
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn inventory_and_cleanup_reject_missing_entry_lock_without_recreating_it() {
+        let fixture = completed_entry_fixture("inventory-missing-entry-lock");
+        let lock = fixture.entry_path.join(ENTRY_LOCK_FILE);
+        fs::remove_file(&lock).expect("remove entry lock");
+
+        assert!(fixture.cache.inventory().is_err());
+        assert!(!lock.exists(), "inventory must not recreate lock");
+        assert!(fixture.cache.cleanup_dry_run().is_err());
+        assert!(!lock.exists(), "cleanup must not recreate lock");
+        finish_fixture(fixture);
     }
 
     #[cfg(unix)]
@@ -2190,6 +2671,38 @@ timeout_seconds = 60
         clean(&repo);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn promotion_rejects_an_unsupported_payload_object_before_journaling() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+
+        let (repo, resolved) = resolved_fixture("promotion-payload-object");
+        let cache = ManagedCache::initialize(resolved.clone()).unwrap();
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
+        let prepared = cache.prepare_entry(&key, &plan.plan_digest, 1).unwrap();
+        let socket_path = prepared.data_path.join("socket");
+        let socket_directory = short_socket_fixture_directory();
+        let socket_parent = socket_directory.path().join("fixture");
+        symlink(&prepared.data_path, &socket_parent).unwrap();
+        let listener = UnixListener::bind(socket_parent.join("socket")).unwrap();
+
+        assert!(matches!(
+            cache.promote_entry(&prepared),
+            Err(CacheError::UnexpectedEntry(_))
+        ));
+        assert!(!resolved.path.join(PROMOTION_JOURNAL_FILE).exists());
+        assert!(!cache.entry_path(&key).join(COMPLETE_FILE).exists());
+
+        drop(listener);
+        fs::remove_file(socket_path).unwrap();
+        fs::remove_file(socket_parent).unwrap();
+        drop(socket_directory);
+        drop(prepared);
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
     #[test]
     fn failed_generation_does_not_mutate_last_known_good() {
         let (repo, resolved) = resolved_fixture("complete-entry-mutation");
@@ -2228,6 +2741,400 @@ timeout_seconds = 60
         assert_eq!(inventory.entries.len(), 1);
         assert_eq!(inventory.entries[0].status, CacheEntryStatus::Complete);
 
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn complete_payload_symlinks_are_preserved_across_generation_reuse() {
+        use std::os::unix::fs::symlink;
+
+        let (repo, resolved) = resolved_fixture("payload-link-reuse");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("cache key");
+        let outside = repo.join("reuse-sentinel");
+        fs::write(&outside, b"unchanged").expect("write external sentinel");
+
+        let first = cache
+            .prepare_entry(&key, &plan.plan_digest, 1)
+            .expect("prepare first generation");
+        fs::write(first.data_path.join("regular"), b"value").expect("write regular payload");
+        symlink("regular", first.data_path.join("relative")).expect("create relative link");
+        symlink("missing", first.data_path.join("broken")).expect("create broken link");
+        symlink(&outside, first.data_path.join("external")).expect("create external link");
+        cache
+            .promote_entry(&first)
+            .expect("promote first generation");
+        drop(first);
+
+        let second = cache
+            .prepare_entry(&key, &plan.plan_digest, 2)
+            .expect("prepare second generation");
+        for name in ["relative", "broken", "external"] {
+            assert_eq!(
+                fs::read_link(second.data_path.join(name)).expect("read reused link"),
+                fs::read_link(cache.entry_data_path(&key).join(name)).expect("read current link")
+            );
+        }
+        assert_eq!(
+            fs::read(&outside).expect("read external sentinel"),
+            b"unchanged"
+        );
+        drop(second);
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unix_policy_rejects_completed_payload_links_before_partial_reuse() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = completed_entry_fixture("non-unix-payload-link-reuse");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        fs::write(fixture.data_path.join("a-regular"), b"regular payload")
+            .expect("write regular payload");
+        symlink("a-regular", fixture.data_path.join("z-link")).expect("create payload link");
+
+        force_clone_fallback_for_test();
+        crate::cache_payload::clear_payload_copy_failure_for_test();
+        let preparation = fixture
+            .cache
+            .prepare_entry_with_payload_link_policy_for_test(
+                &key,
+                &plan.plan_digest,
+                2,
+                PayloadLinkPolicy::Reject,
+            );
+
+        assert!(matches!(
+            preparation,
+            Err(CacheError::PayloadSymlinkUnsupported(_))
+        ));
+        assert_eq!(
+            crate::cache_payload::payload_copy_successes_for_test(),
+            0,
+            "a rejected payload link must fail before any destination file is copied"
+        );
+        let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
+            .expect("entry directory")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .collect();
+        assert!(staging.is_empty(), "failed reuse leaked {staging:?}");
+        assert!(fixture.data_path.join("z-link").is_symlink());
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn non_unix_policy_reuses_completed_link_free_payloads() {
+        let fixture = completed_entry_fixture("non-unix-link-free-payload-reuse");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+
+        force_clone_fallback_for_test();
+        crate::cache_payload::clear_payload_copy_failure_for_test();
+        let prepared = fixture
+            .cache
+            .prepare_entry_with_payload_link_policy_for_test(
+                &key,
+                &plan.plan_digest,
+                2,
+                PayloadLinkPolicy::Reject,
+            )
+            .expect("link-free payload remains reusable");
+
+        assert_eq!(
+            fs::read(prepared.data_path.join("payload")).expect("read reused payload"),
+            b"owned fixture"
+        );
+        assert!(
+            crate::cache_payload::payload_copy_successes_for_test() > 0,
+            "forced fallback must copy the completed link-free payload"
+        );
+        drop(prepared);
+        finish_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unix_policy_preserves_strict_control_and_payload_root_link_rejection() {
+        use std::os::unix::fs::symlink;
+
+        let control_fixture = completed_entry_fixture("non-unix-control-link-rejection");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let lock_path = control_fixture.entry_path.join(ENTRY_LOCK_FILE);
+        let external_lock = control_fixture.repo.join("external-entry-lock");
+        fs::write(&external_lock, b"external").expect("write external lock");
+        fs::remove_file(&lock_path).expect("remove entry lock");
+        symlink(&external_lock, &lock_path).expect("replace entry lock with link");
+        assert!(matches!(
+            control_fixture.cache.prepare_entry_with_payload_link_policy_for_test(
+                &key,
+                &plan.plan_digest,
+                2,
+                PayloadLinkPolicy::Reject,
+            ),
+            Err(CacheError::SymlinkInManagedRoot(path)) if path == lock_path
+        ));
+        clean(&control_fixture.resolved.path);
+        clean(&control_fixture.repo);
+
+        let payload_fixture = completed_entry_fixture("non-unix-payload-root-link-rejection");
+        let payload_root = payload_fixture.data_path.clone();
+        let real_payload = payload_fixture.entry_path.join("real-data");
+        fs::rename(&payload_root, &real_payload).expect("move completed payload root");
+        symlink(&real_payload, &payload_root).expect("replace payload root with link");
+        assert!(matches!(
+            payload_fixture.cache.prepare_entry_with_payload_link_policy_for_test(
+                &key,
+                &plan.plan_digest,
+                2,
+                PayloadLinkPolicy::Reject,
+            ),
+            Err(CacheError::SymlinkInManagedRoot(path)) if path == payload_root
+        ));
+        clean(&payload_fixture.resolved.path);
+        clean(&payload_fixture.repo);
+    }
+
+    #[test]
+    fn manifest_write_failure_removes_owned_staging_and_releases_the_entry_lock() {
+        let fixture = completed_entry_fixture("manifest-write-cleanup");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let unrelated = fixture.repo.join("unrelated-sentinel");
+        fs::write(&unrelated, b"unrelated").expect("write unrelated sentinel");
+        let completed_payload = fs::read(fixture.data_path.join("payload")).expect("read payload");
+
+        fail_generation_manifest_write_once_for_test();
+        let preparation = fixture.cache.prepare_entry(&key, &plan.plan_digest, 2);
+
+        assert!(matches!(preparation, Err(CacheError::Io(_))));
+        let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
+            .expect("entry directory")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .collect();
+        assert!(staging.is_empty(), "manifest failure leaked {staging:?}");
+        assert_eq!(
+            fs::read(fixture.data_path.join("payload")).expect("read completed payload"),
+            completed_payload
+        );
+        assert_eq!(
+            fs::read(&unrelated).expect("read unrelated sentinel"),
+            b"unrelated"
+        );
+
+        let released = fixture
+            .cache
+            .prepare_entry(&key, &plan.plan_digest, 3)
+            .expect("entry lock is released after cleanup");
+        drop(released);
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn data_directory_preparation_failure_removes_owned_staging_and_releases_the_entry_lock() {
+        let fixture = completed_entry_fixture("data-directory-preparation-cleanup");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+
+        fail_staging_data_directory_preparation_once_for_test();
+        let preparation = fixture.cache.prepare_entry(&key, &plan.plan_digest, 2);
+
+        assert!(matches!(preparation, Err(CacheError::Io(_))));
+        let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
+            .expect("entry directory")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .map(|entry| entry.path())
+            .collect();
+        let released = fixture.cache.prepare_entry(&key, &plan.plan_digest, 3);
+        let lock_was_released = released.is_ok();
+        drop(released);
+        finish_fixture(fixture);
+
+        assert!(
+            staging.is_empty(),
+            "data preparation failure leaked {staging:?}"
+        );
+        assert!(lock_was_released, "entry lock remained held after failure");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_payload_preflight_removes_the_new_staging_generation() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+
+        let fixture = completed_entry_fixture("failed-payload-preflight-cleanup");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
+        let socket_path = fixture.data_path.join("unsupported.socket");
+        let socket_directory = short_socket_fixture_directory();
+        let socket_parent = socket_directory.path().join("fixture");
+        symlink(&fixture.data_path, &socket_parent).unwrap();
+        let listener = UnixListener::bind(socket_parent.join("unsupported.socket")).unwrap();
+
+        let preparation = fixture.cache.prepare_entry(&key, &plan.plan_digest, 2);
+        let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .collect();
+        drop(listener);
+        fs::remove_file(socket_path).unwrap();
+        fs::remove_file(socket_parent).unwrap();
+        drop(socket_directory);
+        finish_fixture(fixture);
+
+        assert!(matches!(preparation, Err(CacheError::UnexpectedEntry(_))));
+        assert!(staging.is_empty(), "failed preparation leaked {staging:?}");
+    }
+
+    #[test]
+    fn forced_fallback_copy_failure_removes_only_its_owned_staging_generation() {
+        let fixture = completed_entry_fixture("forced-fallback-copy-cleanup");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        fs::write(fixture.data_path.join("second"), b"second payload").expect("second payload");
+
+        force_clone_fallback_for_test();
+        crate::cache_payload::fail_payload_copy_after_for_test(1);
+        let preparation = fixture.cache.prepare_entry(&key, &plan.plan_digest, 2);
+        let copied = crate::cache_payload::payload_copy_successes_for_test();
+        crate::cache_payload::clear_payload_copy_failure_for_test();
+
+        let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
+            .expect("entry directory")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
+            .collect();
+        assert!(matches!(preparation, Err(CacheError::Io(_))));
+        assert_eq!(
+            copied, 1,
+            "one payload object must exist before injected failure"
+        );
+        assert!(staging.is_empty(), "failed fallback leaked {staging:?}");
+        assert!(fixture.data_path.join("payload").is_file());
+        assert!(fixture.data_path.join("second").is_file());
+        finish_fixture(fixture);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_clone_attempt_and_forced_fallback_are_distinguishable() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = completed_entry_fixture("macos-clone-and-fallback");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        symlink("payload", fixture.data_path.join("relative")).expect("relative link");
+
+        clear_clone_operations_for_test();
+        let cloned = fixture
+            .cache
+            .prepare_entry(&key, &plan.plan_digest, 2)
+            .expect("clone preparation");
+        let clone_operations = take_clone_operations_for_test();
+        assert!(clone_operations.contains(&CloneOperation::Attempted));
+        assert!(clone_operations.contains(&CloneOperation::Succeeded));
+        assert_eq!(
+            fs::read_link(cloned.data_path.join("relative")).expect("cloned link"),
+            Path::new("payload")
+        );
+        drop(cloned);
+
+        force_clone_fallback_for_test();
+        let fallback = fixture
+            .cache
+            .prepare_entry(&key, &plan.plan_digest, 3)
+            .expect("forced fallback preparation");
+        assert!(take_clone_operations_for_test().contains(&CloneOperation::ForcedFallback));
+        assert_eq!(
+            fs::read_link(fallback.data_path.join("relative")).expect("fallback link"),
+            Path::new("payload")
+        );
+        drop(fallback);
+        finish_fixture(fixture);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_cleanup_unlinks_payload_links_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+
+        let (repo, resolved) = resolved_fixture("staging-cleanup-links");
+        let cache = ManagedCache::initialize(resolved.clone()).unwrap();
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
+        let outside = repo.join("cleanup-sentinel");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("first"), b"first").unwrap();
+        fs::write(outside.join("second"), b"second").unwrap();
+
+        let prepared = cache.prepare_entry(&key, &plan.plan_digest, 1).unwrap();
+        fs::create_dir(prepared.data_path.join("nested")).unwrap();
+        symlink(&outside, prepared.data_path.join("external")).unwrap();
+        symlink(&outside, prepared.data_path.join("nested/external")).unwrap();
+        let staging = prepared.staging_path.clone();
+        drop(prepared);
+
+        assert!(!staging.exists());
+        assert_eq!(fs::read(outside.join("first")).unwrap(), b"first");
+        assert_eq!(fs::read(outside.join("second")).unwrap(), b"second");
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn owner_drop_preserves_an_unrelated_staging_directory() {
+        let (repo, resolved) = resolved_fixture("unrelated-staging-preserved");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let prepared = cache
+            .prepare_entry(&key, &plan.plan_digest, 1)
+            .expect("prepare");
+        let unrelated = prepared.path.join(".staging-unrelated-1");
+        fs::create_dir_all(unrelated.join("data")).expect("unrelated staging");
+        drop(prepared);
+
+        assert!(
+            unrelated.is_dir(),
+            "owner must not remove unrelated staging"
+        );
+        fs::remove_dir_all(unrelated).expect("remove unrelated fixture");
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn owner_drop_preserves_a_staging_directory_with_altered_manifest_identity() {
+        let (repo, resolved) = resolved_fixture("mismatched-staging-preserved");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let prepared = cache
+            .prepare_entry(&key, &plan.plan_digest, 1)
+            .expect("prepare");
+        let staging = prepared.staging_path.clone();
+        let manifest_path = staging.join(GENERATION_MANIFEST_FILE);
+        let mut manifest = read_generation_manifest(&manifest_path).expect("manifest");
+        manifest.generation = 2;
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("alter manifest identity");
+        drop(prepared);
+
+        assert!(staging.is_dir(), "owner must preserve mismatched staging");
+        fs::remove_dir_all(staging).expect("remove mismatched fixture");
         clean(&resolved.path);
         clean(&repo);
     }
@@ -2331,6 +3238,9 @@ timeout_seconds = 60
             .expect("second");
         fs::write(first.data_path.join("first"), b"one").expect("first data");
         fs::write(second.data_path.join("second"), b"two").expect("second data");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("second", second.data_path.join("relative"))
+            .expect("relative payload link");
         cache
             .promote_entries(&[first, second])
             .expect("promote both");
@@ -2344,6 +3254,21 @@ timeout_seconds = 60
             fs::read(cache.entry_data_path(&second_key).join("second")).expect("second current"),
             b"two"
         );
+        #[cfg(unix)]
+        {
+            let relative = cache.entry_data_path(&second_key).join("relative");
+            assert!(
+                fs::symlink_metadata(&relative)
+                    .expect("relative metadata")
+                    .file_type()
+                    .is_symlink(),
+                "promoted payload link must remain a link"
+            );
+            assert_eq!(
+                fs::read_link(relative).expect("read promoted relative link"),
+                Path::new("second")
+            );
+        }
         clean(&resolved.path);
         clean(&repo);
     }
@@ -2357,6 +3282,14 @@ timeout_seconds = 60
         let prepared = cache
             .prepare_entry(&key, &envelope.plan_digest, 1)
             .expect("prepare");
+        #[cfg(unix)]
+        let outside = {
+            let outside = repo.join("recovery-sentinel");
+            fs::write(&outside, b"recovery").expect("write recovery sentinel");
+            std::os::unix::fs::symlink(&outside, prepared.data_path.join("external"))
+                .expect("external recovery link");
+            outside
+        };
         let journal = cache
             .create_promotion_journal(std::slice::from_ref(&prepared))
             .expect("journal");
@@ -2367,6 +3300,11 @@ timeout_seconds = 60
 
         assert!(!resolved.path.join(PROMOTION_JOURNAL_FILE).exists());
         assert!(!cache.entry_path(&key).join("data").exists());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read(outside).expect("read recovery sentinel"),
+            b"recovery"
+        );
         assert_eq!(journal.entries.len(), 1);
         clean(&resolved.path);
         clean(&repo);
