@@ -130,32 +130,6 @@ fn verification_error_exit_code(error: &ccp_core::verify::VerificationError) -> 
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn verification_exit_code_preserves_root_mapping() {
-        use ccp_core::errors::{PolicyError, TrustedPlanError};
-        use ccp_core::verify::VerificationError;
-        assert_eq!(
-            super::verification_error_exit_code(&VerificationError::Receipt(
-                ccp_core::errors::ReceiptError::EmptyField("x"),
-            )),
-            70
-        );
-        for error in [
-            VerificationError::Policy(PolicyError::TooLarge),
-            VerificationError::PolicyDocument("x".into()),
-            VerificationError::TrustedPlan(TrustedPlanError::PolicyPath),
-            VerificationError::TrustedPolicyPathRequired,
-            VerificationError::InvalidExpectedCommit,
-            VerificationError::InvalidEvaluationTime,
-            VerificationError::Matrix("x".into()),
-        ] {
-            assert_eq!(super::verification_error_exit_code(&error), 2);
-        }
-    }
-}
-
 fn schema(args: SchemaArgs) -> Result<(), (i32, String)> {
     let result = match args.kind {
         SchemaKind::ReceiptV1 => {
@@ -184,4 +158,30 @@ fn schema(args: SchemaArgs) -> Result<(), (i32, String)> {
 fn print_bytes(bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     std::io::stdout().write_all(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn verification_exit_code_preserves_root_mapping() {
+        use ccp_core::errors::{PolicyError, TrustedPlanError};
+        use ccp_core::verify::VerificationError;
+        assert_eq!(
+            super::verification_error_exit_code(&VerificationError::Receipt(
+                ccp_core::errors::ReceiptError::EmptyField("x"),
+            )),
+            70
+        );
+        for error in [
+            VerificationError::Policy(PolicyError::TooLarge),
+            VerificationError::PolicyDocument("x".into()),
+            VerificationError::TrustedPlan(TrustedPlanError::PolicyPath),
+            VerificationError::TrustedPolicyPathRequired,
+            VerificationError::InvalidExpectedCommit,
+            VerificationError::InvalidEvaluationTime,
+            VerificationError::Matrix("x".into()),
+        ] {
+            assert_eq!(super::verification_error_exit_code(&error), 2);
+        }
+    }
 }
