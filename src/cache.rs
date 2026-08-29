@@ -569,6 +569,8 @@ impl ManagedCache {
         {
             return Err(CacheError::GenerationMismatch);
         }
+        let mut nodes = 0;
+        validate_payload_tree(&prepared.data_path, &mut nodes, MAX_INVENTORY_NODES)?;
         Ok(())
     }
 
@@ -684,6 +686,8 @@ impl ManagedCache {
         let entry = self.entry_path(key);
         validate_plain_directory(&entry)?;
         validate_plain_directory(&entry.join("data"))?;
+        let mut nodes = 0;
+        validate_payload_tree(&entry.join("data"), &mut nodes, MAX_INVENTORY_NODES)?;
         let marker = entry.join(COMPLETE_FILE);
         match fs::symlink_metadata(&marker) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -2328,6 +2332,40 @@ timeout_seconds = 60
         clean(&repo);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn promotion_rejects_an_unsupported_payload_object_before_journaling() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+
+        let (repo, resolved) = resolved_fixture("promotion-payload-object");
+        let cache = ManagedCache::initialize(resolved.clone()).unwrap();
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).unwrap();
+        let prepared = cache.prepare_entry(&key, &plan.plan_digest, 1).unwrap();
+        let socket_path = prepared.data_path.join("socket");
+        let socket_parent = PathBuf::from("/private/tmp").join(format!(
+            "ccp-socket-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        symlink(&prepared.data_path, &socket_parent).unwrap();
+        let listener = UnixListener::bind(socket_parent.join("socket")).unwrap();
+
+        assert!(matches!(
+            cache.promote_entry(&prepared),
+            Err(CacheError::UnexpectedEntry(_))
+        ));
+        assert!(!resolved.path.join(PROMOTION_JOURNAL_FILE).exists());
+        assert!(!cache.entry_path(&key).join(COMPLETE_FILE).exists());
+
+        drop(listener);
+        fs::remove_file(socket_path).unwrap();
+        fs::remove_file(socket_parent).unwrap();
+        drop(prepared);
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
     #[test]
     fn failed_generation_does_not_mutate_last_known_good() {
         let (repo, resolved) = resolved_fixture("complete-entry-mutation");
@@ -2571,6 +2609,9 @@ timeout_seconds = 60
             .expect("second");
         fs::write(first.data_path.join("first"), b"one").expect("first data");
         fs::write(second.data_path.join("second"), b"two").expect("second data");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("second", second.data_path.join("relative"))
+            .expect("relative payload link");
         cache
             .promote_entries(&[first, second])
             .expect("promote both");
@@ -2584,6 +2625,21 @@ timeout_seconds = 60
             fs::read(cache.entry_data_path(&second_key).join("second")).expect("second current"),
             b"two"
         );
+        #[cfg(unix)]
+        {
+            let relative = cache.entry_data_path(&second_key).join("relative");
+            assert!(
+                fs::symlink_metadata(&relative)
+                    .expect("relative metadata")
+                    .file_type()
+                    .is_symlink(),
+                "promoted payload link must remain a link"
+            );
+            assert_eq!(
+                fs::read_link(relative).expect("read promoted relative link"),
+                Path::new("second")
+            );
+        }
         clean(&resolved.path);
         clean(&repo);
     }
@@ -2597,6 +2653,14 @@ timeout_seconds = 60
         let prepared = cache
             .prepare_entry(&key, &envelope.plan_digest, 1)
             .expect("prepare");
+        #[cfg(unix)]
+        let outside = {
+            let outside = repo.join("recovery-sentinel");
+            fs::write(&outside, b"recovery").expect("write recovery sentinel");
+            std::os::unix::fs::symlink(&outside, prepared.data_path.join("external"))
+                .expect("external recovery link");
+            outside
+        };
         let journal = cache
             .create_promotion_journal(std::slice::from_ref(&prepared))
             .expect("journal");
@@ -2607,6 +2671,11 @@ timeout_seconds = 60
 
         assert!(!resolved.path.join(PROMOTION_JOURNAL_FILE).exists());
         assert!(!cache.entry_path(&key).join("data").exists());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read(outside).expect("read recovery sentinel"),
+            b"recovery"
+        );
         assert_eq!(journal.entries.len(), 1);
         clean(&resolved.path);
         clean(&repo);
