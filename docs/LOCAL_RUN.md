@@ -22,8 +22,14 @@ values.
 Use `--json` to print the canonical receipt. Raw stdout and stderr remain local
 bounded process state and are not emitted by default or stored in the receipt;
 only their canonical digest, truncation state, exit status, and duration are
-recorded. Use `dry-run` to inspect the exact container argv and reproduce a
-failing command deliberately when deeper local diagnostics are required.
+recorded. `dry-run` is a planning and mount-review surface: it inspects the
+exact container argv, executes no command, and does not create cache
+directories. It renders final `entries/sha256-<key>/data` sources, while a live
+`run` may prepare private per-generation staging sources. Do not directly
+replay the rendered Docker argv. Before a diagnostic invocation, every host
+source must be independently proven to exist, and the diagnostic owns its
+writable lifecycle. Such an invocation is diagnostic, not qualification
+evidence.
 
 Heavy commands use a default-on host-wide single-slot admission queue shared by
 independent repositories, worktrees, agent activities, and cache roots. Override
