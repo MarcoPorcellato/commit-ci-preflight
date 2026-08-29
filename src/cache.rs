@@ -750,7 +750,7 @@ impl ManagedCache {
             // prepared. Inventory must take the same cooperative lock before
             // inspecting either status or payload descendants.
             let _entry_lock = if is_cache_directory_name(&name) {
-                Some(acquire_existing_entry_lock(&entry.path())?)
+                Some(acquire_existing_entry_lock_readonly(&entry.path())?)
             } else {
                 None
             };
@@ -1331,10 +1331,14 @@ fn try_clone_tree(source: &Path, destination: &Path) -> Result<bool, CacheError>
         // back to the deterministic link-preserving copy path below.
         let result = unsafe { clonefile(source.as_ptr(), destination_c.as_ptr(), 0) };
         if result == 0 {
+            #[cfg(test)]
+            record_clone_operation_for_test(CloneOperation::Succeeded);
             return Ok(true);
         }
         let error = io::Error::last_os_error();
         if matches!(error.raw_os_error(), Some(18 | 22 | 45 | 95)) {
+            #[cfg(test)]
+            record_clone_operation_for_test(CloneOperation::NaturalFallback);
             remove_if_present(destination)?;
             return Ok(false);
         }
@@ -1359,6 +1363,8 @@ thread_local! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloneOperation {
     Attempted,
+    Succeeded,
+    NaturalFallback,
     ForcedFallback,
 }
 
@@ -1517,25 +1523,34 @@ fn acquire_existing_entry_lock(entry: &Path) -> Result<Arc<File>, CacheError> {
     acquire_advisory_lock_existing(&entry.join(ENTRY_LOCK_FILE), "cache entry")
 }
 
+fn acquire_existing_entry_lock_readonly(entry: &Path) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock_existing_readonly(&entry.join(ENTRY_LOCK_FILE))
+}
+
 fn acquire_promotion_lock(root: &Path) -> Result<Arc<File>, CacheError> {
     acquire_advisory_lock(&root.join(PROMOTION_LOCK_FILE), "cache promotion")
 }
 
 fn acquire_advisory_lock(path: &Path, label: &'static str) -> Result<Arc<File>, CacheError> {
-    acquire_advisory_lock_with_mode(path, label, true)
+    acquire_advisory_lock_with_mode(path, label, true, true)
 }
 
 fn acquire_advisory_lock_existing(
     path: &Path,
     label: &'static str,
 ) -> Result<Arc<File>, CacheError> {
-    acquire_advisory_lock_with_mode(path, label, false)
+    acquire_advisory_lock_with_mode(path, label, false, true)
+}
+
+fn acquire_advisory_lock_existing_readonly(path: &Path) -> Result<Arc<File>, CacheError> {
+    acquire_advisory_lock_with_mode(path, "cache entry", false, false)
 }
 
 fn acquire_advisory_lock_with_mode(
     path: &Path,
     label: &'static str,
     create: bool,
+    write_owner: bool,
 ) -> Result<Arc<File>, CacheError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -1560,13 +1575,15 @@ fn acquire_advisory_lock_with_mode(
         }
         return Err(CacheError::Io(error));
     }
-    file.set_len(0).map_err(CacheError::Io)?;
-    let owner = format!(
-        "{{\"schema_version\":\"1.0\",\"owner\":\"commit-ci-preflight\",\"purpose\":\"{label}\",\"pid\":{}}}\n",
-        std::process::id()
-    );
-    file.write_all(owner.as_bytes()).map_err(CacheError::Io)?;
-    file.sync_all().map_err(CacheError::Io)?;
+    if write_owner {
+        file.set_len(0).map_err(CacheError::Io)?;
+        let owner = format!(
+            "{{\"schema_version\":\"1.0\",\"owner\":\"commit-ci-preflight\",\"purpose\":\"{label}\",\"pid\":{}}}\n",
+            std::process::id()
+        );
+        file.write_all(owner.as_bytes()).map_err(CacheError::Io)?;
+        file.sync_all().map_err(CacheError::Io)?;
+    }
     Ok(Arc::new(file))
 }
 
@@ -2417,12 +2434,63 @@ timeout_seconds = 60
             fixture.cache.inventory(),
             Err(CacheError::LockBusy(_))
         ));
+        assert!(matches!(
+            fixture.cache.cleanup_dry_run(),
+            Err(CacheError::LockBusy(_))
+        ));
 
         drop(prepared);
         fixture
             .cache
             .inventory()
             .expect("inventory after lock release");
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn inventory_and_cleanup_preserve_existing_entry_lock_bytes_and_metadata() {
+        let fixture = completed_entry_fixture("inventory-read-only-lock");
+        let lock = fixture.entry_path.join(ENTRY_LOCK_FILE);
+        fs::write(&lock, b"immutable inventory lock bytes\n").expect("write lock fixture");
+        let before_bytes = fs::read(&lock).expect("read lock before");
+        let before_metadata = fs::metadata(&lock).expect("lock metadata before");
+
+        fixture.cache.inventory().expect("inventory");
+        assert_eq!(
+            fs::read(&lock).expect("read lock after inventory"),
+            before_bytes
+        );
+        let after_inventory = fs::metadata(&lock).expect("lock metadata after inventory");
+        assert_eq!(after_inventory.len(), before_metadata.len());
+        assert_eq!(
+            after_inventory.modified().unwrap(),
+            before_metadata.modified().unwrap()
+        );
+
+        fixture.cache.cleanup_dry_run().expect("cleanup dry run");
+        assert_eq!(
+            fs::read(&lock).expect("read lock after cleanup"),
+            before_bytes
+        );
+        let after_cleanup = fs::metadata(&lock).expect("lock metadata after cleanup");
+        assert_eq!(after_cleanup.len(), before_metadata.len());
+        assert_eq!(
+            after_cleanup.modified().unwrap(),
+            before_metadata.modified().unwrap()
+        );
+        finish_fixture(fixture);
+    }
+
+    #[test]
+    fn inventory_and_cleanup_reject_missing_entry_lock_without_recreating_it() {
+        let fixture = completed_entry_fixture("inventory-missing-entry-lock");
+        let lock = fixture.entry_path.join(ENTRY_LOCK_FILE);
+        fs::remove_file(&lock).expect("remove entry lock");
+
+        assert!(fixture.cache.inventory().is_err());
+        assert!(!lock.exists(), "inventory must not recreate lock");
+        assert!(fixture.cache.cleanup_dry_run().is_err());
+        assert!(!lock.exists(), "cleanup must not recreate lock");
         finish_fixture(fixture);
     }
 
@@ -2653,8 +2721,9 @@ timeout_seconds = 60
         fs::write(fixture.data_path.join("second"), b"second payload").expect("second payload");
 
         force_clone_fallback_for_test();
-        crate::cache_payload::fail_next_payload_copy_for_test();
+        crate::cache_payload::fail_payload_copy_after_for_test(1);
         let preparation = fixture.cache.prepare_entry(&key, &plan.plan_digest, 2);
+        let copied = crate::cache_payload::payload_copy_successes_for_test();
         crate::cache_payload::clear_payload_copy_failure_for_test();
 
         let staging: Vec<_> = fs::read_dir(&fixture.entry_path)
@@ -2663,6 +2732,10 @@ timeout_seconds = 60
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(".staging-"))
             .collect();
         assert!(matches!(preparation, Err(CacheError::Io(_))));
+        assert_eq!(
+            copied, 1,
+            "one payload object must exist before injected failure"
+        );
         assert!(staging.is_empty(), "failed fallback leaked {staging:?}");
         assert!(fixture.data_path.join("payload").is_file());
         assert!(fixture.data_path.join("second").is_file());
@@ -2684,7 +2757,13 @@ timeout_seconds = 60
             .cache
             .prepare_entry(&key, &plan.plan_digest, 2)
             .expect("clone preparation");
-        assert!(take_clone_operations_for_test().contains(&CloneOperation::Attempted));
+        let clone_operations = take_clone_operations_for_test();
+        assert!(clone_operations.contains(&CloneOperation::Attempted));
+        assert!(clone_operations.contains(&CloneOperation::Succeeded));
+        assert_eq!(
+            fs::read_link(cloned.data_path.join("relative")).expect("cloned link"),
+            Path::new("payload")
+        );
         drop(cloned);
 
         force_clone_fallback_for_test();
@@ -2725,6 +2804,54 @@ timeout_seconds = 60
         assert!(!staging.exists());
         assert_eq!(fs::read(outside.join("first")).unwrap(), b"first");
         assert_eq!(fs::read(outside.join("second")).unwrap(), b"second");
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn owner_drop_preserves_an_unrelated_staging_directory() {
+        let (repo, resolved) = resolved_fixture("unrelated-staging-preserved");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let prepared = cache
+            .prepare_entry(&key, &plan.plan_digest, 1)
+            .expect("prepare");
+        let unrelated = prepared.path.join(".staging-unrelated-1");
+        fs::create_dir_all(unrelated.join("data")).expect("unrelated staging");
+        drop(prepared);
+
+        assert!(
+            unrelated.is_dir(),
+            "owner must not remove unrelated staging"
+        );
+        fs::remove_dir_all(unrelated).expect("remove unrelated fixture");
+        clean(&resolved.path);
+        clean(&repo);
+    }
+
+    #[test]
+    fn owner_drop_preserves_a_staging_directory_with_altered_manifest_identity() {
+        let (repo, resolved) = resolved_fixture("mismatched-staging-preserved");
+        let cache = ManagedCache::initialize(resolved.clone()).expect("initialize");
+        let plan = envelope();
+        let key = CacheKey::for_plan_cache(&plan, &plan.plan.caches[0]).expect("key");
+        let prepared = cache
+            .prepare_entry(&key, &plan.plan_digest, 1)
+            .expect("prepare");
+        let staging = prepared.staging_path.clone();
+        let manifest_path = staging.join(GENERATION_MANIFEST_FILE);
+        let mut manifest = read_generation_manifest(&manifest_path).expect("manifest");
+        manifest.generation = 2;
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("encode manifest"),
+        )
+        .expect("alter manifest identity");
+        drop(prepared);
+
+        assert!(staging.is_dir(), "owner must preserve mismatched staging");
+        fs::remove_dir_all(staging).expect("remove mismatched fixture");
         clean(&resolved.path);
         clean(&repo);
     }

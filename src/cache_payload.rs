@@ -203,12 +203,20 @@ fn traced_read_directory(path: &Path) -> std::io::Result<fs::ReadDir> {
 fn traced_copy_file(source: &Path, destination: &Path) -> std::io::Result<u64> {
     #[cfg(test)]
     {
-        record_payload_operation(PayloadOperation::CopyFile(destination.to_path_buf()));
-        if take_payload_copy_failure_for_test() {
+        record_payload_operation(PayloadOperation::CopyFile {
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+        });
+        if payload_copy_should_fail_for_test() {
             return Err(io::Error::other("injected payload copy failure"));
         }
     }
-    fs::copy(source, destination)
+    let copied = fs::copy(source, destination);
+    #[cfg(test)]
+    if copied.is_ok() {
+        record_payload_copy_success_for_test();
+    }
+    copied
 }
 
 fn traced_create_directory(path: &Path) -> std::io::Result<()> {
@@ -237,7 +245,10 @@ enum PayloadOperation {
     SymlinkMetadata(PathBuf),
     ReadDirectory(PathBuf),
     ReadLink(PathBuf),
-    CopyFile(PathBuf),
+    CopyFile {
+        source: PathBuf,
+        destination: PathBuf,
+    },
     CreateDirectory(PathBuf),
     CreateLink(PathBuf),
 }
@@ -249,9 +260,9 @@ impl PayloadOperation {
             Self::SymlinkMetadata(path)
             | Self::ReadDirectory(path)
             | Self::ReadLink(path)
-            | Self::CopyFile(path)
             | Self::CreateDirectory(path)
             | Self::CreateLink(path) => path,
+            Self::CopyFile { destination, .. } => destination,
         }
     }
 }
@@ -261,22 +272,40 @@ thread_local! {
     static PAYLOAD_OPERATIONS: RefCell<Vec<PayloadOperation>> = const {
         RefCell::new(Vec::new())
     };
-    static PAYLOAD_COPY_FAILURE: Cell<bool> = const { Cell::new(false) };
+    static PAYLOAD_COPY_FAILURE_AFTER: Cell<Option<usize>> = const { Cell::new(None) };
+    static PAYLOAD_COPY_SUCCESSES: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
-pub(crate) fn fail_next_payload_copy_for_test() {
-    PAYLOAD_COPY_FAILURE.with(|failure| failure.set(true));
+pub(crate) fn fail_payload_copy_after_for_test(successful_copies: usize) {
+    PAYLOAD_COPY_FAILURE_AFTER.with(|failure| failure.set(Some(successful_copies)));
+    PAYLOAD_COPY_SUCCESSES.with(|successes| successes.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn clear_payload_copy_failure_for_test() {
-    PAYLOAD_COPY_FAILURE.with(|failure| failure.set(false));
+    PAYLOAD_COPY_FAILURE_AFTER.with(|failure| failure.set(None));
+    PAYLOAD_COPY_SUCCESSES.with(|successes| successes.set(0));
 }
 
 #[cfg(test)]
-fn take_payload_copy_failure_for_test() -> bool {
-    PAYLOAD_COPY_FAILURE.with(|failure| failure.replace(false))
+fn payload_copy_should_fail_for_test() -> bool {
+    PAYLOAD_COPY_FAILURE_AFTER.with(|failure| failure.get() == Some(0))
+}
+
+#[cfg(test)]
+fn record_payload_copy_success_for_test() {
+    PAYLOAD_COPY_SUCCESSES.with(|successes| successes.set(successes.get() + 1));
+    PAYLOAD_COPY_FAILURE_AFTER.with(|failure| {
+        if let Some(remaining) = failure.get() {
+            failure.set(Some(remaining.saturating_sub(1)));
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn payload_copy_successes_for_test() -> usize {
+    PAYLOAD_COPY_SUCCESSES.with(Cell::get)
 }
 
 #[cfg(test)]
@@ -495,7 +524,7 @@ mod tests {
         assert!(
             operations
                 .iter()
-                .any(|operation| matches!(operation, PayloadOperation::CopyFile(_)))
+                .any(|operation| matches!(operation, PayloadOperation::CopyFile { .. }))
         );
         assert!(
             operations
@@ -507,11 +536,15 @@ mod tests {
                 .iter()
                 .any(|operation| matches!(operation, PayloadOperation::CreateLink(_)))
         );
-        assert!(
-            operations
-                .iter()
-                .all(|operation| !operation.filesystem_path().starts_with(&outside))
-        );
+        assert!(operations.iter().all(|operation| match operation {
+            PayloadOperation::CopyFile {
+                source,
+                destination,
+            } => {
+                !source.starts_with(&outside) && !destination.starts_with(&outside)
+            }
+            _ => !operation.filesystem_path().starts_with(&outside),
+        }));
 
         remove_fixture(&source, &outside);
         fs::remove_dir_all(destination).expect("remove copy destination");
