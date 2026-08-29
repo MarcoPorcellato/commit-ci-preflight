@@ -1,0 +1,74 @@
+name: Adoption help
+description: Ask a focused public question about trying CCP in a repository.
+title: "[Adoption help]: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for setup, fit, or first-run questions. This is not an evidence report: do not attach private receipts, raw logs, secrets, or customer data.
+  - type: input
+    id: ccp_version
+    attributes:
+      label: CCP version
+      description: Which commit-ci-preflight version are you using?
+      placeholder: commit-ci-preflight 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: project_runtime
+    attributes:
+      label: Project runtime
+      description: Which language runtime, toolchain, or interpreter does the repository use?
+      placeholder: Rust 1.96 with Cargo
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Include OS, architecture, and relevant container runtime; policy/resource profiles are separate from the project runtime.
+      placeholder: macOS 15, Apple Silicon, Docker Desktop
+    validations:
+      required: true
+  - type: input
+    id: repository_language
+    attributes:
+      label: Repository language
+      description: What primary language and build tooling does the repository use?
+      placeholder: Rust with Cargo
+    validations:
+      required: true
+  - type: textarea
+    id: attempted_step
+    attributes:
+      label: Attempted step
+      description: What were you trying to do, and which documented command or guide did you follow?
+    validations:
+      required: true
+  - type: textarea
+    id: error_summary
+    attributes:
+      label: Bounded error summary
+      description: Summarize the visible result without pasting private or unredacted logs.
+    validations:
+      required: true
+  - type: textarea
+    id: expected_outcome
+    attributes:
+      label: Expected outcome
+      description: What result would let you decide whether CCP fits your repository?
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy_confirmation
+    attributes:
+      label: Public-safe content
+      options:
+        - label: I have removed secrets, private logs, private receipt fields, customer data, machine identity, and local paths.
+          required: true
+  - type: markdown
+    attributes:
+      value: |
+        For a completed trial with public, redacted results, use the adoption-report form instead. For a security vulnerability, follow SECURITY.md.

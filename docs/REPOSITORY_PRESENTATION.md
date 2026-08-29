@@ -6,10 +6,11 @@ GitHub setting.
 
 ## Recommended repository metadata
 
-- Description: `Proof-carrying CI: run heavy checks locally, verify exact-commit receipts on GitHub.`
+- Description: `Run heavy CI locally. Verify exact-commit receipts on GitHub.`
 - Website: leave empty until a maintained project site exists.
-- Topics: `ci`, `continuous-integration`, `devtools`, `github-actions`,
-  `local-first`, `rust`, `supply-chain`, `developer-tools`.
+- Topics: `ci`, `continuous-integration`, `developer-tools`, `devtools`,
+  `github-actions`, `local-ci`, `local-first`, `reproducible-builds`, `rust`,
+  `supply-chain`.
 - Discussions: enable only when a maintainer is ready to moderate adoption and
   design questions.
 
@@ -38,6 +39,9 @@ Before uploading a preview through **Settings → General → Social preview**:
 
 The repository does not treat the source SVG as proof that GitHub is currently
 using that image.
+
+The rendered `docs/assets/social-preview.png` is an upload candidate only. It
+has not been uploaded or verified as the live GitHub preview.
 
 ## Public claim boundary
 

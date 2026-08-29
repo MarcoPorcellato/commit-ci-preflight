@@ -9,6 +9,14 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added the adoption-help issue-form source and a 1280 × 640 social-preview PNG
+  upload candidate. GitHub form rendering/live chooser remains unverified until
+  the remote gate; preview upload is owner-only and pending.
+
+- Added a benefit-led visitor journey, bounded PR #71 case study, and public
+  support routing for adoption, defects, security reports, and proposals,
+  including concise operator-safety routing for agent-mode questions.
+
 - Shared terminal owned-resource finalization now routes historical and matrix
   runs, benchmarks, and guarded execution through completion-before-release,
   exactly-once admission release, and fail-closed release-error precedence.
