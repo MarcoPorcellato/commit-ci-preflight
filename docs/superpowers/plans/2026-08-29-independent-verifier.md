@@ -587,6 +587,28 @@
   expected receipt path, preserved journal boundary, and stop point. Do not run
   CCP until the operator issues that exact authorization.
 
+### Task 10: Stabilize and publish the post-M2 release before new development
+
+**Sequencing gate:** This task starts only after Tasks 1-9 are complete, the
+M2 pull request is receipt-green and merged, and the exact resulting `main`
+commit is reverified. No unrelated feature, refactor, or roadmap implementation
+may begin between that merge and the terminal release decision.
+
+- [ ] Audit the repository's current version, release runbook, changelog,
+      artifacts, signing/attestation requirements, and GitHub settings; propose
+      the exact SemVer without assuming it in advance.
+- [ ] Prepare a hash-bound release envelope for the exact merged commit,
+      toolchain, qualified binaries, checksums, rollback material, tag, and stop
+      boundaries. Build/CCP, tag, push, GitHub Release, and publication remain
+      separately authorized external mutations.
+- [ ] Run the documented deterministic and platform qualification required for
+      the selected release, then independently verify every artifact and
+      checksum before publication.
+- [ ] Publish only after exact-head evidence is green; verify the immutable tag,
+      release assets, checksums, installation path, and rollback instructions.
+- [ ] Record the released version as the stable baseline for personal use and
+      only then reopen subsequent development tasks.
+
 ## Plan completion audit
 
 - [ ] Every design requirement maps to one task and one terminal check.
@@ -596,3 +618,5 @@
       exceeds M2 evidence.
 - [ ] Source changes, local commits, heavy qualification, and remote actions are
       separately authorized and reported.
+- [ ] No post-M2 development begins before Task 10 reaches a terminal published
+      release or an explicit operator-approved NO-GO.
