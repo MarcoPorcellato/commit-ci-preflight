@@ -1776,9 +1776,15 @@ impl fmt::Display for CacheError {
             Self::SizeOverflow => formatter.write_str("cache size accounting overflowed"),
             Self::Canonical(_) => formatter.write_str("cache key could not be canonicalized"),
             Self::Io(_) => formatter.write_str("cache filesystem operation failed"),
-            Self::PayloadSymlinkUnsupported(_) => formatter.write_str("cache payload symbolic links are unsupported on this platform"),
-            Self::PayloadSymlinkRead { .. } => formatter.write_str("cache payload symbolic-link target could not be read"),
-            Self::PayloadSymlinkCreate { .. } => formatter.write_str("cache payload symbolic link could not be created"),
+            Self::PayloadSymlinkUnsupported(_) => {
+                formatter.write_str("cache payload symbolic links are unsupported on this platform")
+            }
+            Self::PayloadSymlinkRead { .. } => {
+                formatter.write_str("cache payload symbolic-link target could not be read")
+            }
+            Self::PayloadSymlinkCreate { .. } => {
+                formatter.write_str("cache payload symbolic link could not be created")
+            }
         }
     }
 }
@@ -1788,7 +1794,9 @@ impl std::error::Error for CacheError {
         match self {
             Self::Canonical(source) => Some(source),
             Self::Io(source) => Some(source),
-            Self::PayloadSymlinkRead { source, .. } | Self::PayloadSymlinkCreate { source, .. } => Some(source),
+            Self::PayloadSymlinkRead { source, .. } | Self::PayloadSymlinkCreate { source, .. } => {
+                Some(source)
+            }
             _ => None,
         }
     }
