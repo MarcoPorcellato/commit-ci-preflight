@@ -2,24 +2,17 @@
 
 > **Run heavy CI locally. Prove the exact commit on GitHub.**
 
-Commit CI Preflight (CCP) turns expensive, deterministic checks into
-commit-bound evidence: run a reviewed plan on your machine, then let a small
-GitHub gate verify the exact pull-request head.
+Commit CI Preflight (CCP) is an independent, vendor-neutral Apache-2.0 Rust
+project that turns expensive, deterministic checks into commit-bound evidence:
+run a reviewed plan on your machine, then let a small GitHub gate verify the
+exact pull-request head. It is for teams whose remote CI cost or queue time is
+growing without weakening review, security, or platform coverage.
 
 Start here:
 
 - [PR #71 case study](docs/CASE_STUDY_PR71.md) — a bounded, public example.
 - [Clean-room tutorial](docs/TUTORIAL.md) — produce and verify a first receipt.
 - [Adoption guide](docs/ADOPTION_GUIDE.md) — decide whether CCP fits your repository.
-
-Proof-carrying CI for developer-owned execution. Commit CI Preflight runs a
-reviewed, pinned execution contract on your hardware, writes a commit-bound
-receipt, and lets GitHub verify that evidence instead of rerunning heavy work.
-
-Commit CI Preflight is an independent, vendor-neutral Apache-2.0 project with a
-Rust core. It is designed for teams whose remote CI cost or queue time is
-growing, but who do not want cost control to weaken review, security, or
-platform coverage.
 
 > Status: **v0.1.0-rc.1 prerelease**. The source implementation and native
 > benchmark evidence are complete. The
@@ -107,30 +100,17 @@ cargo build --locked
 The first build can take longer when Rust dependencies are not cached. `plan`
 normalizes the contract, `doctor` performs a bounded runtime probe, and
 `dry-run` renders the exact container command and mounts. None of these three
-commands executes project code or emits an attestable receipt.
+commands executes project code or emits an attestable receipt. For admission,
+resource, cache, and guarded-workflow details, read the
+[coordination runbook](docs/COORDINATION_RUNBOOK.md),
+[local run contract](docs/LOCAL_RUN.md), and
+[resource observation history](docs/RESOURCE_OBSERVATION_HISTORY.md).
 
 For a real PASS and receipt, use the [clean-room tutorial](docs/TUTORIAL.md).
 It first creates a separate Git repository for the fixture; running the example
 configuration against this source checkout would validate the wrong repository.
 
-### 2. Inspect a configuration without running checks
-
-```console
-./target/debug/commit-ci-preflight plan   --config examples/projects/rust/.commit-ci-preflight.toml
-./target/debug/commit-ci-preflight doctor   --config examples/projects/rust/.commit-ci-preflight.toml
-./target/debug/commit-ci-preflight dry-run   --config examples/projects/rust/.commit-ci-preflight.toml
-```
-
-`doctor` performs a bounded read-only runtime probe. `dry-run` prints the
-exact container argv and mounts but does not execute project code. For the
-admission, resource, cache, and guarded-workflow contracts, use the
-[coordination runbook](docs/COORDINATION_RUNBOOK.md),
-[local run contract](docs/LOCAL_RUN.md), and
-[resource observation history](docs/RESOURCE_OBSERVATION_HISTORY.md). These
-documents contain the operational details without interrupting the first
-visitor journey.
-
-### 3. Run the clean-room demo
+### 2. Run the clean-room demo
 
 Follow the [end-to-end tutorial](docs/TUTORIAL.md). It copies a tiny public Rust
 fixture into its own Git repository, runs its test through a pinned container,
