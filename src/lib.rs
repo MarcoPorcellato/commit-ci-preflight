@@ -28,7 +28,6 @@ pub mod resource_history;
 pub mod run;
 pub mod run_journal;
 pub mod runtime;
-mod schema_contract;
 pub mod source_snapshot;
 pub mod storage;
 pub mod verify;

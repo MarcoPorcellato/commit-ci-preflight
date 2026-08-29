@@ -786,7 +786,7 @@ pub fn matrix_config_schema_json() -> Result<String, MatrixError> {
 }
 
 pub fn matrix_receipt_schema_json() -> Result<String, MatrixError> {
-    crate::schema_contract::combined_receipt_v2_schema_json().map_err(MatrixError::Json)
+    ccp_core::schema::combined_receipt_v2_schema_json().map_err(MatrixError::Json)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
