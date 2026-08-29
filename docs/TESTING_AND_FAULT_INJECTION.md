@@ -93,6 +93,12 @@ containment boundaries only; they do not prove a real admission root, host
 cleanup, a published receipt, or another platform. Process lists do not prove
 release.
 
+## Opaque cache-payload symbolic links
+
+Deterministic coverage includes `src/cache.rs::complete_payload_symlinks_are_preserved_across_generation_reuse`, `src/cache.rs::failed_payload_preflight_removes_the_new_staging_generation`, `src/cache.rs::forced_fallback_copy_failure_removes_only_its_owned_staging_generation`, and `src/cache.rs::staging_cleanup_unlinks_payload_links_without_touching_targets`. Payload measurement is covered by `src/cache_payload.rs::payload_measurement_counts_links_without_following_targets`; fallback semantics and complete operation tracing by `src/cache_payload.rs::fallback_copy_preserves_each_link_target_and_external_sentinel` and `src/cache_payload.rs::fallback_copy_records_only_payload_paths_and_every_copy_operation`.
+
+On macOS, deterministic tests distinguish attempted-and-succeeded clone reuse and deliberately forced fallback; the clone-success and forced-fallback tests preserve link identity. Injected fallback-copy failure occurs only after one successful copied object and proves exact owned-staging cleanup. `src/cache.rs::data_directory_preparation_failure_removes_owned_staging_and_releases_the_entry_lock` and `src/cache.rs::manifest_write_failure_removes_owned_staging_and_releases_the_entry_lock` cover the pre-data-root and pre-manifest failure windows. Owner-drop tests preserve unrelated and identity-mismatched staging directories. Unix fallback copy preserves each link target without following it and records metadata, directory enumeration, link reads, regular-file source/destination pairs, directory creation, and link creation without treating either copy path or a link target as a host path. Windows link-bearing payload reuse remains fail-closed and unsupported. These are deterministic source tests, not a native CCP receipt or native qualification.
+
 ## Managed-cache pin contract
 
 The managed-cache pin tests are deterministic contract tests over an owned

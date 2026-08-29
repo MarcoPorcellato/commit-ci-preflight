@@ -16,6 +16,7 @@ pub mod admission;
 pub mod agent_session;
 pub mod benchmark;
 pub mod cache;
+mod cache_payload;
 pub mod config;
 pub mod durable_fs;
 pub mod github_actions;

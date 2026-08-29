@@ -9,6 +9,8 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Unix cache generations now preserve ordinary opaque payload links during inventory and reuse; strict control paths remain link-free, failed preparation owns cleanup before reuse, and native candidate qualification remains pending.
+
 - Added the adoption-help issue-form source and a 1280 × 640 social-preview PNG
   upload candidate. GitHub form rendering/live chooser remains unverified until
   the remote gate; preview upload is owner-only and pending.
