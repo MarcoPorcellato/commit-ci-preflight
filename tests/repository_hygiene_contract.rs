@@ -22,6 +22,7 @@ use saphyr::{LoadableYamlNode, MappingOwned, YamlOwned};
 const BUG_FORM: &str = include_str!("../.github/ISSUE_TEMPLATE/bug_report.yml");
 const FEATURE_FORM: &str = include_str!("../.github/ISSUE_TEMPLATE/feature_request.yml");
 const ADOPTION_FORM: &str = include_str!("../.github/ISSUE_TEMPLATE/adoption_report.yml");
+const ADOPTION_HELP_FORM: &str = include_str!("../.github/ISSUE_TEMPLATE/adoption_help.yml");
 const ISSUE_CONFIG: &str = include_str!("../.github/ISSUE_TEMPLATE/config.yml");
 const PR_TEMPLATE: &str = include_str!("../.github/PULL_REQUEST_TEMPLATE.md");
 const ROADMAP: &str = include_str!("../ROADMAP.md");
@@ -212,6 +213,7 @@ fn issue_template_yaml_is_present_and_safe() {
     assert_yaml_mapping("bug report form", BUG_FORM, true);
     assert_yaml_mapping("feature request form", FEATURE_FORM, true);
     assert_yaml_mapping("adoption report form", ADOPTION_FORM, true);
+    assert_yaml_mapping("adoption help form", ADOPTION_HELP_FORM, true);
 
     assert!(contains_field(ISSUE_CONFIG, "blank_issues_enabled", false));
 
@@ -232,6 +234,12 @@ fn issue_template_yaml_is_present_and_safe() {
     assert!(contains_field(ADOPTION_FORM, "title", true));
     assert!(contains_field(ADOPTION_FORM, "labels", true));
     assert!(contains_field(ADOPTION_FORM, "body", true));
+
+    assert!(contains_field(ADOPTION_HELP_FORM, "name", true));
+    assert!(contains_field(ADOPTION_HELP_FORM, "description", true));
+    assert!(contains_field(ADOPTION_HELP_FORM, "title", true));
+    assert!(contains_field(ADOPTION_HELP_FORM, "labels", true));
+    assert!(contains_field(ADOPTION_HELP_FORM, "body", true));
 }
 
 #[test]
@@ -252,6 +260,7 @@ fn templates_do_not_include_unsafe_claim_phrases() {
             ("bug form", BUG_FORM),
             ("feature form", FEATURE_FORM),
             ("adoption form", ADOPTION_FORM),
+            ("adoption help form", ADOPTION_HELP_FORM),
             ("PR template", PR_TEMPLATE),
             ("roadmap", ROADMAP),
         ] {
@@ -282,6 +291,7 @@ fn roadmap_and_templates_reference_existing_local_docs() {
         ".github/ISSUE_TEMPLATE/bug_report.yml",
         ".github/ISSUE_TEMPLATE/feature_request.yml",
         ".github/ISSUE_TEMPLATE/adoption_report.yml",
+        ".github/ISSUE_TEMPLATE/adoption_help.yml",
         ".github/ISSUE_TEMPLATE/config.yml",
         ".github/PULL_REQUEST_TEMPLATE.md",
         "ROADMAP.md",

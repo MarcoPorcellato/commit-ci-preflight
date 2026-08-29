@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+const SOCIAL_PREVIEW_PNG: &[u8] = include_bytes!("../docs/assets/social-preview.png");
+
 fn unique_fixture_root(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "ccp-public-docs-{name}-{}-{}",
@@ -231,4 +233,10 @@ fn current_public_documents_have_valid_local_links() {
         .flat_map(|document| validate_local_links(root, Path::new(document)))
         .collect();
     assert!(findings.is_empty(), "documentation findings: {findings:?}");
+}
+
+#[test]
+fn social_preview_png_is_uploadable() {
+    assert_eq!(png_dimensions(SOCIAL_PREVIEW_PNG), Ok((1280, 640)));
+    assert!(SOCIAL_PREVIEW_PNG.len() < 1_048_576);
 }
