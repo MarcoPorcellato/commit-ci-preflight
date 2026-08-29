@@ -120,6 +120,26 @@ impl MatrixCheckConfigV2 {
 pub struct MatrixPlanEnvelopeV2 {
     pub plan_digest: String,
     pub plan: MatrixPlanV2,
+    #[serde(skip)]
+    profile: MatrixPlanProfile,
+    #[serde(skip)]
+    legacy_basis: Option<crate::matrix_legacy::LegacyMatrixDigestBasisV1>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MatrixPlanProfile {
+    #[default]
+    CurrentV2,
+    LegacyV1,
+}
+
+impl MatrixPlanProfile {
+    pub const fn producer_version(self) -> &'static str {
+        match self {
+            Self::CurrentV2 => env!("CARGO_PKG_VERSION"),
+            Self::LegacyV1 => concat!(env!("CARGO_PKG_VERSION"), "+matrix-v2-legacy-v1"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -159,6 +179,13 @@ impl MatrixConfigV2 {
 }
 pub fn build_matrix_plan(
     config: MatrixConfigV2,
+) -> Result<MatrixPlanEnvelopeV2, MatrixContractError> {
+    build_matrix_plan_with_profile(config, MatrixPlanProfile::CurrentV2)
+}
+
+pub fn build_matrix_plan_with_profile(
+    config: MatrixConfigV2,
+    profile: MatrixPlanProfile,
 ) -> Result<MatrixPlanEnvelopeV2, MatrixContractError> {
     if config.schema_version != MATRIX_CONFIG_SCHEMA_VERSION {
         return Err(MatrixContractError::UnsupportedSchemaVersion(
@@ -250,13 +277,34 @@ pub fn build_matrix_plan(
         caches,
         runtimes: plans,
     };
+    let legacy_basis = if profile == MatrixPlanProfile::LegacyV1 {
+        let basis = crate::matrix_legacy::project_legacy_basis(&plan)?;
+        let mut plan = plan;
+        for runtime in &mut plan.runtimes {
+            runtime.configuration_digest = basis.runtime_digest(&runtime.id)?.to_owned();
+        }
+        let digest = basis.outer_digest()?;
+        return Ok(MatrixPlanEnvelopeV2 {
+            plan_digest: digest,
+            plan,
+            profile,
+            legacy_basis: Some(basis),
+        });
+    } else {
+        None
+    };
     let digest = canonical_digest(&plan).map_err(MatrixContractError::Receipt)?;
     Ok(MatrixPlanEnvelopeV2 {
         plan_digest: digest,
         plan,
+        profile,
+        legacy_basis,
     })
 }
 impl MatrixPlanEnvelopeV2 {
+    pub fn profile(&self) -> MatrixPlanProfile {
+        self.profile
+    }
     pub fn plan_digest(&self) -> Result<&str, MatrixContractError> {
         self.validate()?;
         Ok(&self.plan_digest)
@@ -279,6 +327,36 @@ impl MatrixPlanEnvelopeV2 {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, MatrixContractError> {
         self.validate()?;
         canonical_json(self).map_err(MatrixContractError::Receipt)
+    }
+
+    pub fn legacy_digest_basis_value(
+        &self,
+    ) -> Result<Option<serde_json::Value>, MatrixContractError> {
+        self.legacy_basis
+            .as_ref()
+            .map(|basis| basis.report_value())
+            .transpose()
+    }
+
+    pub fn validate_profile_binding(&self) -> Result<(), MatrixContractError> {
+        match self.profile {
+            MatrixPlanProfile::CurrentV2 => self.validate(),
+            MatrixPlanProfile::LegacyV1 => {
+                let basis = self
+                    .legacy_basis
+                    .as_ref()
+                    .ok_or(MatrixContractError::PlanDigestMismatch)?;
+                if basis.outer_digest()? != self.plan_digest {
+                    return Err(MatrixContractError::PlanDigestMismatch);
+                }
+                for runtime in &self.plan.runtimes {
+                    if basis.runtime_digest(&runtime.id)? != runtime.configuration_digest {
+                        return Err(MatrixContractError::PlanDigestMismatch);
+                    }
+                }
+                Ok(())
+            }
+        }
     }
 }
 
