@@ -671,6 +671,7 @@ fn validate_relative_path(field: &'static str, value: &str) -> Result<(), Receip
 mod tests {
     use super::*;
     use crate::config::{ArtifactKind, ConfigV1, NormalizedArtifactContract};
+    use serde_json::Value;
 
     fn digest(fill: char) -> String {
         format!("sha256:{}", fill.to_string().repeat(64))
