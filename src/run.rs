@@ -61,6 +61,18 @@ pub struct RunRequest<'a> {
     pub source_snapshot: Option<&'a SourceSnapshot>,
 }
 
+struct RunDependencies<'a> {
+    runtime: &'a dyn RuntimePort,
+    supervisor: &'a dyn SupervisorPort,
+    cancellation: &'a CancellationToken,
+    clock: &'a dyn Clock,
+    barrier: &'a mut dyn CompletionBarrier,
+    lifecycle: &'a mut dyn RunLifecycleObserver,
+    storage_probe: &'a dyn StorageProbe,
+    capability_probe: &'a dyn RuntimeCapabilityProbe,
+    runtime_preflight: Option<RuntimePreflight>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunOutcome {
     pub receipt: ReceiptEnvelopeV1,
@@ -301,31 +313,22 @@ pub fn execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight(
 }
 
 // This private composition boundary wires independently injected run ports.
-#[allow(clippy::too_many_arguments)]
-fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
+fn execute_local_run_with_dependencies(
     request: &RunRequest<'_>,
-    runtime: &dyn RuntimePort,
-    supervisor: &dyn SupervisorPort,
-    cancellation: &CancellationToken,
-    clock: &dyn Clock,
-    barrier: &mut dyn CompletionBarrier,
-    lifecycle: &mut dyn RunLifecycleObserver,
-    storage_probe: &dyn StorageProbe,
-    capability_probe: &dyn RuntimeCapabilityProbe,
-    runtime_preflight: Option<RuntimePreflight>,
+    dependencies: &mut RunDependencies<'_>,
 ) -> Result<RunOutcome, RunError> {
     let (receipt, artifact_manifest, runtime_capability_evidence) =
         execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
             request,
-            runtime,
-            supervisor,
-            cancellation,
-            clock,
-            barrier,
-            lifecycle,
-            storage_probe,
-            capability_probe,
-            runtime_preflight,
+            dependencies.runtime,
+            dependencies.supervisor,
+            dependencies.cancellation,
+            dependencies.clock,
+            dependencies.barrier,
+            dependencies.lifecycle,
+            dependencies.storage_probe,
+            dependencies.capability_probe,
+            dependencies.runtime_preflight.take(),
         )?;
     let receipt_v2 = request
         .source_snapshot
@@ -369,6 +372,33 @@ fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability
         receipt_v2,
         receipt_path,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
+    request: &RunRequest<'_>,
+    runtime: &dyn RuntimePort,
+    supervisor: &dyn SupervisorPort,
+    cancellation: &CancellationToken,
+    clock: &dyn Clock,
+    barrier: &mut dyn CompletionBarrier,
+    lifecycle: &mut dyn RunLifecycleObserver,
+    storage_probe: &dyn StorageProbe,
+    capability_probe: &dyn RuntimeCapabilityProbe,
+    runtime_preflight: Option<RuntimePreflight>,
+) -> Result<RunOutcome, RunError> {
+    let mut dependencies = RunDependencies {
+        runtime,
+        supervisor,
+        cancellation,
+        clock,
+        barrier,
+        lifecycle,
+        storage_probe,
+        capability_probe,
+        runtime_preflight,
+    };
+    execute_local_run_with_dependencies(request, &mut dependencies)
 }
 
 /// Execute one already-validated v1 plan and return sealed evidence without
@@ -1168,6 +1198,47 @@ mod tests {
     use crate::runtime::{
         DockerCompatibleRuntime, RuntimeCapabilityEvidenceV1, RuntimeFlavor, RuntimeProbe,
     };
+
+    #[test]
+    fn run_dependencies_execute_the_existing_run_path() {
+        let fixture = RunFixture::new("dependency-seam");
+        let runtime = DockerCompatibleRuntime;
+        let supervisor = FakeSupervisor::new(ExecutionMode::Pass);
+        let cancellation = CancellationToken::default();
+        let clock = FixedClock::new();
+        let storage_probe = SystemStorageProbe;
+        let capability_probe = DockerRuntimeCapabilityProbe;
+        let mut barrier = NoopCompletionBarrier;
+        let mut lifecycle = NoopRunLifecycleObserver;
+        let request = RunRequest {
+            envelope: &fixture.envelope,
+            repository: &fixture.repository,
+            cache: &fixture.cache,
+            producer_version: env!("CARGO_PKG_VERSION"),
+            generation: 7,
+            source_snapshot: None,
+        };
+        let mut dependencies = RunDependencies {
+            runtime: &runtime,
+            supervisor: &supervisor,
+            cancellation: &cancellation,
+            clock: &clock,
+            barrier: &mut barrier,
+            lifecycle: &mut lifecycle,
+            storage_probe: &storage_probe,
+            capability_probe: &capability_probe,
+            runtime_preflight: None,
+        };
+        let outcome = execute_local_run_with_dependencies(&request, &mut dependencies)
+            .expect("execute through dependency seam");
+        assert_eq!(outcome.exit_code(), 0);
+        assert_eq!(
+            outcome
+                .published_canonical_bytes()
+                .expect("canonical bytes"),
+            fs::read(&outcome.receipt_path).expect("published receipt")
+        );
+    }
 
     #[test]
     fn utc_formatter_covers_epoch_leap_day_and_current_range() {
