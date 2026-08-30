@@ -37,9 +37,9 @@ GitHub Actions emulator, cloud runner service, or tool-specific monolith.
 | Item | Verified state | Evidence |
 |---|---|---|
 | Repository | `MarcoPorcellato/commit-ci-preflight` | local `origin` remote |
-| Delivery worktree | `/Users/marco1/Documents/CODICE con VS CODE/ccp-worktrees/capability-packs-clean-architecture-v1` | `git worktree list --porcelain` |
+| Delivery worktree | isolated worktree; live absolute path remains private | `git worktree list --porcelain` |
 | Base revision | `5fed7c443504969e62980141048f9279f9fa1dfe` | fetched `origin/main`, 2026-08-30 |
-| Delivery branch | `codex/capability-packs-clean-architecture-v1` | live branch |
+| Delivery branch | `codex/capability-packs-clean-architecture-delivery-v1` | live branch |
 | Compatibility envelope | strict preservation | owner approval, 2026-08-30 |
 | Product direction | Capability Packs plus later generic evidence adapters | owner approval, 2026-08-30 |
 | Current milestone | M0 specification and implementation plan | this document |
@@ -256,7 +256,7 @@ Any future receipt extension must:
   receipt bytes and IDs, policy schemas, JSON shapes, and public Rust facade
   remain compatible.
 - M0 records a compatibility corpus under
-  `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/compatibility/`.
+  `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/compatibility/`.
   Its manifest names and hashes the current CLI help surfaces, exit-code
   cases, canonical v1/v2/matrix plan fixtures, privacy-normalized dry-run
   fixtures, receipt and policy fixtures, verification decisions, and a
@@ -515,7 +515,7 @@ Any future receipt extension must:
 
 ## Interruption and recovery
 
-Maintain `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/`
+Maintain `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/`
 with a concise persistent goal, current progress, exact branch/HEAD/base,
 completed validations, active worker state, unproven gates, and next action.
 

@@ -25,8 +25,8 @@
 ### Task 1: Durable goal and progress ledger
 
 **Files:**
-- Create: `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/goal.txt`
-- Create: `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/progress.md`
+- Create: `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/goal.txt`
+- Create: `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md`
 
 **Interfaces:**
 - Consumes: the canonical specification and exact design commit.
@@ -62,7 +62,7 @@ Write:
 # Capability Packs and Clean Architecture progress
 
 - Base: `5fed7c443504969e62980141048f9279f9fa1dfe`
-- Branch: `codex/capability-packs-clean-architecture-v1`
+- Branch: `codex/capability-packs-clean-architecture-delivery-v1`
 - Specification commit: `5ef9707930f7095a2f57bc3e38e53bfeac06aaf2`
 - Current milestone: M0 compatibility baseline
 - Completed evidence: design review READY; `git diff --check` PASS
@@ -78,7 +78,7 @@ Write:
 Run:
 
 ```console
-rtk rg -n "(/Users/|TODO|TBD|FIXME|container ID|secret)" .superpowers/sdd/2026-08-30-capability-packs-clean-architecture
+rtk rg -n "(/Users/|TODO|TBD|FIXME|container ID|secret)" docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture
 ```
 
 Expected: no match. The relative specification path is permitted; no local
@@ -87,7 +87,7 @@ absolute path is stored.
 - [ ] **Step 4: Commit Task 1**
 
 ```console
-rtk git add .superpowers/sdd/2026-08-30-capability-packs-clean-architecture/goal.txt .superpowers/sdd/2026-08-30-capability-packs-clean-architecture/progress.md
+rtk git add docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/goal.txt docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md
 rtk git commit -m "docs: add capability programme checkpoint"
 ```
 
@@ -605,9 +605,9 @@ rtk git commit -m "test: compile supported public facade downstream"
 ### Task 4: Hash manifest and M0 closure
 
 **Files:**
-- Create: `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/compatibility/manifest.json`
-- Create: `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/compatibility/README.md`
-- Modify: `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/progress.md`
+- Create: `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/compatibility/manifest.json`
+- Create: `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/compatibility/README.md`
+- Modify: `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md`
 
 **Interfaces:**
 - Consumes: all M0 fixtures and tests.
@@ -623,7 +623,7 @@ Path}`, and `sha2::{Digest, Sha256}`. Add:
 fn manifest_paths_and_hashes_match() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest_path = root.join(
-        ".superpowers/sdd/2026-08-30-capability-packs-clean-architecture/compatibility/manifest.json",
+        "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/compatibility/manifest.json",
     );
     let manifest: serde_json::Value = serde_json::from_slice(
         &fs::read(&manifest_path).expect("read compatibility manifest"),
@@ -763,7 +763,7 @@ Expected: PASS.
 Record terminal commands and exact commit predecessor in `progress.md`, then:
 
 ```console
-rtk git add .superpowers/sdd/2026-08-30-capability-packs-clean-architecture tests/compatibility_baseline.rs
+rtk git add docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture tests/compatibility_baseline.rs
 rtk git commit -m "docs: close compatibility baseline milestone"
 ```
 

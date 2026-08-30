@@ -238,7 +238,7 @@ rtk git commit -m "refactor: route run wrappers through dependencies"
 ### Task 3: Prove strict compatibility and close M1
 
 **Files:**
-- Modify: `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/progress.md`
+- Modify: `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md`
 
 **Interfaces:**
 - Consumes: M0 compatibility manifest and all M1 commits.
@@ -292,7 +292,7 @@ Record exact HEAD, commands, counts, review verdicts, unchanged fixtures, and
 remaining hosted-CI gate. Then:
 
 ```console
-rtk git add .superpowers/sdd/2026-08-30-capability-packs-clean-architecture/progress.md
+rtk git add docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md
 rtk git commit -m "docs: close run application seam milestone"
 ```
 
