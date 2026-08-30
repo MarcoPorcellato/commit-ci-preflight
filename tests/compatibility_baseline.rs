@@ -11,6 +11,22 @@ fn ccp(args: &[&str]) -> Output {
 }
 
 #[test]
+fn supported_public_facade_compiles_downstream() {
+    let status = Command::new(env!("CARGO"))
+        .args([
+            "check",
+            "--locked",
+            "--offline",
+            "--quiet",
+            "--manifest-path",
+            "tests/fixtures/public-api-compat/Cargo.toml",
+        ])
+        .status()
+        .expect("check downstream facade fixture");
+    assert!(status.success());
+}
+
+#[test]
 fn root_help_bytes_match_the_baseline() {
     let output = ccp(&["--help"]);
     assert_eq!(output.status.code(), Some(0));

@@ -1,0 +1,10 @@
+[package]
+name = "ccp-public-api-compat"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+commit-ci-preflight = { path = "../../.." }
+
+[workspace]
