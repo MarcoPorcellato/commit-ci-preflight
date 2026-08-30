@@ -20,4 +20,5 @@
 - Unproven: hosted CI for the exact M0-M1-plus-plan head, push, draft PR, publication, and release gates; all M2 implementation; reference packs
 - Heavy processes: none
 - External mutations: none
-- Next action: preserve this checkpoint in a local commit, then obtain an exact bounded authorization to fetch `origin`, push the unchanged branch non-forced, open a draft PR, and require terminal hosted CI before dispatching M2 Task 1
+- Restart checkpoint: requested 2026-08-30; tracked handoff and resume prompt added under `restart/2026-08-30/`; the final exact branch and external archive hashes are recorded in the persistent `RECOVERY_MANIFEST.md`
+- Next action after restart: complete the handoff's read-only audit, then obtain an exact bounded authorization to fetch `origin`, push the unchanged branch non-forced, open a draft PR, and require terminal hosted CI before dispatching M2 Task 1
