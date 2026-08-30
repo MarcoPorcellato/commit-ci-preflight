@@ -258,10 +258,15 @@ Any future receipt extension must:
 - M0 records a compatibility corpus under
   `.superpowers/sdd/2026-08-30-capability-packs-clean-architecture/compatibility/`.
   Its manifest names and hashes the current CLI help surfaces, exit-code
-  cases, canonical v1/v2/matrix plan and dry-run fixtures, receipt and policy
-  fixtures, verification decisions, and a downstream compile fixture that
-  imports the supported public Rust facade. M1 must compare the candidate
-  against these exact files and produce no unexplained byte or compile delta.
+  cases, canonical v1/v2/matrix plan fixtures, privacy-normalized dry-run
+  fixtures, receipt and policy fixtures, verification decisions, and a
+  downstream compile fixture that imports the supported public Rust facade.
+  Dry-run normalization replaces only explicit workspace host-path fields and
+  the `src=` segment of CCP-generated `type=bind,src=...,dst=...` argv with
+  typed tokens. It preserves JSON structure, every non-mount argv byte,
+  container destinations, access, purpose, and logical IDs. M1 must compare the
+  candidate against these files and produce no unexplained byte,
+  normalized-structure, or compile delta.
 - No analyzer-specific dependency enters the evidence domain.
 - All new parsing is bounded, deny-unknown where appropriate, deterministic,
   and fail closed.
@@ -322,8 +327,9 @@ Any future receipt extension must:
 **Exit evidence**
 
 - RED/GREEN unit and integration tests.
-- Byte-for-byte comparison against the M0 CLI, exit-code, plan, dry-run,
-  receipt, policy, verification, and JSON corpus.
+- Byte-for-byte comparison against the M0 CLI, exit-code, plan, receipt,
+  policy, verification, and JSON corpus, plus exact comparison of the
+  privacy-normalized dry-run projections.
 - Compile success of the M0 downstream public-facade fixture without source
   changes.
 - Hosted CI terminal on the exact commit before integration.
