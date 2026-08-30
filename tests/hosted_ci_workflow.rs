@@ -8,7 +8,7 @@
 
 use std::{fs, path::PathBuf};
 
-use saphyr::LoadableYamlNode;
+use saphyr::{LoadableYamlNode, MappingOwned, YamlOwned};
 
 const WORKFLOW: &str = include_str!("../.github/workflows/rust-ci.yml");
 const README: &str = include_str!("../README.md");
@@ -84,6 +84,44 @@ fn repository_has_no_ordinary_per_pr_receipt_workflow() {
         !root.join(".github/workflows/receipt-gate.yml").exists(),
         "public repository must not require local CCP receipts for ordinary pull requests"
     );
+}
+
+#[test]
+fn runner_temp_is_resolved_inside_the_test_step() {
+    let documents = saphyr::YamlOwned::load_from_str(WORKFLOW).expect("hosted CI YAML");
+    let root = documents[0].as_mapping().expect("workflow mapping");
+    let jobs = mapping_get(root, "jobs")
+        .and_then(YamlOwned::as_mapping)
+        .expect("jobs mapping");
+    let test_job = mapping_get(jobs, "test")
+        .and_then(YamlOwned::as_mapping)
+        .expect("test job mapping");
+
+    let job_env_has_test_root = mapping_get(test_job, "env")
+        .and_then(YamlOwned::as_mapping)
+        .and_then(|env| mapping_get(env, "CCP_TEST_ROOT"))
+        .is_some();
+    assert!(
+        !job_env_has_test_root,
+        "runner context is unavailable in job-level env"
+    );
+
+    let steps = mapping_get(test_job, "steps")
+        .and_then(YamlOwned::as_sequence)
+        .expect("test steps");
+    let suite_step = steps
+        .iter()
+        .filter_map(YamlOwned::as_mapping)
+        .find(|step| {
+            mapping_get(step, "name").and_then(YamlOwned::as_str)
+                == Some("Run the complete deterministic suite")
+        })
+        .expect("complete deterministic suite step");
+    let test_root = mapping_get(suite_step, "env")
+        .and_then(YamlOwned::as_mapping)
+        .and_then(|env| mapping_get(env, "CCP_TEST_ROOT"))
+        .and_then(YamlOwned::as_str);
+    assert_eq!(test_root, Some("${{ runner.temp }}/ccp-tests"));
 }
 
 #[test]
@@ -173,4 +211,10 @@ fn economic_case_studies_recompute_remote_savings_from_observed_inputs() {
     assert_eq!(brain["estimated_avoided_github_compute_minutes"], 635.1);
     assert_eq!(brain["estimated_avoided_github_compute_usd"], 3.81);
     assert_eq!(evidence["claim_boundary"]["net_savings_certified"], false);
+}
+
+fn mapping_get<'a>(mapping: &'a MappingOwned, key: &str) -> Option<&'a YamlOwned> {
+    mapping
+        .iter()
+        .find_map(|(candidate, value)| (candidate.as_str() == Some(key)).then_some(value))
 }
