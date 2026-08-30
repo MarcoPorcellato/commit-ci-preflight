@@ -1,4 +1,8 @@
+use std::fs;
+use std::path::{Component, Path};
 use std::process::{Command, Output};
+
+use sha2::{Digest, Sha256};
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
@@ -8,6 +12,88 @@ fn ccp(args: &[&str]) -> Output {
         .args(args)
         .output()
         .expect("execute compatibility command")
+}
+
+#[test]
+fn manifest_paths_and_hashes_match() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_path = root.join(
+        "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/compatibility/manifest.json",
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read compatibility manifest"))
+            .expect("parse compatibility manifest");
+    assert_eq!(manifest["schema_version"], "1.0");
+    assert_eq!(
+        manifest["base_commit"],
+        "5fed7c443504969e62980141048f9279f9fa1dfe"
+    );
+    assert_eq!(manifest["hash_algorithm"], "sha256");
+    let object = manifest.as_object().expect("manifest object");
+    let keys = object
+        .keys()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        std::collections::BTreeSet::from([
+            "base_commit",
+            "files",
+            "hash_algorithm",
+            "non_executed_surfaces",
+            "schema_version"
+        ])
+    );
+    assert_eq!(
+        manifest["non_executed_surfaces"],
+        serde_json::json!([
+            "admission and resource decisions",
+            "benchmark",
+            "doctor runtime probe",
+            "dry-run runtime rendering",
+            "guard exec",
+            "project run",
+            "receipt publication"
+        ])
+    );
+    let entries = manifest["files"].as_array().expect("file entries");
+    let mut previous = None::<String>;
+    for entry in entries {
+        let entry_object = entry.as_object().expect("file entry object");
+        let entry_keys = entry_object
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            entry_keys,
+            std::collections::BTreeSet::from(["digest", "path"])
+        );
+        let relative = entry["path"].as_str().expect("relative path");
+        let path = Path::new(relative);
+        assert!(!path.is_absolute());
+        assert!(
+            path.components()
+                .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+        );
+        if let Some(previous) = &previous {
+            assert!(
+                previous.as_str() < relative,
+                "paths must be unique and sorted"
+            );
+        }
+        previous = Some(relative.to_owned());
+        let bytes = fs::read(root.join(path)).expect("read manifested file");
+        let digest = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let digest = format!("sha256:{digest}");
+        assert_eq!(
+            entry["digest"].as_str(),
+            Some(digest.as_str()),
+            "{relative}"
+        );
+    }
 }
 
 #[test]
