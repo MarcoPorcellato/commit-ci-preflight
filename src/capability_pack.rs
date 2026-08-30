@@ -96,7 +96,7 @@ pub struct CapabilityPackEnvelopeV1 {
     pub manifest_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySourceV1 {
     pub id: String,
