@@ -27,6 +27,7 @@ use commit_ci_preflight::receipt::{
     CheckEvidence, EvidenceStatus, PlatformEvidence, ProducerEvidence, ReceiptEnvelopeV1,
     ReceiptEnvelopeV2, ReceiptV1, RepositoryEvidence, RunEvidence,
 };
+use commit_ci_preflight::verify::VerificationReportV1;
 use commit_ci_preflight::verify::{
     PolicyError, VerificationDecision, VerificationError, VerificationPolicyDocument,
     VerificationPolicyV1, VerificationPolicyV1_1, VerificationStatus,
@@ -44,7 +45,7 @@ const EVALUATED_AT: &str = "2026-08-08T12:30:00Z";
 const POLICY_SCHEMA: &str = include_str!("../schema/policy-v1.schema.json");
 const TRUSTED_PLAN_POLICY_SCHEMA: &str = include_str!("../schema/policy-v1_1.schema.json");
 const REPORT_SCHEMA: &str = include_str!("../schema/verification-report-v1.schema.json");
-const VERIFY_SOURCE: &str = include_str!("../src/verify.rs");
+const VERIFY_SOURCE: &str = include_str!("../crates/ccp-core/src/verify.rs");
 const TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-trusted-plan.toml";
 const ALTERED_TRUSTED_PLAN_POLICY: &str = "tests/fixtures/policy-v1_1-trusted-plan-altered.toml";
 const ROOT_POLICY: &str = ".commit-ci-policy.toml";
@@ -56,6 +57,14 @@ const HISTORICAL_VERIFIER_PROVENANCE: &str =
 const LEGACY_MATRIX_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const LEGACY_MATRIX_EVALUATED_AT: &str = "2026-08-16T10:01:00Z";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn verification_contract_types_are_thread_safe() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<VerificationPolicyV1>();
+    assert_send_sync::<VerificationPolicyV1_1>();
+    assert_send_sync::<VerificationReportV1>();
+}
 
 fn policy() -> VerificationPolicyV1 {
     VerificationPolicyV1::parse(POLICY).expect("policy")
@@ -260,6 +269,7 @@ fn legacy_matrix_receipt_from_production_plan(
         incomplete_reason: None,
         redaction_policy_version: "1.0".to_owned(),
     })
+    .map_err(MatrixError::from)
 }
 
 fn legacy_matrix_receipt() -> MatrixReceiptEnvelopeV2 {

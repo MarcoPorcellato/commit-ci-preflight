@@ -26,6 +26,12 @@ const THREAT_MODEL: &str = include_str!("../docs/THREAT_MODEL.md");
 const BETA_SUPPORT: &str = include_str!("../docs/BETA_SUPPORT.md");
 const TUTORIAL: &str = include_str!("../docs/TUTORIAL.md");
 const DEMO_RECEIPT: &str = include_str!("../docs/evidence/pr10/demo-rust-receipt.json");
+const ROADMAP: &str = include_str!("../docs/PRODUCT_ROADMAP.md");
+const HARDENING: &str = include_str!("../docs/RELIABILITY_HARDENING_PLAN.md");
+const ARCHITECTURE: &str = include_str!("../docs/ARCHITECTURE.md");
+const M2_SPEC: &str =
+    include_str!("../docs/superpowers/specs/2026-08-29-independent-verifier-design.md");
+const M2_PLAN: &str = include_str!("../docs/superpowers/plans/2026-08-29-independent-verifier.md");
 
 #[test]
 fn public_readme_is_human_first_and_truthfully_differentiated() {
@@ -182,6 +188,32 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(BETA_SUPPORT.contains("Complete project `run` path on Windows x86_64 | `PENDING`"));
     assert!(TUTORIAL.starts_with("# End-to-end tutorial"));
     assert!(TUTORIAL.contains("does not prove who ran the command"));
+}
+
+#[test]
+fn independent_verifier_documentation_keeps_m2_boundaries_truthful() {
+    for document in [ROADMAP, HARDENING, ARCHITECTURE] {
+        assert!(document.contains("ccp-core"));
+        assert!(!document.contains("ccp-contract"));
+        assert!(document.contains("ccp-verifier"));
+    }
+    assert!(ROADMAP.contains("verify-benchmark"));
+    assert!(ROADMAP.contains("M3"));
+    assert!(ROADMAP.contains("static"));
+    assert!(HARDENING.contains("static"));
+    assert!(ARCHITECTURE.contains("local source-build"));
+    assert!(ARCHITECTURE.contains("published binary"));
+}
+
+#[test]
+fn m2_dependency_command_uses_a_valid_cargo_tree_selector() {
+    let invalid_selector = "--edges normal,no-dev,no-build";
+    let valid_command = "cargo tree --locked -p ccp-verifier --edges normal";
+
+    for document in [M2_SPEC, M2_PLAN] {
+        assert!(!document.contains(invalid_selector));
+        assert!(document.contains(valid_command));
+    }
 }
 
 #[test]

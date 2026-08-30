@@ -3,6 +3,8 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
+use ccp_core::errors::VerificationError;
+use ccp_core::matrix::MatrixContractError;
 use commit_ci_preflight::config::{
     ArtifactKind, NormalizedArtifactContract, NormalizedFixedEnvironment,
     NormalizedRuntimeInternalEnvironment, RuntimePullPolicy, RuntimeSwapMode,
@@ -159,6 +161,91 @@ fn platforms() -> Vec<AcceptedPlatformV1> {
     }]
 }
 
+fn core_policy() -> ccp_core::matrix::MatrixVerificationPolicyV2 {
+    ccp_core::matrix::MatrixVerificationPolicyV2 {
+        schema_version: MATRIX_POLICY_SCHEMA_VERSION.to_owned(),
+        project: "example/project".to_owned(),
+        configuration_digest: DIGEST.to_owned(),
+        required_checks: vec![
+            ccp_core::matrix::MatrixRequiredCheckV2 {
+                id: "compat-py311".to_owned(),
+                runtime_id: "python311".to_owned(),
+            },
+            ccp_core::matrix::MatrixRequiredCheckV2 {
+                id: "repository-check".to_owned(),
+                runtime_id: "python312".to_owned(),
+            },
+        ],
+        max_age_seconds: 300,
+        runtimes: vec![
+            ccp_core::matrix::MatrixRuntimePolicyV2 {
+                id: "python311".to_owned(),
+                configuration_digest: DIGEST.to_owned(),
+                image_reference: IMAGE_311.to_owned(),
+                platforms: platforms(),
+            },
+            ccp_core::matrix::MatrixRuntimePolicyV2 {
+                id: "python312".to_owned(),
+                configuration_digest: DIGEST.to_owned(),
+                image_reference: IMAGE_312.to_owned(),
+                platforms: platforms(),
+            },
+        ],
+    }
+}
+
+#[test]
+fn root_and_core_reject_invalid_policy() {
+    let invalid = LEGACY_COMPATIBLE_POLICY.replace("@sha256:", "");
+    assert!(MatrixVerificationPolicyV2::parse(&invalid).is_err());
+    assert!(ccp_core::matrix::MatrixVerificationPolicyV2::parse(&invalid).is_err());
+}
+
+#[test]
+fn root_and_core_matrix_reports_are_identical() {
+    let unexpected_digest =
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let unexpected_image = format!("example.invalid/unexpected@{unexpected_digest}");
+    let mut envelope = receipt();
+    let mut first = envelope.receipt.runtime_receipts[0].receipt.receipt.clone();
+    first.platform.image_reference = unexpected_image;
+    first.platform.image_digest = unexpected_digest.to_owned();
+    envelope.receipt.runtime_receipts[0].receipt =
+        ReceiptEnvelopeV1::seal(first).expect("reseal inner receipt");
+    let envelope = MatrixReceiptEnvelopeV2::seal(envelope.receipt).expect("reseal matrix receipt");
+    let bytes = envelope.canonical_bytes().expect("receipt bytes");
+    let root = verify_matrix_receipt_document(&bytes, &policy(), COMMIT, "2026-08-16T10:01:00Z")
+        .expect("root report");
+    let core = ccp_core::matrix::verify_matrix_receipt_document(
+        &bytes,
+        &core_policy(),
+        COMMIT,
+        "2026-08-16T10:01:00Z",
+    )
+    .expect("core report");
+    assert_eq!(
+        serde_json::to_vec(&root).unwrap(),
+        serde_json::to_vec(&core).unwrap()
+    );
+}
+
+#[test]
+fn core_verification_error_adapter_preserves_variant() {
+    let core = MatrixContractError::Verification(VerificationError::InvalidExpectedCommit);
+    let root: MatrixError = core.into();
+    match root {
+        MatrixError::Verification(error) => {
+            assert!(matches!(error, VerificationError::InvalidExpectedCommit));
+            assert_eq!(
+                error.to_string(),
+                "expected commit must be lowercase Git SHA-1 or SHA-256"
+            );
+            assert!(std::error::Error::source(&error).is_none());
+        }
+        other => panic!("unexpected adapter result: {other}"),
+    }
+}
+
 #[test]
 fn v2_policy_binds_each_required_check_to_its_named_runtime() {
     let envelope = receipt();
@@ -304,7 +391,7 @@ fn legacy_profile_reproduces_historical_plan() {
     }
     assert!(matches!(
         envelope.runtime_configuration_digest("unknown"),
-        Err(MatrixError::UnknownRuntime(id)) if id == "unknown"
+        Err(MatrixContractError::UnknownRuntime(id)) if id == "unknown"
     ));
 }
 
@@ -459,7 +546,7 @@ fn legacy_receipt_provenance_is_uniform() {
     mixed.runtime_receipts[1].receipt = ReceiptEnvelopeV1::seal(inner).expect("reseal mixed inner");
     assert!(matches!(
         MatrixReceiptEnvelopeV2::seal(mixed),
-        Err(MatrixError::InvalidReceipt)
+        Err(MatrixContractError::InvalidReceipt)
     ));
 }
 
@@ -499,15 +586,15 @@ fn legacy_profile_accessors_reject_mutated_public_plan() {
 
     assert!(matches!(
         envelope.plan_digest(),
-        Err(MatrixError::PlanDigestMismatch)
+        Err(MatrixContractError::PlanDigestMismatch)
     ));
     assert!(matches!(
         envelope.runtime_configuration_digest("python311"),
-        Err(MatrixError::PlanDigestMismatch)
+        Err(MatrixContractError::PlanDigestMismatch)
     ));
     assert!(matches!(
         envelope.canonical_bytes(),
-        Err(MatrixError::PlanDigestMismatch)
+        Err(MatrixContractError::PlanDigestMismatch)
     ));
 }
 
@@ -525,7 +612,7 @@ fn cli_boundary_can_validate_profile_binding_before_mutation() {
     envelope.plan.project = "example/mutated-before-run".to_owned();
     assert!(matches!(
         envelope.validate_profile_binding(),
-        Err(MatrixError::PlanDigestMismatch)
+        Err(MatrixContractError::PlanDigestMismatch)
     ));
 }
 
@@ -580,7 +667,8 @@ fn legacy_runtime_envelopes_recheck_projection() {
         assert!(
             matches!(
                 envelope.runtime_envelopes(),
-                Err(MatrixError::PlanDigestMismatch | MatrixError::LegacyPlanNotRepresentable(_))
+                Err(MatrixContractError::PlanDigestMismatch
+                    | MatrixContractError::LegacyPlanNotRepresentable(_))
             ),
             "runtime conversion must reject mutated {field}"
         );
@@ -645,7 +733,7 @@ fn legacy_profile_rejects_each_non_representable_current_field() {
         mutate(&mut envelope);
         assert!(matches!(
             envelope.plan_digest(),
-            Err(MatrixError::LegacyPlanNotRepresentable(actual)) if actual == field
+            Err(MatrixContractError::LegacyPlanNotRepresentable(actual)) if actual == field
         ));
     }
 }
@@ -673,7 +761,7 @@ fn production_sources_do_not_embed_adopter_expected_digests() {
         "eff5b7d55bb0220890dbfb050bb68a1e0fbba8f9a30a69e2f66085354fcc8562",
         "7afb3e6dd435d9d5a317e4d9d85e80527431044312bbe299e9a70b6ba9e994c8",
     ];
-    for path in ["src/matrix.rs", "src/matrix_legacy.rs"] {
+    for path in ["src/matrix.rs", "crates/ccp-core/src/matrix_legacy.rs"] {
         let source = std::fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path))
             .expect("production source");
         for digest in prohibited {

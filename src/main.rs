@@ -43,7 +43,7 @@ use commit_ci_preflight::github_actions::{
 use commit_ci_preflight::matrix::{
     MatrixConfigV2, MatrixError, MatrixPlanEnvelopeV2, MatrixPlanProfile, MatrixPlanV2,
     MatrixRunOutcomeV2, MatrixRunRequestV2, build_matrix_plan, execute_matrix_run_v2,
-    seal_matrix_run_material, write_matrix_receipt,
+    prepare_source_snapshot_overlay, seal_matrix_run_material, write_matrix_receipt,
 };
 use commit_ci_preflight::process::{
     CancellationReason, CancellationToken, GenerationGuard, OutputMode, ProcessRequest,
@@ -1278,7 +1278,7 @@ fn after_validated_matrix_profile_binding<T>(
 ) -> Result<T, CliError> {
     envelope
         .validate_profile_binding()
-        .map_err(CliError::Matrix)?;
+        .map_err(|error| CliError::Matrix(error.into()))?;
     operation()
 }
 
@@ -1292,7 +1292,10 @@ fn print_matrix_run(
 ) -> Result<(), CliError> {
     let envelope = load_matrix_plan(path, profile)?;
     let root = after_validated_matrix_profile_binding(&envelope, || resolve_cache_root(location))?;
-    let plan_digest = envelope.plan_digest().map_err(CliError::Matrix)?.to_owned();
+    let plan_digest = envelope
+        .plan_digest()
+        .map_err(|error| CliError::Matrix(error.into()))?
+        .to_owned();
     let cache = ManagedCache::initialize(root).map_err(CliError::Cache)?;
     let journal = RunJournalStore::initialize(&cache.root().path).map_err(CliError::RunJournal)?;
     let journal_id = new_journal_id(&plan_digest, generation)?;
@@ -1367,7 +1370,7 @@ fn print_matrix_run(
             return Err(CliError::Run(RunError::SourceSnapshot(error)));
         }
     };
-    if let Err(error) = envelope.prepare_source_snapshot_overlay(&mut source_snapshot) {
+    if let Err(error) = prepare_source_snapshot_overlay(&envelope, &mut source_snapshot) {
         lifecycle
             .borrow_mut()
             .fail(RunFailureKindV1::PreparationFailed)?;
@@ -1394,7 +1397,7 @@ fn print_matrix_run(
                 lifecycle
                     .borrow_mut()
                     .fail(RunFailureKindV1::PreparationFailed)?;
-                return Err(CliError::Matrix(error));
+                return Err(CliError::Matrix(error.into()));
             }
             Ok(())
         },
@@ -1533,7 +1536,7 @@ fn print_matrix_run(
         let bytes = outcome
             .receipt
             .canonical_bytes()
-            .map_err(CliError::Matrix)?;
+            .map_err(|error| CliError::Matrix(error.into()))?;
         println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
     } else {
         if profile == MatrixPlanProfile::LegacyV1 {
@@ -1675,7 +1678,7 @@ fn load_matrix_plan(
     if config_schema_version(path)?.as_deref() != Some("2.0") {
         return Err(CliError::usage(MatrixPlanProfileSchemaError));
     }
-    let config = MatrixConfigV2::load(path).map_err(CliError::Matrix)?;
+    let config = MatrixConfigV2::load(path).map_err(|error| CliError::Matrix(error.into()))?;
     build_matrix_plan(config, profile).map_err(CliError::Matrix)
 }
 
@@ -1703,11 +1706,14 @@ fn legacy_matrix_plan_report(
 ) -> Result<LegacyMatrixPlanReportV1, CliError> {
     let legacy_digest_basis = envelope
         .legacy_digest_basis_value()
-        .map_err(CliError::Matrix)?
+        .map_err(|error| CliError::Matrix(error.into()))?
         .ok_or_else(|| CliError::internal(MatrixPlanProfileSchemaError))?;
     Ok(LegacyMatrixPlanReportV1 {
         matrix_plan_profile: "matrix-v2-legacy-v1",
-        plan_digest: envelope.plan_digest().map_err(CliError::Matrix)?.to_owned(),
+        plan_digest: envelope
+            .plan_digest()
+            .map_err(|error| CliError::Matrix(error.into()))?
+            .to_owned(),
         plan: envelope.plan.clone(),
         legacy_digest_basis,
     })
@@ -1726,7 +1732,9 @@ fn print_plan(path: &Path, profile: MatrixPlanProfile, json: bool) -> Result<(),
                         .map_err(CliError::internal)?
                 );
             } else {
-                let bytes = envelope.canonical_bytes().map_err(CliError::Matrix)?;
+                let bytes = envelope
+                    .canonical_bytes()
+                    .map_err(|error| CliError::Matrix(error.into()))?;
                 println!("{}", String::from_utf8(bytes).map_err(CliError::internal)?);
             }
         } else {
@@ -1812,7 +1820,10 @@ fn print_matrix_dry_run(
     let envelope = load_matrix_plan(path, profile)?;
     let cache = resolve_cache_root(location)?;
     let mut runtimes = Vec::with_capacity(envelope.plan.runtimes.len());
-    for (runtime_id, runtime_envelope) in envelope.runtime_envelopes().map_err(CliError::Matrix)? {
+    for (runtime_id, runtime_envelope) in envelope
+        .runtime_envelopes()
+        .map_err(|error| CliError::Matrix(error.into()))?
+    {
         let workspace = WorkspacePlanV1::build(&runtime_envelope, &location.repository, &cache)
             .map_err(CliError::Workspace)?;
         let runtime = runtime_for(runtime_envelope.plan.runtime.kind).map_err(CliError::Runtime)?;
@@ -2716,7 +2727,10 @@ fn collect_matrix_doctor_report(
     mut probe_runtime: impl FnMut(&ExecutionPlanEnvelopeV1) -> Result<RuntimeProbe, CliError>,
 ) -> Result<MatrixDoctorReportV2, CliError> {
     let mut runtimes = Vec::with_capacity(envelope.plan.runtimes.len());
-    for (runtime_id, runtime_envelope) in envelope.runtime_envelopes().map_err(CliError::Matrix)? {
+    for (runtime_id, runtime_envelope) in envelope
+        .runtime_envelopes()
+        .map_err(|error| CliError::Matrix(error.into()))?
+    {
         let configuration_digest = runtime_envelope.plan_digest.clone();
         let probe = probe_runtime(&runtime_envelope)?;
         runtimes.push(MatrixRuntimeDoctorV2 {

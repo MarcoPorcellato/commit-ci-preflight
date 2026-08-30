@@ -1,30 +1,25 @@
-// Copyright 2026 Marco Porcellato
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-//! The canonical v2 receipt schema shared by single-runtime and matrix receipts.
-//!
-//! The two receipt families remain separate strict Rust contracts. This module
-//! only composes their generated JSON Schema documents so one pinned public
-//! schema cannot silently invalidate either family during a staged upgrade.
-
+//! Stable schema entry points for independent consumers.
+use crate::matrix::{MatrixConfigV2, MatrixReceiptEnvelopeV2, MatrixVerificationPolicyV2};
+use crate::receipt::ReceiptEnvelopeV2;
 use schemars::schema_for;
 use serde_json::{Map, Value};
 
-use crate::matrix::MatrixReceiptEnvelopeV2;
-use crate::receipt::ReceiptEnvelopeV2;
+pub fn matrix_config_schema() -> Value {
+    serde_json::to_value(schema_for!(MatrixConfigV2)).expect("schema serialization")
+}
+pub fn matrix_receipt_schema() -> Value {
+    serde_json::to_value(schema_for!(MatrixReceiptEnvelopeV2)).expect("schema serialization")
+}
+pub fn matrix_policy_schema() -> Value {
+    serde_json::to_value(schema_for!(MatrixVerificationPolicyV2)).expect("schema serialization")
+}
+pub fn matrix_policy_schema_json() -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(&schema_for!(MatrixVerificationPolicyV2))
+}
 
-pub(crate) fn combined_receipt_v2_schema_json() -> Result<String, serde_json::Error> {
+/// Return the canonical combined v2 schema shared by single-runtime and
+/// matrix receipts.
+pub fn combined_receipt_v2_schema_json() -> Result<String, serde_json::Error> {
     let matrix = serde_json::to_value(schema_for!(MatrixReceiptEnvelopeV2))?;
     let single_runtime = serde_json::to_value(schema_for!(ReceiptEnvelopeV2))?;
     let mut root = object_field(matrix, "root")?;

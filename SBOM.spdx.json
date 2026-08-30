@@ -1,7 +1,7 @@
 {
   "SPDXID": "SPDXRef-DOCUMENT",
   "creationInfo": {
-    "comment": "Generated from locked Cargo metadata; Cargo.lock SHA-256: 0955cbe3fe37d43df351ca9e90bc6fb6485ed1d3acdb015c5ad37c7294d21d66",
+    "comment": "Generated from locked Cargo metadata; Cargo.lock SHA-256: c766c0e70a6964f28097802db428100ca5f1b2d2f5e0da344df4148173ade804",
     "created": "2026-08-10T00:00:00Z",
     "creators": [
       "Person: Marco Porcellato",
@@ -9,7 +9,7 @@
     ]
   },
   "dataLicense": "CC0-1.0",
-  "documentNamespace": "https://github.com/MarcoPorcellato/commit-ci-preflight/sbom/0.1.0/0955cbe3fe37d43df351ca9e90bc6fb6485ed1d3acdb015c5ad37c7294d21d66",
+  "documentNamespace": "https://github.com/MarcoPorcellato/commit-ci-preflight/sbom/0.1.0/c766c0e70a6964f28097802db428100ca5f1b2d2f5e0da344df4148173ade804",
   "name": "commit-ci-preflight-0.1.0",
   "packages": [
     {
@@ -149,6 +149,40 @@
       "licenseDeclared": "MIT",
       "name": "block2",
       "versionInfo": "0.6.2"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-ccp-core-0.1.0",
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:cargo/ccp-core@0.1.0",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "name": "ccp-core",
+      "versionInfo": "0.1.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-ccp-verifier-0.1.0",
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:cargo/ccp-verifier@0.1.0",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "name": "ccp-verifier",
+      "versionInfo": "0.1.0"
     },
     {
       "SPDXID": "SPDXRef-Package-cfg-if-1.0.4",
@@ -1795,6 +1829,46 @@
       "spdxElementId": "SPDXRef-Package-block2-0.6.2"
     },
     {
+      "relatedSpdxElement": "SPDXRef-Package-schemars-1.2.2",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-ccp-core-0.1.0"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-serde-1.0.229",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-ccp-core-0.1.0"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-serde-json-1.0.151",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-ccp-core-0.1.0"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-sha2-0.11.0",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-ccp-core-0.1.0"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-toml-1.1.4-spec-1.1.0",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-ccp-core-0.1.0"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-ccp-core-0.1.0",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-ccp-verifier-0.1.0"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-clap-4.6.6",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-ccp-verifier-0.1.0"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-serde-json-1.0.151",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-ccp-verifier-0.1.0"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-Package-clap-builder-4.6.6",
       "relationshipType": "DEPENDS_ON",
       "spdxElementId": "SPDXRef-Package-clap-4.6.6"
@@ -1833,6 +1907,11 @@
       "relatedSpdxElement": "SPDXRef-Package-syn-3.0.3",
       "relationshipType": "DEPENDS_ON",
       "spdxElementId": "SPDXRef-Package-clap-derive-4.6.4"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-ccp-core-0.1.0",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-commit-ci-preflight-0.1.0"
     },
     {
       "relatedSpdxElement": "SPDXRef-Package-clap-4.6.6",

@@ -18,8 +18,7 @@ use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -31,11 +30,12 @@ use crate::process::{
     CancellationToken, CleanupStatus, GenerationGuard, ProcessError, ProcessRequest, ProcessResult,
     ProcessTermination, RunIdentity, SupervisorPort,
 };
-use crate::receipt::canonical_digest;
 use crate::workspace::{
     MountAccess, MountBinding, WorkspaceError, WorkspacePlanV1, validate_container_mount_target,
     validate_host_path,
 };
+use ccp_core::canonical::canonical_digest;
+pub use ccp_core::runtime_evidence::RuntimeCapabilityEvidenceV1;
 
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(5);
 const DOCTOR_CAPTURE_BYTES: usize = 65_536;
@@ -839,17 +839,6 @@ pub struct RuntimeProbe {
     pub swap_limit_supported: Option<bool>,
     pub containment: ContainmentMechanism,
     pub graceful_stop: GracefulStopCapability,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeCapabilityEvidenceV1 {
-    pub schema_version: String,
-    pub memory_limit_supported: bool,
-    pub swap_limit_supported: bool,
-    pub context_digest: String,
-    pub resolved_image_id: String,
-    pub resolved_image_reference: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
