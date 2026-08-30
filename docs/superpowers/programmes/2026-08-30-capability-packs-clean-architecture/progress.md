@@ -5,11 +5,11 @@
 - Branch: `codex/capability-packs-clean-architecture-delivery-v1`
 - Specification commit: `5ef9707930f7095a2f57bc3e38e53bfeac06aaf2`
 - Current milestone: M0 compatibility baseline
-- Completed evidence: design review READY; `git diff --check` PASS; M0 compatibility manifest and downstream facade checks prepared
+- Completed evidence: design review READY; `git diff --check` PASS; M0 compatibility manifest and downstream facade checks independently approved at `9e689c7f04e3d8c0479c74d91669c170a4c66e52`
 - Terminal M0 verification: `rtk cargo fmt --check` PASS; focused manifest test PASS; full compatibility baseline PASS (9 passed, 1 ignored); `rtk git diff --check` PASS; bounded privacy scan PASS (zero matches)
-- M0 status: awaits independent review; not terminally closed
+- M0 status: terminally closed; Spec PASS and Task quality Approved
 - Unproven: application seam, pack contract, reference packs,
   hosted CI, publication, release
 - Heavy processes: none
 - External mutations: none
-- Next action: independent review of M0 closure evidence, then proceed to the application seam
+- Next action: execute the M1 private run application seam with RED/GREEN TDD
