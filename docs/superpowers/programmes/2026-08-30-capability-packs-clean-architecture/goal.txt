@@ -1,0 +1,15 @@
+Complete the Clean Architecture and Advanced Linux Capability Packs programme
+according to `docs/superpowers/specs/2026-08-30-capability-packs-clean-architecture-design.md`.
+
+First verify the live worktree, exact branch/HEAD/base, active operator policy,
+and the progress ledger. Preserve strict CLI, exit-code, plan, receipt, policy,
+JSON, and public Rust API compatibility. Use deterministic tools first and
+delegate bounded inventory, mechanical edits, tests, and review to Luna or
+Spark; retain architecture, security, integration, qualification, release,
+and merge judgment centrally.
+
+Proceed through dependency-ordered milestones until the canonical checklist is
+proved. Do not run CCP heavy work for this public repository without an exact
+approved non-economic exception. Treat push, PR, ready transition, merge, tag,
+release, stable installation, and external publication as separate exact-state
+gates.
