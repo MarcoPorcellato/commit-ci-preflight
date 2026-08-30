@@ -9,6 +9,11 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Replaced this public repository's ordinary per-PR receipt gate with complete
+  standard GitHub-hosted Rust CI on Linux, macOS, and Windows. Receipt
+  verification remains an optional product capability for economically
+  qualified private workloads or separately justified non-economic evidence.
+
 - Unix cache generations now preserve ordinary opaque payload links during inventory and reuse; strict control paths remain link-free, failed preparation owns cleanup before reuse, and native candidate qualification remains pending.
 
 - Added the adoption-help issue-form source and a 1280 × 640 social-preview PNG

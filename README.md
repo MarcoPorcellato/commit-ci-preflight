@@ -128,11 +128,20 @@ repository policy.
 For installation, checksum verification, and local candidate archives, see
 [the installation guide](docs/INSTALLATION.md).
 
-## Dogfooding proof
+## Repository CI policy
 
-This repository uses CCP for its own bounded qualification workflow. See the
-[PR #71 case study](docs/CASE_STUDY_PR71.md) for the exact public anchors and
-the limits of what that evidence proves.
+This public repository uses standard GitHub-hosted CI for ordinary pull
+requests across Linux, macOS, and Windows. Public standard runners are free.
+Replacing those jobs with local execution produces no billable public-runner savings.
+It would consume maintainer time and Mac resources without an economic return,
+so the per-PR receipt requirement is retired here.
+
+The historical CCP receipts remain valid
+evidence for their exact commits; they are not current pull-request gates. The
+[PR #71 case study](docs/CASE_STUDY_PR71.md)
+records the exact public anchors and limits. CCP can still qualify its own
+release candidates or bounded native behavior when a separate non-economic
+reason and exact authorization justify that work.
 
 ## What makes it different
 
