@@ -275,7 +275,7 @@ fn normalize_dry_run(mut v: serde_json::Value) -> (serde_json::Value, Vec<String
         for c in v["checks"].as_array_mut().unwrap() {
             for a in c["argv"].as_array_mut().unwrap() {
                 let s = a.as_str().unwrap();
-                if let Some(r) = s.strip_prefix("type=bind,src=") {
+                if s.starts_with("type=bind,src=") {
                     *a = serde_json::json!(normalize_mount_argv(s, &m));
                 }
             }

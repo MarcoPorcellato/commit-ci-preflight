@@ -12,7 +12,7 @@
     {"path":"schema/receipt-v1.schema.json","digest":"sha256:684b81b685a6013181e3fdd4bcf29573c01959da5e510bc158d5f94b8aeb8abc"},
     {"path":"schema/receipt-v2.schema.json","digest":"sha256:bf315a2609366adc94520f5e8966d3048529e86759e66701a544be10eca9adbf"},
     {"path":"schema/verification-report-v1.schema.json","digest":"sha256:67ec9524749d471d6a23e22ba0f9d52377273448f5c25ef318fbbd1a9f8f9b23"},
-    {"path":"tests/compatibility_baseline.rs","digest":"sha256:cba5318f6e7265250127562a01e12675c6dd99ab69c159aa6de2e355882f9751"},
+    {"path":"tests/compatibility_baseline.rs","digest":"sha256:032ae7f3636016dc616af402a3bd6d30dd17df1d444b4df3a9e6e98f6a0ef577"},
     {"path":"tests/fixtures/compatibility/dry-run-v1.normalized.json","digest":"sha256:a04d86e0c9fb24b703731df16b3d1f61ac9ec8e9ec76a23d59642c7003745079"},
     {"path":"tests/fixtures/compatibility/dry-run-v2-current.normalized.json","digest":"sha256:ee98f6460e3f12d6bf758413d8f8fc3c0ef4db61b6c80bac5fc7d9459aa7a261"},
     {"path":"tests/fixtures/compatibility/dry-run-v2-legacy.normalized.json","digest":"sha256:21f35e6457671c233b3863e70cc9a7b3aece11f3f42c735a9293866b5b18283d"},
