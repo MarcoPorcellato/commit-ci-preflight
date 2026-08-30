@@ -156,14 +156,21 @@ pub fn execute_local_run(
     clock: &dyn Clock,
 ) -> Result<RunOutcome, RunError> {
     let storage_probe = SystemStorageProbe;
-    execute_local_run_with_storage_probe(
-        request,
+    let mut barrier = NoopCompletionBarrier;
+    let mut lifecycle = NoopRunLifecycleObserver;
+    let capability_probe = DockerRuntimeCapabilityProbe;
+    let mut dependencies = RunDependencies {
         runtime,
         supervisor,
         cancellation,
         clock,
-        &storage_probe,
-    )
+        barrier: &mut barrier,
+        lifecycle: &mut lifecycle,
+        storage_probe: &storage_probe,
+        capability_probe: &capability_probe,
+        runtime_preflight: None,
+    };
+    execute_local_run_with_dependencies(request, &mut dependencies)
 }
 
 pub fn execute_local_run_with_storage_probe(
@@ -176,16 +183,19 @@ pub fn execute_local_run_with_storage_probe(
 ) -> Result<RunOutcome, RunError> {
     let mut barrier = NoopCompletionBarrier;
     let mut lifecycle = NoopRunLifecycleObserver;
-    execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
-        request,
+    let capability_probe = DockerRuntimeCapabilityProbe;
+    let mut dependencies = RunDependencies {
         runtime,
         supervisor,
         cancellation,
         clock,
-        &mut barrier,
-        &mut lifecycle,
+        barrier: &mut barrier,
+        lifecycle: &mut lifecycle,
         storage_probe,
-    )
+        capability_probe: &capability_probe,
+        runtime_preflight: None,
+    };
+    execute_local_run_with_dependencies(request, &mut dependencies)
 }
 
 pub fn execute_local_run_with_runtime_capability_probe(
@@ -199,18 +209,18 @@ pub fn execute_local_run_with_runtime_capability_probe(
     let storage_probe = SystemStorageProbe;
     let mut barrier = NoopCompletionBarrier;
     let mut lifecycle = NoopRunLifecycleObserver;
-    execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
-        request,
+    let mut dependencies = RunDependencies {
         runtime,
         supervisor,
         cancellation,
         clock,
-        &mut barrier,
-        &mut lifecycle,
-        &storage_probe,
+        barrier: &mut barrier,
+        lifecycle: &mut lifecycle,
+        storage_probe: &storage_probe,
         capability_probe,
-        None,
-    )
+        runtime_preflight: None,
+    };
+    execute_local_run_with_dependencies(request, &mut dependencies)
 }
 
 pub fn execute_local_run_with_barrier(
@@ -223,16 +233,19 @@ pub fn execute_local_run_with_barrier(
 ) -> Result<RunOutcome, RunError> {
     let mut lifecycle = NoopRunLifecycleObserver;
     let storage_probe = SystemStorageProbe;
-    execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
-        request,
+    let capability_probe = DockerRuntimeCapabilityProbe;
+    let mut dependencies = RunDependencies {
         runtime,
         supervisor,
         cancellation,
         clock,
         barrier,
-        &mut lifecycle,
-        &storage_probe,
-    )
+        lifecycle: &mut lifecycle,
+        storage_probe: &storage_probe,
+        capability_probe: &capability_probe,
+        runtime_preflight: None,
+    };
+    execute_local_run_with_dependencies(request, &mut dependencies)
 }
 
 pub fn execute_local_run_with_barrier_and_lifecycle(
@@ -245,16 +258,19 @@ pub fn execute_local_run_with_barrier_and_lifecycle(
     lifecycle: &mut dyn RunLifecycleObserver,
 ) -> Result<RunOutcome, RunError> {
     let storage_probe = SystemStorageProbe;
-    execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
-        request,
+    let capability_probe = DockerRuntimeCapabilityProbe;
+    let mut dependencies = RunDependencies {
         runtime,
         supervisor,
         cancellation,
         clock,
         barrier,
         lifecycle,
-        &storage_probe,
-    )
+        storage_probe: &storage_probe,
+        capability_probe: &capability_probe,
+        runtime_preflight: None,
+    };
+    execute_local_run_with_dependencies(request, &mut dependencies)
 }
 
 // The explicit ports keep storage and lifecycle fault paths independently injectable.
@@ -270,8 +286,7 @@ pub fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
     storage_probe: &dyn StorageProbe,
 ) -> Result<RunOutcome, RunError> {
     let capability_probe = DockerRuntimeCapabilityProbe;
-    execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
-        request,
+    let mut dependencies = RunDependencies {
         runtime,
         supervisor,
         cancellation,
@@ -279,9 +294,10 @@ pub fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe(
         barrier,
         lifecycle,
         storage_probe,
-        &capability_probe,
-        None,
-    )
+        capability_probe: &capability_probe,
+        runtime_preflight: None,
+    };
+    execute_local_run_with_dependencies(request, &mut dependencies)
 }
 
 // The explicit ports preserve the public runtime-preflight test seam.
@@ -298,18 +314,18 @@ pub fn execute_local_run_with_barrier_and_lifecycle_and_runtime_preflight(
 ) -> Result<RunOutcome, RunError> {
     let storage_probe = SystemStorageProbe;
     let capability_probe = DockerRuntimeCapabilityProbe;
-    execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
-        request,
+    let mut dependencies = RunDependencies {
         runtime,
         supervisor,
         cancellation,
         clock,
         barrier,
         lifecycle,
-        &storage_probe,
-        &capability_probe,
-        Some(runtime_preflight),
-    )
+        storage_probe: &storage_probe,
+        capability_probe: &capability_probe,
+        runtime_preflight: Some(runtime_preflight),
+    };
+    execute_local_run_with_dependencies(request, &mut dependencies)
 }
 
 // This private composition boundary wires independently injected run ports.
@@ -318,18 +334,7 @@ fn execute_local_run_with_dependencies(
     dependencies: &mut RunDependencies<'_>,
 ) -> Result<RunOutcome, RunError> {
     let (receipt, artifact_manifest, runtime_capability_evidence) =
-        execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
-            request,
-            dependencies.runtime,
-            dependencies.supervisor,
-            dependencies.cancellation,
-            dependencies.clock,
-            dependencies.barrier,
-            dependencies.lifecycle,
-            dependencies.storage_probe,
-            dependencies.capability_probe,
-            dependencies.runtime_preflight.take(),
-        )?;
+        execute_local_receipt_and_artifacts_with_dependencies(request, dependencies)?;
     let receipt_v2 = request
         .source_snapshot
         .map(|snapshot| {
@@ -374,33 +379,6 @@ fn execute_local_run_with_dependencies(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn execute_local_run_with_barrier_and_lifecycle_and_storage_probe_and_capability_probe(
-    request: &RunRequest<'_>,
-    runtime: &dyn RuntimePort,
-    supervisor: &dyn SupervisorPort,
-    cancellation: &CancellationToken,
-    clock: &dyn Clock,
-    barrier: &mut dyn CompletionBarrier,
-    lifecycle: &mut dyn RunLifecycleObserver,
-    storage_probe: &dyn StorageProbe,
-    capability_probe: &dyn RuntimeCapabilityProbe,
-    runtime_preflight: Option<RuntimePreflight>,
-) -> Result<RunOutcome, RunError> {
-    let mut dependencies = RunDependencies {
-        runtime,
-        supervisor,
-        cancellation,
-        clock,
-        barrier,
-        lifecycle,
-        storage_probe,
-        capability_probe,
-        runtime_preflight,
-    };
-    execute_local_run_with_dependencies(request, &mut dependencies)
-}
-
 /// Execute one already-validated v1 plan and return sealed evidence without
 /// writing a receipt into the source checkout. Matrix orchestration uses this
 /// primitive so every runtime observes the same clean exact head before the
@@ -416,34 +394,25 @@ pub fn execute_local_receipt_with_barrier_and_lifecycle(
 ) -> Result<ReceiptEnvelopeV1, RunError> {
     let storage_probe = SystemStorageProbe;
     let capability_probe = DockerRuntimeCapabilityProbe;
-    execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
-        request,
+    let mut dependencies = RunDependencies {
         runtime,
         supervisor,
         cancellation,
         clock,
         barrier,
         lifecycle,
-        &storage_probe,
-        &capability_probe,
-        None,
-    )
-    .map(|(receipt, _, _)| receipt)
+        storage_probe: &storage_probe,
+        capability_probe: &capability_probe,
+        runtime_preflight: None,
+    };
+    execute_local_receipt_and_artifacts_with_dependencies(request, &mut dependencies)
+        .map(|(receipt, _, _)| receipt)
 }
 
-// Receipt finalization shares the same explicit fault-injection ports as execution.
-#[allow(clippy::too_many_arguments)]
-fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_probe(
+// Receipt finalization shares the same explicit fault-injection ports through the dependency seam.
+fn execute_local_receipt_and_artifacts_with_dependencies(
     request: &RunRequest<'_>,
-    runtime: &dyn RuntimePort,
-    supervisor: &dyn SupervisorPort,
-    cancellation: &CancellationToken,
-    clock: &dyn Clock,
-    barrier: &mut dyn CompletionBarrier,
-    lifecycle: &mut dyn RunLifecycleObserver,
-    storage_probe: &dyn StorageProbe,
-    capability_probe: &dyn RuntimeCapabilityProbe,
-    runtime_preflight: Option<RuntimePreflight>,
+    dependencies: &mut RunDependencies<'_>,
 ) -> Result<
     (
         ReceiptEnvelopeV1,
@@ -452,6 +421,14 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
     ),
     RunError,
 > {
+    let cancellation = dependencies.cancellation;
+    let runtime = dependencies.runtime;
+    let supervisor = dependencies.supervisor;
+    let clock = dependencies.clock;
+    let barrier = &mut *dependencies.barrier;
+    let lifecycle = &mut *dependencies.lifecycle;
+    let storage_probe = dependencies.storage_probe;
+    let capability_probe = dependencies.capability_probe;
     if cancellation.reason() == Some(CancellationReason::ResourcePressure) {
         return Err(RunError::ResourcePressure);
     }
@@ -464,7 +441,7 @@ fn execute_local_receipt_and_artifacts_with_barrier_and_lifecycle_and_storage_pr
         preflight_storage(storage, &request.cache.root().path, storage_probe)
             .map_err(RunError::Storage)?;
     }
-    let runtime_preflight = match runtime_preflight {
+    let runtime_preflight = match dependencies.runtime_preflight.take() {
         Some(preflight) => preflight,
         None => preflight_runtime_capabilities(
             request.envelope,
@@ -1237,6 +1214,65 @@ mod tests {
                 .published_canonical_bytes()
                 .expect("canonical bytes"),
             fs::read(&outcome.receipt_path).expect("published receipt")
+        );
+    }
+
+    #[test]
+    fn public_run_wrapper_matches_dependency_seam_bytes() {
+        let public_fixture = RunFixture::new("wrapper-public");
+        let direct_fixture = RunFixture::new("wrapper-direct");
+        let public_request = RunRequest {
+            envelope: &public_fixture.envelope,
+            repository: &public_fixture.repository,
+            cache: &public_fixture.cache,
+            producer_version: env!("CARGO_PKG_VERSION"),
+            generation: 7,
+            source_snapshot: None,
+        };
+        let direct_request = RunRequest {
+            envelope: &direct_fixture.envelope,
+            repository: &direct_fixture.repository,
+            cache: &direct_fixture.cache,
+            producer_version: env!("CARGO_PKG_VERSION"),
+            generation: 7,
+            source_snapshot: None,
+        };
+        let runtime = DockerCompatibleRuntime;
+        let public_supervisor = FakeSupervisor::new(ExecutionMode::Pass);
+        let direct_supervisor = FakeSupervisor::new(ExecutionMode::Pass);
+        let public = execute_local_run(
+            &public_request,
+            &runtime,
+            &public_supervisor,
+            &CancellationToken::default(),
+            &FixedClock::new(),
+        )
+        .expect("public wrapper");
+        let cancellation = CancellationToken::default();
+        let clock = FixedClock::new();
+        let storage_probe = SystemStorageProbe;
+        let capability_probe = DockerRuntimeCapabilityProbe;
+        let mut barrier = NoopCompletionBarrier;
+        let mut lifecycle = NoopRunLifecycleObserver;
+        let mut dependencies = RunDependencies {
+            runtime: &runtime,
+            supervisor: &direct_supervisor,
+            cancellation: &cancellation,
+            clock: &clock,
+            barrier: &mut barrier,
+            lifecycle: &mut lifecycle,
+            storage_probe: &storage_probe,
+            capability_probe: &capability_probe,
+            runtime_preflight: None,
+        };
+        let direct = execute_local_run_with_dependencies(&direct_request, &mut dependencies)
+            .expect("dependency seam");
+        assert_eq!(public.exit_code(), direct.exit_code());
+        assert_eq!(public.receipt.receipt, direct.receipt.receipt);
+        assert_eq!(public.receipt_v2, direct.receipt_v2);
+        assert_eq!(
+            public.published_canonical_bytes().expect("public bytes"),
+            direct.published_canonical_bytes().expect("direct bytes")
         );
     }
 
