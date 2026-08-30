@@ -6,7 +6,7 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use saphyr::LoadableYamlNode;
 
@@ -110,4 +110,67 @@ fn public_hosted_policy_and_optional_receipt_product_are_documented_separately()
         );
     }
     assert!(CHANGELOG.contains("Replaced this public repository's ordinary per-PR receipt gate"));
+}
+
+#[test]
+fn economic_case_studies_recompute_remote_savings_from_observed_inputs() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let evidence_path = root.join("docs/evidence/economic-case-studies-2026-08.json");
+    assert!(
+        evidence_path.is_file(),
+        "public economic evidence must exist at {}",
+        evidence_path.display()
+    );
+
+    let evidence: serde_json::Value =
+        serde_json::from_slice(&fs::read(&evidence_path).expect("read public economic evidence"))
+            .expect("parse public economic evidence");
+
+    let knowledge = &evidence["case_studies"]["matryca_knowledge"];
+    assert_eq!(knowledge["observed_linux_minutes"], 111);
+    assert_eq!(knowledge["observed_gross_compute_usd"], 0.666);
+    assert_eq!(knowledge["observed_billed_usd"], 0.570);
+    assert_eq!(knowledge["baseline_rounded_runner_minutes"], 60);
+    assert_eq!(knowledge["retained_rounded_runner_minutes"], 32);
+    assert_eq!(knowledge["avoided_rounded_runner_minutes"], 28);
+    assert_eq!(knowledge["estimated_avoided_github_compute_usd"], 0.168);
+
+    let brain = &evidence["case_studies"]["matryca_brain"];
+    assert_eq!(brain["public_name"], "Matryca-Brain");
+    assert_eq!(brain["observed_linux_minutes"], 5_600);
+    assert_eq!(brain["observed_gross_compute_usd"], 33.60);
+    assert_eq!(brain["observed_gross_storage_usd"], 0.12);
+    assert_eq!(brain["observed_gross_total_usd"], 33.72);
+    assert_eq!(brain["observed_billed_total_usd"], 15.38);
+    assert_eq!(brain["hosted_pr_executions"], 194);
+    assert_eq!(brain["hosted_dependency_update_executions"], 22);
+    assert_eq!(brain["ccp_guarded_self_hosted_attempts"], 22);
+    assert_eq!(brain["ccp_guarded_distinct_commits"], 19);
+    assert_eq!(brain["ccp_guarded_outcomes"]["success"], 17);
+    assert_eq!(brain["ccp_guarded_outcomes"]["failure"], 1);
+    assert_eq!(brain["ccp_guarded_outcomes"]["cancelled"], 4);
+    assert_eq!(brain["post_cutover_gross_usd"], 0.00);
+
+    let comparable_hosted_executions = brain["hosted_pr_executions"]
+        .as_u64()
+        .expect("hosted PR executions");
+    let average_minutes = brain["observed_linux_minutes"]
+        .as_u64()
+        .expect("observed Linux minutes") as f64
+        / comparable_hosted_executions as f64;
+    let avoided_minutes = average_minutes
+        * brain["ccp_guarded_self_hosted_attempts"]
+            .as_u64()
+            .expect("CCP guarded attempts") as f64;
+    let avoided_usd = avoided_minutes
+        * evidence["github_pricing"]["linux_2_core_usd_per_minute"]
+            .as_f64()
+            .expect("Linux runner rate");
+
+    assert!((average_minutes - 28.865_979_381_4).abs() < 1e-9);
+    assert!((avoided_minutes - 635.051_546_391_8).abs() < 1e-9);
+    assert!((avoided_usd - 3.810_309_278_4).abs() < 1e-9);
+    assert_eq!(brain["estimated_avoided_github_compute_minutes"], 635.1);
+    assert_eq!(brain["estimated_avoided_github_compute_usd"], 3.81);
+    assert_eq!(evidence["claim_boundary"]["net_savings_certified"], false);
 }

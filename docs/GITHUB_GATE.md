@@ -20,6 +20,10 @@ repository should enable a receipt gate only when CCP is economically qualified
 from measured billing, replaced workflow minutes, and local cost, or when a
 separately documented non-economic requirement justifies it.
 
+The public [economic qualification guide](ECONOMIC_QUALIFICATION.md) records
+the current decision rule and two bounded private-repository measurements. It
+does not convert those observations into a universal savings guarantee.
+
 ## Why the receipt uses a separate branch
 
 A receipt for commit X cannot be added to commit X: adding the file creates a

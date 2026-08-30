@@ -11,6 +11,7 @@ growing without weakening review, security, or platform coverage.
 Start here:
 
 - [PR #71 case study](docs/CASE_STUDY_PR71.md) — a bounded, public example.
+- [Economic qualification](docs/ECONOMIC_QUALIFICATION.md) — measured private-repository savings and limits.
 - [Clean-room tutorial](docs/TUTORIAL.md) — produce and verify a first receipt.
 - [Adoption guide](docs/ADOPTION_GUIDE.md) — decide whether CCP fits your repository.
 
@@ -166,10 +167,29 @@ Official project descriptions used for this comparison:
 These projects solve overlapping but different problems. Commit CI Preflight
 does not claim feature superiority or full GitHub Actions parity.
 
-## Cost example (assumptions only)
+## When CCP actually saves money
 
-Assumption (example only): pricing and quotas vary by account and date, so treat
-the formula below as a planning aid.
+CCP produces no billable runner saving when it replaces standard hosted CI in
+a public repository. In a private repository it can preserve included quota
+and avoid billed compute, but only when the same required checks move off the
+hosted runners and the retained receipt gate remains cheaper.
+
+Measured August 2026 examples:
+
+| Case | Observed result |
+|---|---|
+| This public repository | `$0` billable saving from replacing ordinary standard hosted PR jobs; hosted CI remains the default |
+| Matryca-Knowledge | 28 rounded runner-minutes avoided across 30 gate events, approximately 46.7% of the former minimum and `$0.168` at the billed Linux rate |
+| Matryca-Brain | 22 CCP-guarded local attempts correspond to an estimated 635.1 hosted Linux minutes and `$3.81` of GitHub compute avoided |
+
+These are bounded observations, not a universal savings promise. The detailed
+inputs, arithmetic, privacy boundary, and limits are in
+[Economic qualification and measured savings](docs/ECONOMIC_QUALIFICATION.md).
+
+## Cost model
+
+Pricing and quotas vary by account and date, so treat the formula below as a
+planning aid and replace every input with current measurements.
 
 Remote bill estimate (assumption):
 

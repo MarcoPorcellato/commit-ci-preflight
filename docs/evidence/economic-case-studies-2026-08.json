@@ -1,0 +1,94 @@
+{
+  "schema_version": "1.0",
+  "observed_at_utc": "2026-08-30T00:00:00Z",
+  "currency": "USD",
+  "github_pricing": {
+    "linux_2_core_usd_per_minute": 0.006,
+    "github_pro_included_minutes_per_month": 3000,
+    "job_rounding": "Each private-repository hosted job is rounded up to the next whole minute.",
+    "public_standard_hosted_is_free": true,
+    "self_hosted_is_free": true,
+    "dependabot_standard_hosted_is_free": true,
+    "source": "https://docs.github.com/en/billing/concepts/product-billing/github-actions"
+  },
+  "case_studies": {
+    "matryca_knowledge": {
+      "public_name": "Matryca-Knowledge",
+      "repository_visibility": "private",
+      "observation_period": "2026-08-01..2026-08-30",
+      "qualified_commit": "2dae025a3dde112b7b35a24ddd9b0514d1f1ee7c",
+      "receipt_python_311": "sha256:a9465bf170eb110bdd4ed29b3f977bd4dc3bc21a617ad01ca54d0c357d85350d",
+      "receipt_python_313": "sha256:cee6416805b7b78ad23d385fa8415cd64f4f2615dd9c8df04b016fa6ee58273a",
+      "qualified_tests_per_runtime": 279,
+      "qualified_coverage_percent": 83,
+      "qualified_check_count": 19,
+      "observed_linux_minutes": 111,
+      "observed_gross_compute_usd": 0.666,
+      "observed_discount_usd": 0.096,
+      "observed_billed_usd": 0.570,
+      "sample_gate_runs": 30,
+      "sample_gate_runner_seconds": 538,
+      "successful_gate_median_seconds": 15,
+      "baseline_rounded_runner_minutes": 60,
+      "retained_rounded_runner_minutes": 32,
+      "avoided_rounded_runner_minutes": 28,
+      "avoided_runner_minutes_percent": 46.7,
+      "estimated_avoided_github_compute_usd": 0.168,
+      "method": "Two historical hosted matrix jobs per event are compared with one retained hosted receipt-gate job. GitHub rounds each private hosted job separately."
+    },
+    "matryca_brain": {
+      "public_name": "Matryca-Brain",
+      "repository_visibility": "private",
+      "observation_period": "2026-08-01..2026-08-30",
+      "billing_period_label": "2026-08-01..2026-08-31",
+      "observed_total_actions_runs": 358,
+      "observed_pr_validation_runs": 314,
+      "observed_dependency_update_runs": 22,
+      "observed_ccp_guarded_self_hosted_runs": 22,
+      "pre_cutover_pr_runs": 286,
+      "pre_cutover_distinct_pr_heads": 207,
+      "pre_cutover_pr_outcomes": {
+        "success": 139,
+        "failure": 43,
+        "cancelled": 12,
+        "skipped": 92
+      },
+      "hosted_pr_executions": 194,
+      "hosted_dependency_update_executions": 22,
+      "ccp_guarded_self_hosted_attempts": 22,
+      "ccp_guarded_distinct_commits": 19,
+      "ccp_guarded_outcomes": {
+        "success": 17,
+        "failure": 1,
+        "cancelled": 4
+      },
+      "observed_linux_minutes": 5600,
+      "observed_gross_compute_usd": 33.60,
+      "observed_gross_storage_usd": 0.12,
+      "observed_gross_total_usd": 33.72,
+      "observed_discount_usd": 18.34,
+      "observed_billed_total_usd": 15.38,
+      "post_cutover_period": "2026-08-20..2026-08-30",
+      "post_cutover_gross_usd": 0.00,
+      "average_observed_linux_minutes_per_executed_pr": 28.866,
+      "estimated_avoided_github_compute_minutes": 635.1,
+      "estimated_avoided_github_compute_usd": 3.81,
+      "estimate_kind": "bounded counterfactual from observed repository billing and comparable workflow counts",
+      "method": "The 5,600 observed Linux minutes are divided by the 194 non-skipped PR Validation executions, then multiplied by 22 CCP-guarded self-hosted attempts. Dependency-update runs are reported but excluded because they are not the PR workflow replaced by CCP.",
+      "comparability_boundary": "The operator reports that the local ten-stage Ready mirror preserved the number and quality of tests. The public study treats this as a bounded comparability input, not cryptographic proof of runner identity."
+    }
+  },
+  "claim_boundary": {
+    "github_billed_savings_demonstrated_by": [
+      "matryca_knowledge"
+    ],
+    "github_billed_savings_estimated_for": [
+      "matryca_brain"
+    ],
+    "included_quota_preservation_demonstrated": true,
+    "avoided_remote_compute_demonstrated": true,
+    "net_savings_certified": false,
+    "reason": "Energy, hardware amortization, operator time, maintenance, and failed local attempts have not been priced."
+  },
+  "privacy_boundary": "Private billing and run records were inspected by the operator. This public record contains aggregates, exact qualification anchors that were approved for publication, and the public case-study name Matryca-Brain; it excludes account identity, private repository URLs, raw logs, local paths, and secrets."
+}
