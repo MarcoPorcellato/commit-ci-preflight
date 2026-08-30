@@ -1,0 +1,65 @@
+schema_version = "1.0"
+pack_id = "ccp.rust-minimal"
+pack_version = "1.0.0"
+license = "Apache-2.0"
+description = "One inert profile used to prove the Capability Pack contract."
+
+[[upstream_sources]]
+id = "pack-source"
+url = "https://github.com/MarcoPorcellato/commit-ci-preflight"
+digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[[profiles]]
+id = "strict-clippy"
+description = "Compile all targets with warnings denied."
+evidence_class = "deterministic"
+pass_semantics = "The exact pinned command exits zero."
+known_blind_spots = ["Does not prove dynamic behavior."]
+supported_hosts = ["macos-aarch64"]
+target_platforms = ["linux-arm64"]
+required_runtime_features = ["linux-userland", "no-network", "read-only-source"]
+offline_preparation = "none"
+
+[[profiles.tools]]
+id = "clippy"
+version = "1.87.0"
+license = "Apache-2.0"
+url = "https://github.com/rust-lang/rust"
+digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[[profiles.inputs]]
+id = "rustsec-db"
+kind = "advisory-database"
+url = "https://github.com/RustSec/advisory-db"
+digest = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+snapshot_created_at_utc = "2026-08-30T00:00:00Z"
+max_age_seconds = 604800
+
+[profiles.runtime]
+kind = "docker_compatible"
+image = "ghcr.io/example/rust@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+cpu_count = 2
+memory_mib = 2048
+pids_limit = 256
+network = false
+pull_policy = "never"
+swap_mode = "disabled"
+
+[profiles.environment]
+fixed = { CARGO_NET_OFFLINE = "true" }
+
+[profiles.storage]
+min_free_bytes = 1048576
+receipt_journal_reserve_bytes = 4096
+max_cache_growth_bytes = 1048576
+
+[[profiles.caches]]
+id = "cargo"
+mount_path = ".cache/cargo"
+
+[[profiles.checks]]
+id = "clippy"
+required = true
+argv = ["cargo", "clippy", "--locked", "--offline", "--all-targets", "--all-features", "--", "-D", "warnings"]
+working_directory = "."
+timeout_seconds = 1800
