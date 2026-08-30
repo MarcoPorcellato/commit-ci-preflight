@@ -1,0 +1,17 @@
+Independently verify receipt integrity and repository policy
+
+Usage: commit-ci-preflight verify [OPTIONS] --expected-commit <EXPECTED_COMMIT>
+
+Options:
+      --receipt <RECEIPT>
+          Canonical receipt JSON to verify [default: .ccp/receipt.json]
+      --policy <POLICY>
+          Strict repository verification policy [default: .commit-ci-policy.toml]
+      --expected-commit <EXPECTED_COMMIT>
+          Exact lowercase Git SHA supplied by the calling trust boundary
+      --evaluated-at-utc <EVALUATED_AT_UTC>
+          Explicit strict UTC evaluation instant; defaults to the local system clock
+      --json
+          Emit the canonical machine-readable verification report
+  -h, --help
+          Print help

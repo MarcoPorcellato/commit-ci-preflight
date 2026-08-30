@@ -1,0 +1,13 @@
+Validate configuration and print the normalized read-only execution plan
+
+Usage: commit-ci-preflight plan [OPTIONS]
+
+Options:
+      --config <CONFIG>
+          Configuration file to validate [default: .commit-ci-preflight.toml]
+      --json
+          Emit canonical machine-readable JSON
+      --matrix-plan-profile <MATRIX_PLAN_PROFILE>
+          Compatibility digest profile for Matrix V2 configuration [default: current-v2]
+  -h, --help
+          Print help
