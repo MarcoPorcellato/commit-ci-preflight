@@ -613,7 +613,11 @@ mod tests {
     #[test]
     fn payload_link_recreation_is_explicitly_unsupported() {
         assert!(matches!(
-            recreate_payload_link(Path::new("source"), Path::new("destination")),
+            recreate_payload_link(
+                Path::new("source"),
+                Path::new("destination"),
+                PayloadLinkPolicy::Reject,
+            ),
             Err(CacheError::PayloadSymlinkUnsupported(_))
         ));
     }
