@@ -14,10 +14,12 @@ Semantic Versioning after its first public release.
   Matryca-Brain. The documentation separates quota preservation and GitHub
   compute avoided from still-uncertified net savings.
 
-- Replaced this public repository's ordinary per-PR receipt gate with complete
-  standard GitHub-hosted Rust CI on Linux, macOS, and Windows. Receipt
-  verification remains an optional product capability for economically
-  qualified private workloads or separately justified non-economic evidence.
+- Replaced this public repository's ordinary per-PR receipt gate with standard
+  GitHub-hosted Rust CI: Linux and macOS execute the complete deterministic
+  suite, while Windows compiles every test target without claiming runtime
+  qualification. Receipt verification remains an optional product capability
+  for economically qualified private workloads or separately justified
+  non-economic evidence.
 
 - Unix cache generations now preserve ordinary opaque payload links during inventory and reuse; strict control paths remain link-free, failed preparation owns cleanup before reuse, and native candidate qualification remains pending.
 

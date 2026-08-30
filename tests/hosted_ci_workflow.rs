@@ -40,12 +40,14 @@ fn public_repository_uses_full_standard_hosted_rust_ci() {
         "cargo fmt --all -- --check",
         "cargo clippy --locked --workspace --all-targets --all-features -- -D warnings",
         "cargo test --locked --workspace --all-targets --all-features",
+        "cargo test --locked --workspace --all-targets --all-features --no-run",
         "cargo doc --locked --workspace --all-features --no-deps",
         "cargo run --locked --quiet --example generate_release_metadata -- --check",
         "CCP_TEST_ROOT: ${{ runner.temp }}/ccp-tests",
-        "needs: [quality, test]",
+        "needs: [quality, test, windows_compile]",
         "QUALITY_RESULT: ${{ needs.quality.result }}",
         "TEST_RESULT: ${{ needs.test.result }}",
+        "WINDOWS_COMPILE_RESULT: ${{ needs.windows_compile.result }}",
     ] {
         assert!(
             WORKFLOW.contains(required),
@@ -122,6 +124,64 @@ fn runner_temp_is_resolved_inside_the_test_step() {
         .and_then(|env| mapping_get(env, "CCP_TEST_ROOT"))
         .and_then(YamlOwned::as_str);
     assert_eq!(test_root, Some("${{ runner.temp }}/ccp-tests"));
+}
+
+#[test]
+fn windows_compiles_all_tests_without_executing_unqualified_runtime_paths() {
+    let documents = saphyr::YamlOwned::load_from_str(WORKFLOW).expect("hosted CI YAML");
+    let root = documents[0].as_mapping().expect("workflow mapping");
+    let jobs = mapping_get(root, "jobs")
+        .and_then(YamlOwned::as_mapping)
+        .expect("jobs mapping");
+
+    let test_job = mapping_get(jobs, "test")
+        .and_then(YamlOwned::as_mapping)
+        .expect("test job mapping");
+    let runners = mapping_get(test_job, "strategy")
+        .and_then(YamlOwned::as_mapping)
+        .and_then(|strategy| mapping_get(strategy, "matrix"))
+        .and_then(YamlOwned::as_mapping)
+        .and_then(|matrix| mapping_get(matrix, "runner"))
+        .and_then(YamlOwned::as_sequence)
+        .expect("runtime test runner matrix")
+        .iter()
+        .map(|runner| runner.as_str().expect("runner name"))
+        .collect::<Vec<_>>();
+    assert_eq!(runners, ["ubuntu-24.04", "macos-15"]);
+
+    let windows_job = mapping_get(jobs, "windows_compile")
+        .and_then(YamlOwned::as_mapping)
+        .expect("Windows compile-only job");
+    assert_eq!(
+        mapping_get(windows_job, "runs-on").and_then(YamlOwned::as_str),
+        Some("windows-2025")
+    );
+    let windows_steps = mapping_get(windows_job, "steps")
+        .and_then(YamlOwned::as_sequence)
+        .expect("Windows compile steps");
+    let compile_step = windows_steps
+        .iter()
+        .filter_map(YamlOwned::as_mapping)
+        .find(|step| {
+            mapping_get(step, "name").and_then(YamlOwned::as_str)
+                == Some("Compile every test target without execution")
+        })
+        .expect("Windows compile-only step");
+    assert_eq!(
+        mapping_get(compile_step, "run").and_then(YamlOwned::as_str),
+        Some("cargo test --locked --workspace --all-targets --all-features --no-run")
+    );
+
+    let gate_job = mapping_get(jobs, "gate")
+        .and_then(YamlOwned::as_mapping)
+        .expect("hosted gate job");
+    let gate_dependencies = mapping_get(gate_job, "needs")
+        .and_then(YamlOwned::as_sequence)
+        .expect("hosted gate dependencies")
+        .iter()
+        .map(|dependency| dependency.as_str().expect("gate dependency"))
+        .collect::<Vec<_>>();
+    assert_eq!(gate_dependencies, ["quality", "test", "windows_compile"]);
 }
 
 #[test]

@@ -50,7 +50,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-24.04, macos-15, windows-2025]
+        runner: [ubuntu-24.04, macos-15]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     steps:
@@ -70,10 +70,29 @@ jobs:
           CCP_TEST_ROOT: ${{ runner.temp }}/ccp-tests
         run: cargo test --locked --workspace --all-targets --all-features
 
+  windows_compile:
+    name: Compile tests (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Check out the exact source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+          lfs: false
+          submodules: false
+      - name: Resolve the pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Compile every test target without execution
+        run: cargo test --locked --workspace --all-targets --all-features --no-run
+
   gate:
     name: Hosted CI gate
     if: always()
-    needs: [quality, test]
+    needs: [quality, test, windows_compile]
     permissions: {}
     runs-on: ubuntu-24.04
     timeout-minutes: 1
@@ -82,7 +101,9 @@ jobs:
         env:
           QUALITY_RESULT: ${{ needs.quality.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          WINDOWS_COMPILE_RESULT: ${{ needs.windows_compile.result }}
         run: |
           set -euo pipefail
           [[ "$QUALITY_RESULT" == "success" ]]
           [[ "$TEST_RESULT" == "success" ]]
+          [[ "$WINDOWS_COMPILE_RESULT" == "success" ]]

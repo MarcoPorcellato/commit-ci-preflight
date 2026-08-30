@@ -132,10 +132,12 @@ For installation, checksum verification, and local candidate archives, see
 ## Repository CI policy
 
 This public repository uses standard GitHub-hosted CI for ordinary pull
-requests across Linux, macOS, and Windows. Public standard runners are free.
-Replacing those jobs with local execution produces no billable public-runner savings.
-It would consume maintainer time and Mac resources without an economic return,
-so the per-PR receipt requirement is retired here.
+requests. Linux and macOS execute the complete deterministic suite; Windows
+compiles every test target without executing runtime and cache paths whose
+native qualification remains pending. Public standard runners are free.
+Replacing those jobs with local execution produces no billable public-runner
+savings. It would consume maintainer time and Mac resources without an
+economic return, so the per-PR receipt requirement is retired here.
 
 The historical CCP receipts remain valid
 evidence for their exact commits; they are not current pull-request gates. The
