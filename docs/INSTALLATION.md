@@ -36,6 +36,18 @@ cargo install --locked --path .
 commit-ci-preflight --version
 ```
 
+The full test command above is the current hosted contract on Linux and macOS.
+On Windows, compile every test target without executing the still-pending
+native runtime and cache paths:
+
+```powershell
+cargo test --locked --workspace --all-targets --all-features --no-run
+```
+
+That compile-only result proves source portability, not Windows runtime
+qualification. The current platform boundary is recorded in
+[`BETA_SUPPORT.md`](BETA_SUPPORT.md).
+
 `cargo install --path .` installs only the `commit-ci-preflight` binary.
 It does not register a GitHub runner, start a daemon, alter repository settings,
 or upload a receipt.

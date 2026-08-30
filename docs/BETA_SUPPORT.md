@@ -14,6 +14,7 @@ without an operator review of the threat model, policy, and local runtime.
 | Fixed benchmark on native macOS arm64 | `QUALIFIED` | Deterministic correctness digest matched |
 | Fixed benchmark on native Linux x86_64 | `QUALIFIED` | Standard `ubuntu-24.04` runner receipt independently verified |
 | Fixed benchmark on native Windows x86_64 | `QUALIFIED` | Standard `windows-2025` runner receipt independently verified |
+| Ordinary hosted pull-request CI | `ACTIVE_BOUNDARY` | Linux and macOS execute the complete deterministic suite; Windows compiles every test target without execution |
 | Unsigned macOS arm64 archive in GitHub prerelease `v0.1.0-rc.1` | `PUBLISHED_RC` | Exact tagged source, archive checksum, SBOM, notices, and rollback evidence |
 | Complete project `run` path on Linux x86_64 | `PENDING` | Benchmark evidence is not full runtime qualification |
 | Complete project `run` path on Windows x86_64 | `PENDING` | Benchmark evidence is not full runtime qualification |

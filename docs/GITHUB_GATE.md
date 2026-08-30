@@ -1,8 +1,8 @@
-# Lightweight GitHub receipt gate
+# Optional lightweight GitHub receipt gate
 
 ## Purpose
 
-The repository-native workflow verifies locally produced evidence without
+This product capability verifies locally produced evidence without
 re-running the project's heavy checks on GitHub-hosted compute. It retains only
 the remote facts that the local runner cannot assert: the pull-request event,
 the exact head commit, the base repository, and publication of a GitHub commit
@@ -13,6 +13,16 @@ checks out, builds, imports, sources, or executes pull-request code. The
 evidence checkout is treated as untrusted data and is limited to the canonical
 receipt path. The verifier rejects malformed, oversized, stale, digest-invalid,
 or policy-invalid input.
+
+It is not active for this public repository's ordinary pull requests, which use
+the complete standard GitHub-hosted Rust workflow instead. An adopting
+repository should enable a receipt gate only when CCP is economically qualified
+from measured billing, replaced workflow minutes, and local cost, or when a
+separately documented non-economic requirement justifies it.
+
+The public [economic qualification guide](ECONOMIC_QUALIFICATION.md) records
+the current decision rule and two bounded private-repository measurements. It
+does not convert those observations into a universal savings guarantee.
 
 ## Why the receipt uses a separate branch
 
@@ -36,10 +46,10 @@ identity. A repository writer could replace or fabricate unsigned evidence.
 Identity-bound signing remains a later plan tranche and must not be inferred
 from a green v1 status.
 
-## Repository setup
+## Adopting-repository setup
 
-The active workflow is
-[receipt-gate.yml](../.github/workflows/receipt-gate.yml). It uses:
+Start from the
+[cross-repository template](../examples/github/receipt-gate.yml.example). It uses:
 
 - pull_request_target, so the workflow definition comes from the default
   branch;
@@ -57,12 +67,10 @@ end-to-end trial has proved that the status is attached to the latest PR head
 commit. Keep review, permission, secret-backed, deployment, and uncovered
 platform checks as separate GitHub rules or workflows.
 
-The active workflow is specific to this repository because its trusted base
-contains the CCP Rust verifier source. An adopting repository must use the
-[cross-repository template](../examples/github/receipt-gate.yml.example), pin
-an exact reviewed CCP source commit, and keep its own policy in the adopting
-repository's trusted base. Follow the [adoption guide](ADOPTION_GUIDE.md);
-copying this repository-native workflow unchanged will not work safely.
+An adopting repository must pin an exact reviewed CCP source commit and keep
+its own policy in the adopting repository's trusted base. Follow the
+[adoption guide](ADOPTION_GUIDE.md); copying historical repository-native
+workflow text unchanged will not work safely.
 
 This boundary follows GitHub's official guidance for
 [`pull_request_target`](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target):

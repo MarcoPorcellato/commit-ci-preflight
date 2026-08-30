@@ -125,6 +125,10 @@ their current plan, runner multiplier, included quota, taxes, and local energy
 or hardware assumptions. Commit CI Preflight does not hard-code a currency or
 claim guaranteed savings.
 
+For measured private-repository examples, including the distinction between
+remote compute avoided and uncertified net savings, see
+[Economic qualification and measured savings](ECONOMIC_QUALIFICATION.md).
+
 Quality-critical remote responsibilities remain separate: event identity,
 review/permission policy, secret-backed integration, deployment environments,
 and native platforms not covered by accepted local receipts.

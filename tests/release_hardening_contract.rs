@@ -54,7 +54,18 @@ fn public_readme_is_human_first_and_truthfully_differentiated() {
             "missing official comparison source: {official_source}"
         );
     }
-    assert!(!README.to_ascii_lowercase().contains("matryca"));
+    for public_case_study in ["Matryca-Knowledge", "Matryca-Brain"] {
+        assert!(
+            README.contains(public_case_study),
+            "missing approved public case-study name: {public_case_study}"
+        );
+    }
+    for private_context in ["Matryca-per-Delineat", "MarcoPorcellato/Matryca"] {
+        assert!(
+            !README.contains(private_context),
+            "README leaked private case-study context: {private_context}"
+        );
+    }
     assert!(README.contains("not an identity attestation"));
     assert!(README.contains("does not execute marketplace actions"));
 }

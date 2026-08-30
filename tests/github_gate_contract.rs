@@ -20,44 +20,10 @@ use commit_ci_preflight::config::ConfigV1;
 use commit_ci_preflight::verify::{VerificationPolicyDocument, load_verification_policy_document};
 use saphyr::LoadableYamlNode;
 
-const WORKFLOW: &str = include_str!("../.github/workflows/receipt-gate.yml");
 const CROSS_REPOSITORY_TEMPLATE: &str = include_str!("../examples/github/receipt-gate.yml.example");
 const GATE_SCRIPT: &str = include_str!("../scripts/github-receipt-gate.sh");
 const CHECKOUT_SHA: &str = "de0fac2e4500dabe0009e67214ff5f5447ce83dd";
 const FIXTURE_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
-
-#[test]
-fn workflow_uses_a_trusted_minimal_fail_closed_boundary() {
-    assert!(WORKFLOW.contains("pull_request_target:"));
-    assert!(WORKFLOW.contains("contents: read"));
-    assert!(WORKFLOW.contains("statuses: write"));
-    assert!(WORKFLOW.contains("cancel-in-progress: true"));
-    assert!(WORKFLOW.contains("timeout-minutes: 6"));
-    assert!(WORKFLOW.contains("github.event.pull_request.head.sha"));
-    assert!(WORKFLOW.contains("github.event.pull_request.base.sha"));
-    assert!(WORKFLOW.contains("ccp-evidence/"));
-    assert!(WORKFLOW.contains(&format!("actions/checkout@{CHECKOUT_SHA}")));
-    assert!(WORKFLOW.contains("persist-credentials: false"));
-    assert!(WORKFLOW.contains("cargo build --locked --release --bin commit-ci-preflight"));
-    assert!(WORKFLOW.contains("commit-ci-preflight/receipt"));
-
-    for forbidden in [
-        "pull_request:\n",
-        "pull_request.head.ref",
-        "pull_request.head.repo",
-        "actions/cache",
-        "cargo test",
-        "docker run",
-        "github.step_summary",
-        "secrets.",
-        "permissions: write-all",
-    ] {
-        assert!(
-            !WORKFLOW.contains(forbidden),
-            "forbidden workflow surface: {forbidden}"
-        );
-    }
-}
 
 #[test]
 fn cross_repository_template_separates_and_pins_all_trust_inputs() {

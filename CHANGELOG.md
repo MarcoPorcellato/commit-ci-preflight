@@ -9,6 +9,18 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added auditable economic qualification guidance with machine-readable August
+  2026 case-study inputs for Matryca-Knowledge and the private case published as
+  Matryca-Brain. The documentation separates quota preservation and GitHub
+  compute avoided from still-uncertified net savings.
+
+- Replaced this public repository's ordinary per-PR receipt gate with standard
+  GitHub-hosted Rust CI: Linux and macOS execute the complete deterministic
+  suite, while Windows compiles every test target without claiming runtime
+  qualification. Receipt verification remains an optional product capability
+  for economically qualified private workloads or separately justified
+  non-economic evidence.
+
 - Unix cache generations now preserve ordinary opaque payload links during inventory and reuse; strict control paths remain link-free, failed preparation owns cleanup before reuse, and native candidate qualification remains pending.
 
 - Added the adoption-help issue-form source and a 1280 × 640 social-preview PNG
