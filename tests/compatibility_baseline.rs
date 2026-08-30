@@ -122,6 +122,18 @@ fn matrix_plan_profiles_match_the_baseline() {
     );
 }
 
+fn normalize_mount_argv(
+    argument: &str,
+    sources: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let Some(rest) = argument.strip_prefix("type=bind,src=") else {
+        return argument.to_owned();
+    };
+    let (source, suffix) = rest.split_once(",dst=").expect("bind destination");
+    let token = sources.get(source).expect("declared mount source");
+    format!("type=bind,src={token},dst={suffix}")
+}
+
 fn normalize_dry_run(mut v: serde_json::Value) -> (serde_json::Value, Vec<String>) {
     let mut paths = Vec::new();
     fn collect_one(value: &serde_json::Value, paths: &mut Vec<String>) {
@@ -162,13 +174,7 @@ fn normalize_dry_run(mut v: serde_json::Value) -> (serde_json::Value, Vec<String
             for a in c["argv"].as_array_mut().unwrap() {
                 let s = a.as_str().unwrap();
                 if let Some(r) = s.strip_prefix("type=bind,src=") {
-                    let (_, d) = r.split_once(",dst=").unwrap();
-                    let src = m
-                        .iter()
-                        .find(|(k, _)| r.starts_with(*k))
-                        .map(|(_, v)| v)
-                        .unwrap();
-                    *a = serde_json::json!(format!("type=bind,src={src},dst={d}"));
+                    *a = serde_json::json!(normalize_mount_argv(s, &m));
                 }
             }
         }
@@ -181,6 +187,20 @@ fn normalize_dry_run(mut v: serde_json::Value) -> (serde_json::Value, Vec<String
         one(&mut v)
     }
     (v, paths)
+}
+
+#[test]
+fn bind_source_lookup_requires_exact_path_equality() {
+    let mut sources = std::collections::BTreeMap::new();
+    sources.insert("/cache/cargo".to_owned(), "$CACHE:cargo".to_owned());
+    sources.insert("/cache/cargo-extra".to_owned(), "$CACHE:extra".to_owned());
+    assert_eq!(
+        normalize_mount_argv(
+            "type=bind,src=/cache/cargo-extra,dst=/workspace/cache",
+            &sources
+        ),
+        "type=bind,src=$CACHE:extra,dst=/workspace/cache"
+    );
 }
 
 fn object_keys(value: &serde_json::Value) -> std::collections::BTreeSet<&str> {
