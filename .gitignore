@@ -1,4 +1,5 @@
 /target
+/tests/fixtures/public-api-compat/target/
 /.ccp
 /.ccp-cache
 /.ccp-mounts/cargo-home/*

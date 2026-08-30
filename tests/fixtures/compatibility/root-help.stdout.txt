@@ -1,0 +1,23 @@
+Run reproducible local CI preflights and emit verifiable evidence before remote CI.
+
+Usage: commit-ci-preflight [COMMAND]
+
+Commands:
+  admission               Inspect the host-wide heavy-command admission queue
+  resource                Inspect the host-memory resource guard without changing host state
+  guard                   Serialize and supervise one explicit external program
+  plan                    Validate configuration and print the normalized read-only execution plan
+  doctor                  Probe the configured runtime without running project checks
+  dry-run                 Render runtime argv without spawning a process
+  run                     Execute the validated checks locally and write a canonical receipt
+  verify                  Independently verify receipt integrity and repository policy
+  migrate-github-actions  Analyze a GitHub Actions workflow as data and report migration compatibility
+  benchmark               Run the fixed deterministic native benchmark and emit a verifiable receipt
+  verify-benchmark        Independently verify a benchmark receipt and its expected native platform
+  cache                   Inspect or initialize the persistent managed cache
+  recover                 Inspect or quarantine unfinished CCP-owned run journal state
+  help                    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
