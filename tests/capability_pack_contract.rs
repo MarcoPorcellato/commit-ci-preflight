@@ -144,6 +144,36 @@ fn validator_rejects_shells_invoked_through_env() {
 }
 
 #[test]
+fn validator_rejects_shell_entrypoint_bypasses() {
+    for argv in [
+        vec![
+            "env".to_owned(),
+            "X=1".to_owned(),
+            "bash".to_owned(),
+            "-c".to_owned(),
+            "cargo clippy".to_owned(),
+        ],
+        vec![
+            "env".to_owned(),
+            "-S".to_owned(),
+            "bash -c cargo clippy".to_owned(),
+        ],
+        vec![
+            "C:\\Windows\\System32\\cmd.exe".to_owned(),
+            "/c".to_owned(),
+            "cargo clippy".to_owned(),
+        ],
+    ] {
+        let mut manifest = valid_manifest();
+        manifest.profiles[0].checks[0].argv = argv;
+        assert!(matches!(
+            manifest.validate(),
+            Err(CapabilityPackError::ShellEntrypoint(id)) if id == "clippy"
+        ));
+    }
+}
+
+#[test]
 fn normalized_pack_is_order_independent_and_matches_pinned_canonical_bytes() {
     let first = validate_fixture(VALID).expect("first pack");
     let reordered = validate_fixture(REORDERED_VALID).expect("reordered pack");

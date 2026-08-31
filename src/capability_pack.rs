@@ -643,28 +643,34 @@ fn shell_entrypoint(argv: &[String]) -> bool {
     let Some(entrypoint) = argv.first() else {
         return false;
     };
-    let basename = entrypoint
-        .rsplit('/')
-        .next()
-        .unwrap_or(entrypoint)
-        .to_ascii_lowercase();
+    let basename = executable_basename(entrypoint);
     if SHELLS.contains(&basename.as_str()) {
         return true;
     }
     if !matches!(basename.as_str(), "env") {
         return false;
     }
-    argv.iter()
-        .skip(1)
-        .find(|argument| !argument.starts_with('-'))
-        .is_some_and(|argument| {
-            let name = argument
-                .rsplit('/')
-                .next()
-                .unwrap_or(argument)
-                .to_ascii_lowercase();
-            SHELLS.contains(&name.as_str())
-        })
+    for argument in argv.iter().skip(1) {
+        if matches!(argument.as_str(), "-S" | "--split-string")
+            || argument.starts_with("--split-string=")
+            || argument.starts_with("-S")
+        {
+            return true;
+        }
+        if argument.starts_with('-') || argument.contains('=') {
+            continue;
+        }
+        return SHELLS.contains(&executable_basename(argument).as_str());
+    }
+    false
+}
+
+fn executable_basename(argument: &str) -> String {
+    argument
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(argument)
+        .to_ascii_lowercase()
 }
 
 fn validate_profile(
