@@ -174,6 +174,23 @@ fn validator_rejects_shell_entrypoint_bypasses() {
 }
 
 #[test]
+fn validator_rejects_shells_after_env_option_operands() {
+    for argv in [
+        vec!["env", "-u", "FOO", "bash", "-c", "cargo clippy"],
+        vec!["env", "-C", "/tmp", "bash", "-c", "cargo clippy"],
+        vec!["env", "--unset", "FOO", "bash", "-c", "cargo clippy"],
+        vec!["env", "--chdir", "/tmp", "bash", "-c", "cargo clippy"],
+    ] {
+        let mut manifest = valid_manifest();
+        manifest.profiles[0].checks[0].argv = argv.into_iter().map(str::to_owned).collect();
+        assert!(matches!(
+            manifest.validate(),
+            Err(CapabilityPackError::ShellEntrypoint(id)) if id == "clippy"
+        ));
+    }
+}
+
+#[test]
 fn normalized_pack_is_order_independent_and_matches_pinned_canonical_bytes() {
     let first = validate_fixture(VALID).expect("first pack");
     let reordered = validate_fixture(REORDERED_VALID).expect("reordered pack");

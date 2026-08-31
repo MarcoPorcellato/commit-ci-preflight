@@ -650,14 +650,35 @@ fn shell_entrypoint(argv: &[String]) -> bool {
     if !matches!(basename.as_str(), "env") {
         return false;
     }
-    for argument in argv.iter().skip(1) {
+    let mut arguments = argv.iter().skip(1);
+    while let Some(argument) = arguments.next() {
         if matches!(argument.as_str(), "-S" | "--split-string")
             || argument.starts_with("--split-string=")
             || argument.starts_with("-S")
         {
             return true;
         }
-        if argument.starts_with('-') || argument.contains('=') {
+        if matches!(argument.as_str(), "-u" | "-C" | "--unset" | "--chdir") {
+            if arguments.next().is_none() {
+                return true;
+            }
+            continue;
+        }
+        if argument.starts_with("-u")
+            || argument.starts_with("-C")
+            || argument.starts_with("--unset=")
+            || argument.starts_with("--chdir=")
+            || matches!(
+                argument.as_str(),
+                "-i" | "--ignore-environment" | "-0" | "--null" | "--"
+            )
+        {
+            continue;
+        }
+        if argument.starts_with('-') {
+            return true;
+        }
+        if argument.contains('=') {
             continue;
         }
         return SHELLS.contains(&executable_basename(argument).as_str());
