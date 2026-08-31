@@ -14,7 +14,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs;
+use std::fs::File;
+use std::io::{Error, ErrorKind, Read};
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 use schemars::{JsonSchema, schema_for};
@@ -68,20 +70,43 @@ impl CapabilityPackManifestV1 {
     }
 
     pub fn load(path: &Path) -> Result<Self, CapabilityPackError> {
-        let metadata = fs::metadata(path).map_err(|source| CapabilityPackError::Io {
+        let mut file = File::open(path).map_err(|source| CapabilityPackError::Io {
             path: path.to_path_buf(),
             source,
         })?;
-        let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-        if size > MAX_CAPABILITY_PACK_BYTES {
+        let metadata = file.metadata().map_err(|source| CapabilityPackError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(CapabilityPackError::Io {
+                path: path.to_path_buf(),
+                source: Error::new(
+                    ErrorKind::InvalidInput,
+                    "capability pack must be a regular file",
+                ),
+            });
+        }
+        let capacity = usize::try_from(metadata.len())
+            .unwrap_or(MAX_CAPABILITY_PACK_BYTES + 1)
+            .min(MAX_CAPABILITY_PACK_BYTES + 1);
+        let mut bytes = Vec::with_capacity(capacity);
+        file.by_ref()
+            .take((MAX_CAPABILITY_PACK_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|source| CapabilityPackError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        if bytes.len() > MAX_CAPABILITY_PACK_BYTES {
             return Err(CapabilityPackError::ManifestTooLarge {
-                actual: size,
+                actual: bytes.len(),
                 maximum: MAX_CAPABILITY_PACK_BYTES,
             });
         }
-        let input = fs::read_to_string(path).map_err(|source| CapabilityPackError::Io {
+        let input = String::from_utf8(bytes).map_err(|source| CapabilityPackError::Io {
             path: path.to_path_buf(),
-            source,
+            source: Error::new(ErrorKind::InvalidData, source),
         })?;
         Self::parse(&input)
     }
@@ -133,6 +158,7 @@ impl CapabilityPackManifestV1 {
         };
         let pack_digest = canonical_digest(&pack)?;
         Ok(CapabilityPackEnvelopeV1 {
+            expected_pack_digest: pack_digest.clone(),
             pack_digest,
             pack,
             profile_configs: configs,
@@ -140,13 +166,27 @@ impl CapabilityPackManifestV1 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct CapabilityPackEnvelopeV1 {
     pub pack_digest: String,
     pub pack: NormalizedCapabilityPackV1,
     #[allow(dead_code)]
     #[serde(skip)]
     profile_configs: BTreeMap<String, ValidatedProfileConfigV1>,
+    #[serde(skip)]
+    expected_pack_digest: String,
+}
+
+impl fmt::Debug for CapabilityPackEnvelopeV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapabilityPackEnvelopeV1")
+            .field("pack_digest", &self.pack_digest)
+            .field("pack_id", &self.pack.pack_id)
+            .field("pack_version", &self.pack.pack_version)
+            .field("profile_count", &self.pack.profiles.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +205,8 @@ pub struct CapabilityPackExpansionV1 {
     pub profile_id: String,
     pub evidence_class: CapabilityEvidenceClassV1,
     pub execution_plan: ExecutionPlanEnvelopeV1,
+    #[serde(skip)]
+    expected_canonical_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -215,6 +257,7 @@ impl CapabilityPackEnvelopeV1 {
         &self,
         binding: CapabilityPackBindingV1,
     ) -> Result<CapabilityPackExpansionV1, CapabilityPackError> {
+        self.validate_public_identity()?;
         let raw = self
             .profile_configs
             .get(&binding.profile_id)
@@ -236,7 +279,7 @@ impl CapabilityPackEnvelopeV1 {
             .iter()
             .find(|profile| profile.id == binding.profile_id)
             .ok_or_else(|| CapabilityPackError::UnknownProfile(binding.profile_id.clone()))?;
-        Ok(CapabilityPackExpansionV1 {
+        let mut expansion = CapabilityPackExpansionV1 {
             schema_version: self.pack.schema_version.clone(),
             pack_id: self.pack.pack_id.clone(),
             pack_version: self.pack.pack_version.clone(),
@@ -244,14 +287,24 @@ impl CapabilityPackEnvelopeV1 {
             profile_id: binding.profile_id,
             evidence_class: profile.evidence_class,
             execution_plan: plan,
-        })
+            expected_canonical_bytes: Vec::new(),
+        };
+        expansion.expected_canonical_bytes = canonical_json(&expansion)?;
+        Ok(expansion)
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, CapabilityPackError> {
-        if canonical_digest(&self.pack)? != self.pack_digest {
+        self.validate_public_identity()?;
+        Ok(canonical_json(self)?)
+    }
+
+    fn validate_public_identity(&self) -> Result<(), CapabilityPackError> {
+        if self.pack_digest != self.expected_pack_digest
+            || canonical_digest(&self.pack)? != self.expected_pack_digest
+        {
             return Err(CapabilityPackError::PackDigestMismatch);
         }
-        Ok(canonical_json(self)?)
+        Ok(())
     }
     pub fn inspection(&self) -> &NormalizedCapabilityPackV1 {
         &self.pack
@@ -262,7 +315,11 @@ impl CapabilityPackExpansionV1 {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, CapabilityPackError> {
         validate_digest("pack_digest", &self.pack_digest)?;
         self.execution_plan.canonical_bytes()?;
-        Ok(canonical_json(self)?)
+        let actual = canonical_json(self)?;
+        if actual != self.expected_canonical_bytes {
+            return Err(CapabilityPackError::PackDigestMismatch);
+        }
+        Ok(actual)
     }
 }
 
@@ -549,20 +606,81 @@ fn validate_digest(field: &'static str, value: &str) -> Result<(), CapabilityPac
 }
 
 fn validate_url(field: &'static str, value: &str) -> Result<(), CapabilityPackError> {
-    let authority = value
-        .strip_prefix("https://")
-        .and_then(|suffix| suffix.split('/').next());
     if value.len() > 4096
         || value
             .chars()
             .any(|character| character.is_whitespace() || character.is_control())
-        || value.contains('#')
-        || authority.is_none_or(|authority| authority.is_empty() || authority.contains('@'))
+        || !value.starts_with("https://")
     {
-        Err(CapabilityPackError::InvalidField(field))
-    } else {
-        Ok(())
+        return Err(CapabilityPackError::InvalidField(field));
     }
+    let suffix = &value["https://".len()..];
+    let authority_end = suffix.find(['/', '?', '#']).unwrap_or(suffix.len());
+    if validate_https_authority(&suffix[..authority_end]) {
+        Ok(())
+    } else {
+        Err(CapabilityPackError::InvalidField(field))
+    }
+}
+
+fn validate_https_authority(authority: &str) -> bool {
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    if let Some(host) = authority.strip_prefix('[') {
+        let Some((address, port)) = host.split_once(']') else {
+            return false;
+        };
+        return !address.is_empty()
+            && address.parse::<Ipv6Addr>().is_ok()
+            && validate_optional_port(port);
+    }
+    if authority.contains(['[', ']']) {
+        return false;
+    }
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    validate_dns_or_ipv4_host(host) && port.is_none_or(validate_port)
+}
+
+fn validate_optional_port(value: &str) -> bool {
+    value.strip_prefix(':').is_some_and(validate_port)
+}
+
+fn validate_port(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value.parse::<u16>().is_ok()
+}
+
+fn validate_dns_or_ipv4_host(host: &str) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    if host
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || byte == b'.')
+    {
+        return host.parse::<Ipv4Addr>().is_ok();
+    }
+    host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
 }
 
 fn validate_sources(

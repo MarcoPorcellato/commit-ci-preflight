@@ -1,13 +1,13 @@
 {
   "schema_version": "1.0",
-  "base_commit": "da3849b0c6b06d7992ee4c68cf5d9d6e2781425f",
+  "base_commit": "3f77c426681d3118e5e00cfeee5bb7c9c8c2b663",
   "files": [
     {"path":"CHANGELOG.md","bytes":20296,"sha256":"sha256:bf3cd42627ff40e23490d0cf4a36d640e5c08feaef2af4d1779172464722b54c"},
-    {"path":"docs/CAPABILITY_PACKS.md","bytes":2939,"sha256":"sha256:7b535ca9fd4ade867ff836e6fc3bce6cb08ab0ca4bec3eb022e73c10eef564aa"},
+    {"path":"docs/CAPABILITY_PACKS.md","bytes":3226,"sha256":"sha256:cfb1dedb6b0793b7ffce2a8012469d673e2c823b0dbfd494d4d22495d81ae212"},
     {"path":"schema/capability-pack-v1.schema.json","bytes":11325,"sha256":"sha256:2c35b17807ef85a4ba79343c3d1948fd185ca7d5f1dc9a6b1dbf15b9635b8f09"},
-    {"path":"src/capability_pack.rs","bytes":31120,"sha256":"sha256:1956ef98ef0d5464c55df7668dcb053d393037aa3a4310aca2686eef1a7c3566"},
+    {"path":"src/capability_pack.rs","bytes":35182,"sha256":"sha256:d6bcb6fe88fe68448f6be6425a55af2914da477f1bab209862a1193f3d03b59f"},
     {"path":"src/lib.rs","bytes":1036,"sha256":"sha256:55f5edc35ac49ff0dbcb10723986c3da239b23788a757c232d14071e8c20644b"},
-    {"path":"tests/capability_pack_contract.rs","bytes":30547,"sha256":"sha256:84dfe862253c166a6856bcaa12f367f1dcfbb5e39a073f7e0f8a16b3580ef9a0"},
+    {"path":"tests/capability_pack_contract.rs","bytes":33594,"sha256":"sha256:a23ffd9bd5ae2caa51c97a6ad971cde09abb1ca7700fd9b23243f1019d698329"},
     {"path":"tests/fixtures/capability-pack-v1/dependency-cycle.toml","bytes":2067,"sha256":"sha256:aa88ff2c9931d23ddba372f045bc402bad514085fa13a3f159dbf78172030e3d"},
     {"path":"tests/fixtures/capability-pack-v1/invalid-image.toml","bytes":1910,"sha256":"sha256:64cbf330a32076072587b0498e8248284e8c67ba0370b35b0a278e980360f7ab"},
     {"path":"tests/fixtures/capability-pack-v1/invalid-license.toml","bytes":1989,"sha256":"sha256:1d42945238ec458f03cfee56225894febf6d35b7398e26c5698c2746f614df29"},

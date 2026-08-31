@@ -4,7 +4,7 @@
 - Predecessor: `17e069a7eb3bcc6596c93bb6432984eba8472208`
 - Branch: `codex/capability-packs-clean-architecture-delivery-v1`
 - Specification commit: `5ef9707930f7095a2f57bc3e38e53bfeac06aaf2`
-- Current milestone: M2 Capability Pack contract closure candidate; required local commit and controller-owned dual review pending
+- Current milestone: M2 final review-fix candidate; scoped re-review pending
 - Completed evidence: design review READY; `git diff --check` PASS; M0 compatibility manifest and downstream facade checks independently approved at `9e689c7f04e3d8c0479c74d91669c170a4c66e52`
 - Terminal M0 verification: `rtk cargo fmt --check` PASS; focused manifest test PASS; full compatibility baseline PASS (9 passed, 1 ignored); `rtk git diff --check` PASS; bounded privacy scan PASS (zero matches)
 - M0 status: terminally closed; Spec PASS and Task quality Approved
@@ -23,8 +23,10 @@
 - M2 local qualification: rustfmt PASS; strict workspace Clippy PASS; capability-pack contract 20 PASS before Task 5 test; compatibility baseline 9 PASS, 1 ignored; plan CLI 11 PASS; matrix contract 16 PASS; receipt contract 10 PASS; verification contract 20 PASS, 1 ignored. The original sandbox broad run stopped at 279 PASS, 3 `Operation not permitted` denials, 1 ignored. Controller repeated the same exact broad command under narrow host permission: 487 PASS, 5 ignored, 28 suites, 7.65s. The host result is qualification evidence; sandbox denials are neither product failures nor PASS.
 - M2 compatibility evidence: scoped diff against `5fed7c443504969e62980141048f9279f9fa1dfe` over CLI/config/matrix/receipt/verify and v1/v2 schema surfaces was empty. The available exact compatibility manifest test `manifest_paths_and_hashes_match` passed 1/1. The brief's named `manifest_matches_the_exact_compatibility_corpus` filter selected no test (0 PASS, 10 filtered) and is not treated as evidence.
 - M2 closure evidence: `m2-manifest.json` schema `1.0` anchors the pre-closure HEAD and lists 18 sorted path/byte/SHA-256 entries. Its contract test observed RED because the manifest was absent, then GREEN 1/1 after creation.
+- M2 final-review findings accepted for one separate fix commit: `load` had a path-metadata/reopen TOCTOU window and no explicit regular-file policy; public envelope and expansion wrappers could be mutated after validation; HTTPS authority checks accepted malformed hosts and ports; derived envelope Debug could disclose fixed-environment literals. Documentation also overstated identity, arbitrary argv safety, and provenance-digest verification.
+- M2 final-review fix anchor/current HEAD: `3f77c426681d3118e5e00cfeee5bb7c9c8c2b663`; the candidate remains pending scoped specification-compliance and code-quality/security re-review. No re-review PASS is claimed here.
 - M2 residual boundary: inert library validation and expansion only. No official pack, CLI entry point, tool/image qualification, Docker execution, hosted exact-head result, push, PR update, merge, stable installation, tag, or release is implied. M3 must first review the `rust-deep` tool/image/license matrix and design the smallest user entry point without weakening M0 compatibility guarantees.
-- Unproven: hosted CI for exact Task 5 candidate head, push, draft PR, publication, release gates, and reference packs. No external mutation occurred.
+- Unproven: scoped re-review and hosted CI for exact final-fix candidate head, push, draft PR, publication, release gates, and reference packs. No external mutation occurred.
 - Heavy processes: none
 - External mutations: none
 - Restart checkpoint: requested 2026-08-30; tracked handoff and resume prompt added under `restart/2026-08-30/`; the final exact branch and external archive hashes are recorded in the persistent `RECOVERY_MANIFEST.md`

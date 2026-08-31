@@ -9,12 +9,13 @@ most 1 MiB; it has one identity (`pack_id`, `pack_version`, `license`, and
 `description`), upstream sources, and 1–32 profiles. Each profile has a unique
 identifier, bounded metadata, tools (at most 32), inputs (at most 64), hosts,
 targets, runtime, environment, caches, storage, and checks. Lists are bounded
-to the limits enforced by the library; paths and argv are validated as safe,
-shell-free values.
+to the limits enforced by the library; relative paths are validated and a
+finite known-shell denylist rejects declared shell entrypoints. It does not
+establish that arbitrary argv is safe or shell-free.
 
 ## Identity and versions
 
-The pack identity tuple is `(pack_id, pack_version, license, pack_digest)`.
+The pack identity tuple is `(pack_id, pack_version, pack_digest)`.
 Versions are immutable: publishing a changed manifest requires a new version
 and therefore a new digest.
 
@@ -31,9 +32,12 @@ review, and operators remain responsible for licensing and attribution review.
 
 ## Integrity and freshness
 
-Integrity checks prove that declared bytes match their digest. Database and
-rules freshness is separate: inputs may declare a creation timestamp and a
-maximum age, but a valid digest does not make stale data fresh.
+Pack canonical integrity verifies the normalized pack against its pack digest.
+Declared provenance digests are syntax-checked declarations, not proof that
+external bytes match. External preparation and qualification must obtain and
+verify those bytes. Database and rules freshness is separate: inputs may
+declare a creation timestamp and a maximum age, but a valid digest does not
+make stale data fresh.
 
 ## Profile binding and expansion
 

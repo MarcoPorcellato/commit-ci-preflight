@@ -90,7 +90,7 @@ fn m2_manifest_matches_exact_file_bytes() {
     assert_eq!(manifest["schema_version"], "1.0");
     assert_eq!(
         manifest["base_commit"],
-        "da3849b0c6b06d7992ee4c68cf5d9d6e2781425f"
+        "3f77c426681d3118e5e00cfeee5bb7c9c8c2b663"
     );
     let entries = manifest["files"].as_array().expect("M2 manifest files");
     let paths = entries
@@ -724,7 +724,6 @@ fn validator_enforces_value_syntax_and_input_freshness() {
     for value in [
         "http://example.com",
         "https://user@example.com",
-        "https://example.com/#fragment",
         "https://example.com/space here",
         "https://example.com/\u{0000}",
     ] {
@@ -869,4 +868,88 @@ fn expansion_canonical_bytes_rejects_malformed_pack_digest() {
             Err(CapabilityPackError::InvalidField("pack_digest"))
         ));
     }
+}
+
+#[test]
+fn validator_rejects_malformed_https_authorities() {
+    for value in [
+        "https://?query",
+        "https:///path",
+        "https://:443",
+        "https://example.com:",
+        "https://example.com:not-a-port",
+        "https://example.com:65536",
+        "https://example.com:80:81",
+        "https://bad_host.example",
+        "https://999.999.999.999",
+        "https://[::1",
+        "https://[]",
+        "https://[::1]suffix",
+        "https://[::1]:",
+        "https://[::1]:65536",
+    ] {
+        assert_invalid_field(
+            |manifest| manifest.upstream_sources[0].url = value.to_owned(),
+            "upstream_sources.url",
+        );
+    }
+    let mut manifest = valid_manifest();
+    manifest.upstream_sources[0].url = "https://[2001:db8::1]:443/path?query#fragment".to_owned();
+    manifest.validate().expect("valid bracketed IPv6 authority");
+}
+
+#[test]
+fn envelope_identity_seal_rejects_public_pack_mutation_before_expand() {
+    let mut pack = validate_fixture(VALID).expect("pack");
+    pack.pack.pack_id = "other-pack".to_owned();
+    assert!(matches!(
+        pack.expand(valid_binding()),
+        Err(CapabilityPackError::PackDigestMismatch)
+    ));
+}
+
+#[test]
+fn expansion_identity_seal_rejects_replacement_with_another_valid_plan() {
+    let pack = validate_fixture(VALID).expect("pack");
+    let mut expansion = pack.expand(valid_binding()).expect("expansion");
+    let replacement = pack
+        .expand(binding_for_project("other/project"))
+        .expect("replacement expansion");
+    expansion.execution_plan = replacement.execution_plan;
+    assert!(matches!(
+        expansion.canonical_bytes(),
+        Err(CapabilityPackError::PackDigestMismatch)
+    ));
+}
+
+#[test]
+fn envelope_debug_redacts_fixed_environment_literals() {
+    let mut manifest = valid_manifest();
+    manifest.profiles[0].environment.fixed.insert(
+        "CAPABILITY_PACK_TEST_TOKEN".to_owned(),
+        "fixed-environment-literal-must-not-appear".to_owned(),
+    );
+    let pack = manifest.validate().expect("pack");
+    assert!(!format!("{pack:?}").contains("fixed-environment-literal-must-not-appear"));
+}
+
+#[test]
+fn load_rejects_non_regular_paths_and_bounds_reads() {
+    let root = unique_test_root("pack-load");
+    std::fs::create_dir_all(&root).expect("create owned test root");
+    assert!(matches!(
+        CapabilityPackManifestV1::load(&root),
+        Err(CapabilityPackError::Io { path, source })
+            if path == root && source.kind() == std::io::ErrorKind::InvalidInput
+    ));
+    let oversized = root.join("oversized.toml");
+    std::fs::write(&oversized, vec![b'x'; MAX_CAPABILITY_PACK_BYTES + 1])
+        .expect("write oversized manifest");
+    assert!(matches!(
+        CapabilityPackManifestV1::load(&oversized),
+        Err(CapabilityPackError::ManifestTooLarge { actual, maximum })
+            if actual == MAX_CAPABILITY_PACK_BYTES + 1 && maximum == MAX_CAPABILITY_PACK_BYTES
+    ));
+    std::fs::remove_file(&oversized).expect("remove oversized manifest");
+    std::fs::remove_dir(&root).expect("remove empty owned test root");
 }
