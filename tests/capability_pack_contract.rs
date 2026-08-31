@@ -17,6 +17,7 @@ use commit_ci_preflight::capability_pack::{
     CapabilityPackEnvelopeV1, CapabilityPackError, CapabilityPackManifestV1,
     CapabilityRuntimeFeatureV1, MAX_CAPABILITY_PACK_BYTES,
 };
+const PINNED_SCHEMA: &str = include_str!("../schema/capability-pack-v1.schema.json");
 use commit_ci_preflight::config::{ConfigError, RuntimeKind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,6 +39,15 @@ const PINNED_CANONICAL: &[u8] =
 const PINNED_EXPANSION: &[u8] =
     include_bytes!("fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json");
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn generated_capability_pack_schema_matches_pinned_bytes() {
+    assert_eq!(
+        commit_ci_preflight::capability_pack::capability_pack_schema_json()
+            .expect("capability pack schema"),
+        PINNED_SCHEMA
+    );
+}
 
 fn valid_binding() -> CapabilityPackBindingV1 {
     CapabilityPackBindingV1 {

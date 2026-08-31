@@ -17,7 +17,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use schemars::JsonSchema;
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
@@ -29,6 +29,11 @@ use crate::receipt::{ReceiptError, canonical_digest, canonical_json};
 
 pub const CAPABILITY_PACK_SCHEMA_VERSION: &str = "1.0";
 pub const MAX_CAPABILITY_PACK_BYTES: usize = 1_048_576;
+
+pub fn capability_pack_schema_json() -> Result<String, CapabilityPackError> {
+    let schema = schema_for!(CapabilityPackManifestV1);
+    serde_json::to_string_pretty(&schema).map_err(CapabilityPackError::Json)
+}
 const MAX_PACK_PROFILES: usize = 32;
 const MAX_PACK_SOURCES: usize = 16;
 const MAX_PROFILE_TOOLS: usize = 32;

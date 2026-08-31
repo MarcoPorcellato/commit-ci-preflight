@@ -1,0 +1,538 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CapabilityPackManifestV1",
+  "type": "object",
+  "properties": {
+    "description": {
+      "type": "string"
+    },
+    "license": {
+      "type": "string"
+    },
+    "pack_id": {
+      "type": "string"
+    },
+    "pack_version": {
+      "type": "string"
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CapabilityProfileConfigV1"
+      }
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "upstream_sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/CapabilitySourceV1"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "pack_id",
+    "pack_version",
+    "license",
+    "description",
+    "upstream_sources",
+    "profiles"
+  ],
+  "$defs": {
+    "ArtifactContractConfig": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ArtifactKind"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_entries": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "kind",
+        "max_bytes",
+        "max_entries"
+      ]
+    },
+    "ArtifactKind": {
+      "type": "string",
+      "enum": [
+        "regular-file",
+        "directory"
+      ]
+    },
+    "CacheConfig": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "mount_path": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "mount_path"
+      ]
+    },
+    "CapabilityEvidenceClassV1": {
+      "type": "string",
+      "enum": [
+        "deterministic",
+        "schedule-sensitive",
+        "bounded-nondeterministic"
+      ]
+    },
+    "CapabilityHostPlatformV1": {
+      "type": "string",
+      "enum": [
+        "macos-aarch64",
+        "linux-arm64",
+        "linux-amd64",
+        "windows-amd64"
+      ]
+    },
+    "CapabilityInputKindV1": {
+      "type": "string",
+      "enum": [
+        "rules",
+        "type-stubs",
+        "corpus",
+        "advisory-database",
+        "vulnerability-database"
+      ]
+    },
+    "CapabilityInputProvenanceV1": {
+      "type": "object",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/CapabilityInputKindV1"
+        },
+        "max_age_seconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "snapshot_created_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "url",
+        "digest"
+      ]
+    },
+    "CapabilityProfileConfigV1": {
+      "type": "object",
+      "properties": {
+        "caches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CacheConfig"
+          }
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CheckConfig"
+          }
+        },
+        "description": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentConfig"
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/CapabilityEvidenceClassV1"
+        },
+        "id": {
+          "type": "string"
+        },
+        "inputs": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityInputProvenanceV1"
+          }
+        },
+        "known_blind_spots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "offline_preparation": {
+          "$ref": "#/$defs/OfflinePreparationV1"
+        },
+        "pass_semantics": {
+          "type": "string"
+        },
+        "required_runtime_features": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityRuntimeFeatureV1"
+          }
+        },
+        "runtime": {
+          "$ref": "#/$defs/RuntimeConfig"
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageConfig"
+        },
+        "supported_hosts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityHostPlatformV1"
+          }
+        },
+        "target_platforms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityTargetPlatformV1"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CapabilityToolV1"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "description",
+        "evidence_class",
+        "pass_semantics",
+        "known_blind_spots",
+        "supported_hosts",
+        "target_platforms",
+        "required_runtime_features",
+        "offline_preparation",
+        "tools",
+        "runtime",
+        "storage",
+        "checks"
+      ]
+    },
+    "CapabilityRuntimeFeatureV1": {
+      "type": "string",
+      "enum": [
+        "linux-userland",
+        "no-network",
+        "read-only-source",
+        "writable-caches",
+        "bounded-artifacts"
+      ]
+    },
+    "CapabilitySourceV1": {
+      "type": "object",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "url",
+        "digest"
+      ]
+    },
+    "CapabilityTargetPlatformV1": {
+      "type": "string",
+      "enum": [
+        "linux-arm64",
+        "linux-amd64"
+      ]
+    },
+    "CapabilityToolV1": {
+      "type": "object",
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "license": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "license",
+        "url",
+        "digest"
+      ]
+    },
+    "CheckConfig": {
+      "type": "object",
+      "properties": {
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "artifact_contracts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactContractConfig"
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "depends_on": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "working_directory": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "required",
+        "argv",
+        "working_directory",
+        "timeout_seconds"
+      ]
+    },
+    "EnvironmentConfig": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "fixed": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "remote_secret_only": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "runtime_internal": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeInternalEnvironmentConfig"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "OfflinePreparationV1": {
+      "type": "string",
+      "enum": [
+        "none",
+        "required-external"
+      ]
+    },
+    "RuntimeConfig": {
+      "type": "object",
+      "properties": {
+        "cpu_count": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "image": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RuntimeKind"
+        },
+        "memory_mib": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "network": {
+          "type": "boolean",
+          "default": false
+        },
+        "pids_limit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "pull_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimePullPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "swap_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeSwapMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "image",
+        "cpu_count",
+        "memory_mib",
+        "pids_limit"
+      ]
+    },
+    "RuntimeInternalEnvironmentConfig": {
+      "type": "object",
+      "properties": {
+        "cache_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "cache_id"
+      ]
+    },
+    "RuntimeKind": {
+      "type": "string",
+      "enum": [
+        "docker_compatible",
+        "host"
+      ]
+    },
+    "RuntimePullPolicy": {
+      "type": "string",
+      "enum": [
+        "never"
+      ]
+    },
+    "RuntimeSwapMode": {
+      "type": "string",
+      "enum": [
+        "disabled"
+      ]
+    },
+    "StorageConfig": {
+      "type": "object",
+      "properties": {
+        "max_cache_growth_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "min_free_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "receipt_journal_reserve_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "min_free_bytes",
+        "receipt_journal_reserve_bytes",
+        "max_cache_growth_bytes"
+      ]
+    }
+  }
+}
