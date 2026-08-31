@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "base_commit": "2e6286cc23584d5e82842aacf106c3bb5e7462df",
+  "files": [
+    {"path":"CHANGELOG.md","bytes":20296,"sha256":"sha256:bf3cd42627ff40e23490d0cf4a36d640e5c08feaef2af4d1779172464722b54c"},
+    {"path":"docs/CAPABILITY_PACKS.md","bytes":3231,"sha256":"sha256:434c95d26a9fb75916037391cc5322095ccfd660155d315464735815d8fc079b"},
+    {"path":"schema/capability-pack-v1.schema.json","bytes":11325,"sha256":"sha256:2c35b17807ef85a4ba79343c3d1948fd185ca7d5f1dc9a6b1dbf15b9635b8f09"},
+    {"path":"src/capability_pack.rs","bytes":35849,"sha256":"sha256:3b395715921b15732727c3762fc2d43b965184c1087dde9db948b6ce745ade0c"},
+    {"path":"src/lib.rs","bytes":1036,"sha256":"sha256:55f5edc35ac49ff0dbcb10723986c3da239b23788a757c232d14071e8c20644b"},
+    {"path":"tests/capability_pack_contract.rs","bytes":34412,"sha256":"sha256:5e90941506da053d2fd61e1a14f852e25d57fe057fbf87cea9a96d6685a8ecce"},
+    {"path":"tests/fixtures/capability-pack-v1/dependency-cycle.toml","bytes":2067,"sha256":"sha256:aa88ff2c9931d23ddba372f045bc402bad514085fa13a3f159dbf78172030e3d"},
+    {"path":"tests/fixtures/capability-pack-v1/invalid-image.toml","bytes":1910,"sha256":"sha256:64cbf330a32076072587b0498e8248284e8c67ba0370b35b0a278e980360f7ab"},
+    {"path":"tests/fixtures/capability-pack-v1/invalid-license.toml","bytes":1989,"sha256":"sha256:1d42945238ec458f03cfee56225894febf6d35b7398e26c5698c2746f614df29"},
+    {"path":"tests/fixtures/capability-pack-v1/invalid-path.toml","bytes":1978,"sha256":"sha256:55978cd2012ba27ca09184fe3384fd6970c58dc415548672eb723b43bd6a1f03"},
+    {"path":"tests/fixtures/capability-pack-v1/invalid-provenance.toml","bytes":1982,"sha256":"sha256:1d02a3904553e47cb6db807197ef92670634689382cb89429efbc0d3942aa5b5"},
+    {"path":"tests/fixtures/capability-pack-v1/shell-entrypoint.toml","bytes":1912,"sha256":"sha256:8dcafc09f7e3d700ed2b71ebe6022701a4d69a71183b392901d25e349afda220"},
+    {"path":"tests/fixtures/capability-pack-v1/unknown-field.toml","bytes":1981,"sha256":"sha256:5b9231953f27054741d8e9f6fe407002e1aa52d6c5bec10f25f4d88d74c4fb40"},
+    {"path":"tests/fixtures/capability-pack-v1/unknown-version.toml","bytes":1963,"sha256":"sha256:fb264d537d8d5a350a954bc031cc61ca0c9deb4340501922d311c2728960e988"},
+    {"path":"tests/fixtures/capability-pack-v1/valid-minimal.canonical.json","bytes":2217,"sha256":"sha256:ae9ccb5ea2e26759b8f8364fc19aebf112b8dcd70075c33a4c952e489559b8ce"},
+    {"path":"tests/fixtures/capability-pack-v1/valid-minimal-reordered.toml","bytes":1982,"sha256":"sha256:1b790425e89bc32eebd1f5b96e5cbaa7d85a5c2d5559831bcb62abd687f7f7e3"},
+    {"path":"tests/fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json","bytes":1321,"sha256":"sha256:20859fc142a923b9f3b46bbb5d11e685b39128eda1d9c59269bcdad56decc602"},
+    {"path":"tests/fixtures/capability-pack-v1/valid-minimal.toml","bytes":1982,"sha256":"sha256:3e90fb7b3c6294de423651d22a2f23b3b4ab20bd7e66f48f996535ad46f6b2eb"}
+  ]
+}

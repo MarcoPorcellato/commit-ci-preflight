@@ -9,6 +9,10 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added the pre-1.0 additive Rust capability-pack contract and pinned schema;
+  this does not change existing CLI or receipt schemas and does not enable
+  official pack execution.
+
 - Added auditable economic qualification guidance with machine-readable August
   2026 case-study inputs for Matryca-Knowledge and the private case published as
   Matryca-Brain. The documentation separates quota preservation and GitHub
