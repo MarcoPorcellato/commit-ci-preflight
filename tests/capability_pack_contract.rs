@@ -13,11 +13,13 @@
 // limitations under the License.
 
 use commit_ci_preflight::capability_pack::{
-    CAPABILITY_PACK_SCHEMA_VERSION, CapabilityInputKindV1, CapabilityPackEnvelopeV1,
-    CapabilityPackError, CapabilityPackManifestV1, CapabilityRuntimeFeatureV1,
-    MAX_CAPABILITY_PACK_BYTES,
+    CAPABILITY_PACK_SCHEMA_VERSION, CapabilityInputKindV1, CapabilityPackBindingV1,
+    CapabilityPackEnvelopeV1, CapabilityPackError, CapabilityPackManifestV1,
+    CapabilityRuntimeFeatureV1, MAX_CAPABILITY_PACK_BYTES,
 };
 use commit_ci_preflight::config::{ConfigError, RuntimeKind};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const VALID: &str = include_str!("fixtures/capability-pack-v1/valid-minimal.toml");
 const UNKNOWN_FIELD: &str = include_str!("fixtures/capability-pack-v1/unknown-field.toml");
@@ -33,6 +35,48 @@ const REORDERED_VALID: &str =
     include_str!("fixtures/capability-pack-v1/valid-minimal-reordered.toml");
 const PINNED_CANONICAL: &[u8] =
     include_bytes!("fixtures/capability-pack-v1/valid-minimal.canonical.json");
+const PINNED_EXPANSION: &[u8] =
+    include_bytes!("fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json");
+static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn valid_binding() -> CapabilityPackBindingV1 {
+    CapabilityPackBindingV1 {
+        project: "example/project".to_owned(),
+        profile_id: "strict-clippy".to_owned(),
+        receipt: commit_ci_preflight::config::ReceiptConfig {
+            output: ".ccp/receipt.json".to_owned(),
+            freshness_seconds: 300,
+        },
+    }
+}
+fn binding_for(profile_id: &str) -> CapabilityPackBindingV1 {
+    CapabilityPackBindingV1 {
+        profile_id: profile_id.to_owned(),
+        ..valid_binding()
+    }
+}
+fn binding_for_project(project: &str) -> CapabilityPackBindingV1 {
+    CapabilityPackBindingV1 {
+        project: project.to_owned(),
+        ..valid_binding()
+    }
+}
+fn unique_test_root(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "ccp-{label}-{}-{}",
+        std::process::id(),
+        TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+fn valid_manifest_with_argv(argv: Vec<String>) -> String {
+    let original = "argv = [\"cargo\", \"clippy\", \"--locked\", \"--offline\", \"--all-targets\", \"--all-features\", \"--\", \"-D\", \"warnings\"]";
+    let replacement = format!(
+        "argv = {}",
+        serde_json::to_string(&argv).expect("argv JSON")
+    );
+    assert!(VALID.contains(original));
+    VALID.replacen(original, &replacement, 1)
+}
 
 fn validate_fixture(source: &str) -> Result<CapabilityPackEnvelopeV1, CapabilityPackError> {
     CapabilityPackManifestV1::parse(source)?.validate()
@@ -671,5 +715,51 @@ fn canonical_bytes_rejects_tampered_digest() {
     assert!(matches!(
         envelope.canonical_bytes(),
         Err(CapabilityPackError::PackDigestMismatch)
+    ));
+}
+
+#[test]
+fn one_explicit_profile_expands_to_one_existing_plan_envelope() {
+    let pack = validate_fixture(VALID).expect("pack");
+    let expansion = pack.expand(valid_binding()).expect("expansion");
+    assert_eq!(expansion.pack_digest, pack.pack_digest);
+    assert_eq!(expansion.profile_id, "strict-clippy");
+    assert_eq!(expansion.execution_plan.plan.project, "example/project");
+    assert_eq!(expansion.execution_plan.plan.schema_version, "1.3");
+    assert_eq!(
+        expansion.canonical_bytes().expect("canonical expansion"),
+        PINNED_EXPANSION
+    );
+}
+
+#[test]
+fn inspection_and_expansion_never_execute_declared_argv() {
+    let root = unique_test_root("pack-inertness");
+    std::fs::create_dir_all(&root).expect("create owned test root");
+    let marker = root.join("must-not-exist");
+    let source = valid_manifest_with_argv(vec![
+        "/usr/bin/touch".to_owned(),
+        marker.display().to_string(),
+    ]);
+    let pack = CapabilityPackManifestV1::parse(&source)
+        .and_then(CapabilityPackManifestV1::validate)
+        .expect("inert pack");
+    let _inspection = pack.inspection();
+    let _expansion = pack.expand(valid_binding()).expect("inert expansion");
+    assert!(!marker.exists());
+    std::fs::remove_dir(&root).expect("remove empty owned test root");
+}
+
+#[test]
+fn expansion_rejects_unknown_profile_and_invalid_repository_binding() {
+    let pack = validate_fixture(VALID).expect("pack");
+    assert!(
+        matches!(pack.expand(binding_for("missing")), Err(CapabilityPackError::UnknownProfile(id)) if id == "missing")
+    );
+    assert!(matches!(
+        pack.expand(binding_for_project("not-a-repository")),
+        Err(CapabilityPackError::Config(ConfigError::InvalidField(
+            "project"
+        )))
     ));
 }

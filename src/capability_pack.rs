@@ -21,9 +21,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
-    CacheConfig, CheckConfig, ConfigError, ConfigV1, EnvironmentConfig, NormalizedCache,
-    NormalizedCheck, NormalizedEnvironment, NormalizedRuntime, NormalizedStorage, ReceiptConfig,
-    RuntimeConfig, RuntimeKind, StorageConfig,
+    CacheConfig, CheckConfig, ConfigError, ConfigV1, EnvironmentConfig, ExecutionPlanEnvelopeV1,
+    NormalizedCache, NormalizedCheck, NormalizedEnvironment, NormalizedRuntime, NormalizedStorage,
+    ReceiptConfig, RuntimeConfig, RuntimeKind, StorageConfig,
 };
 use crate::receipt::{ReceiptError, canonical_digest, canonical_json};
 
@@ -144,6 +144,24 @@ pub struct CapabilityPackEnvelopeV1 {
     profile_configs: BTreeMap<String, ValidatedProfileConfigV1>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityPackBindingV1 {
+    pub project: String,
+    pub profile_id: String,
+    pub receipt: ReceiptConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilityPackExpansionV1 {
+    pub schema_version: String,
+    pub pack_id: String,
+    pub pack_version: String,
+    pub pack_digest: String,
+    pub profile_id: String,
+    pub evidence_class: CapabilityEvidenceClassV1,
+    pub execution_plan: ExecutionPlanEnvelopeV1,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedCapabilityPackV1 {
@@ -188,6 +206,42 @@ struct ValidatedProfileConfigV1 {
 }
 
 impl CapabilityPackEnvelopeV1 {
+    pub fn expand(
+        &self,
+        binding: CapabilityPackBindingV1,
+    ) -> Result<CapabilityPackExpansionV1, CapabilityPackError> {
+        let raw = self
+            .profile_configs
+            .get(&binding.profile_id)
+            .ok_or_else(|| CapabilityPackError::UnknownProfile(binding.profile_id.clone()))?;
+        let plan = ConfigV1 {
+            schema_version: "1.3".to_owned(),
+            project: binding.project,
+            runtime: raw.runtime.clone(),
+            receipt: binding.receipt,
+            environment: raw.environment.clone(),
+            caches: raw.caches.clone(),
+            storage: Some(raw.storage.clone()),
+            checks: raw.checks.clone(),
+        }
+        .into_plan()?;
+        let profile = self
+            .pack
+            .profiles
+            .iter()
+            .find(|profile| profile.id == binding.profile_id)
+            .ok_or_else(|| CapabilityPackError::UnknownProfile(binding.profile_id.clone()))?;
+        Ok(CapabilityPackExpansionV1 {
+            schema_version: self.pack.schema_version.clone(),
+            pack_id: self.pack.pack_id.clone(),
+            pack_version: self.pack.pack_version.clone(),
+            pack_digest: self.pack_digest.clone(),
+            profile_id: binding.profile_id,
+            evidence_class: profile.evidence_class,
+            execution_plan: plan,
+        })
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, CapabilityPackError> {
         if canonical_digest(&self.pack)? != self.pack_digest {
             return Err(CapabilityPackError::PackDigestMismatch);
@@ -196,6 +250,16 @@ impl CapabilityPackEnvelopeV1 {
     }
     pub fn inspection(&self) -> &NormalizedCapabilityPackV1 {
         &self.pack
+    }
+}
+
+impl CapabilityPackExpansionV1 {
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, CapabilityPackError> {
+        if !self.pack_digest.starts_with("sha256:") {
+            return Err(CapabilityPackError::PackDigestMismatch);
+        }
+        self.execution_plan.canonical_bytes()?;
+        Ok(canonical_json(self)?)
     }
 }
 
