@@ -90,7 +90,7 @@ fn m2_manifest_matches_exact_file_bytes() {
     assert_eq!(manifest["schema_version"], "1.0");
     assert_eq!(
         manifest["base_commit"],
-        "3f77c426681d3118e5e00cfeee5bb7c9c8c2b663"
+        "2e6286cc23584d5e82842aacf106c3bb5e7462df"
     );
     let entries = manifest["files"].as_array().expect("M2 manifest files");
     let paths = entries
@@ -887,6 +887,7 @@ fn validator_rejects_malformed_https_authorities() {
         "https://[::1]suffix",
         "https://[::1]:",
         "https://[::1]:65536",
+        "https://example.com/#fragment",
     ] {
         assert_invalid_field(
             |manifest| manifest.upstream_sources[0].url = value.to_owned(),
@@ -894,8 +895,15 @@ fn validator_rejects_malformed_https_authorities() {
         );
     }
     let mut manifest = valid_manifest();
-    manifest.upstream_sources[0].url = "https://[2001:db8::1]:443/path?query#fragment".to_owned();
-    manifest.validate().expect("valid bracketed IPv6 authority");
+    manifest.upstream_sources[0].url = "https://[2001:db8::1]:443/path?query".to_owned();
+    manifest
+        .validate()
+        .expect("valid bracketed IPv6 authority with port");
+    let mut manifest = valid_manifest();
+    manifest.upstream_sources[0].url = "https://[::1]".to_owned();
+    manifest
+        .validate()
+        .expect("valid bracketed IPv6 authority without port");
 }
 
 #[test]
@@ -931,6 +939,22 @@ fn envelope_debug_redacts_fixed_environment_literals() {
     );
     let pack = manifest.validate().expect("pack");
     assert!(!format!("{pack:?}").contains("fixed-environment-literal-must-not-appear"));
+}
+
+#[test]
+fn expansion_debug_redacts_fixed_environment_literals() {
+    let mut manifest = valid_manifest();
+    manifest.profiles[0].environment.fixed.insert(
+        "CAPABILITY_PACK_EXPANSION_TEST_TOKEN".to_owned(),
+        "expansion-fixed-environment-literal-must-not-appear".to_owned(),
+    );
+    let expansion = manifest
+        .validate()
+        .and_then(|pack| pack.expand(valid_binding()))
+        .expect("expansion");
+    assert!(
+        !format!("{expansion:?}").contains("expansion-fixed-environment-literal-must-not-appear")
+    );
 }
 
 #[test]

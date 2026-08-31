@@ -196,7 +196,7 @@ pub struct CapabilityPackBindingV1 {
     pub receipt: ReceiptConfig,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct CapabilityPackExpansionV1 {
     pub schema_version: String,
     pub pack_id: String,
@@ -207,6 +207,21 @@ pub struct CapabilityPackExpansionV1 {
     pub execution_plan: ExecutionPlanEnvelopeV1,
     #[serde(skip)]
     expected_canonical_bytes: Vec<u8>,
+}
+
+impl fmt::Debug for CapabilityPackExpansionV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapabilityPackExpansionV1")
+            .field("schema_version", &self.schema_version)
+            .field("pack_id", &self.pack_id)
+            .field("pack_version", &self.pack_version)
+            .field("pack_digest", &self.pack_digest)
+            .field("profile_id", &self.profile_id)
+            .field("evidence_class", &self.evidence_class)
+            .field("execution_plan_digest", &self.execution_plan.plan_digest)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -610,6 +625,7 @@ fn validate_url(field: &'static str, value: &str) -> Result<(), CapabilityPackEr
         || value
             .chars()
             .any(|character| character.is_whitespace() || character.is_control())
+        || value.contains('#')
         || !value.starts_with("https://")
     {
         return Err(CapabilityPackError::InvalidField(field));
@@ -646,7 +662,7 @@ fn validate_https_authority(authority: &str) -> bool {
 }
 
 fn validate_optional_port(value: &str) -> bool {
-    value.strip_prefix(':').is_some_and(validate_port)
+    value.is_empty() || value.strip_prefix(':').is_some_and(validate_port)
 }
 
 fn validate_port(value: &str) -> bool {

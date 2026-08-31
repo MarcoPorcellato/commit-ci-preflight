@@ -5,7 +5,7 @@ Status: schema and inert library inspection/expansion only; no official pack exe
 ## TOML schema 1.0
 
 Manifests use `schema_version = "1.0"` and strict TOML fields. A manifest is at
-most 1 MiB; it has one identity (`pack_id`, `pack_version`, `license`, and
+most 1 MiB; it has manifest metadata (`pack_id`, `pack_version`, `license`, and
 `description`), upstream sources, and 1–32 profiles. Each profile has a unique
 identifier, bounded metadata, tools (at most 32), inputs (at most 64), hosts,
 targets, runtime, environment, caches, storage, and checks. Lists are bounded

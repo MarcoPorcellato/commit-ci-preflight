@@ -4,7 +4,7 @@
 - Predecessor: `17e069a7eb3bcc6596c93bb6432984eba8472208`
 - Branch: `codex/capability-packs-clean-architecture-delivery-v1`
 - Specification commit: `5ef9707930f7095a2f57bc3e38e53bfeac06aaf2`
-- Current milestone: M2 final review-fix candidate; scoped re-review pending
+- Current milestone: M2 final review-fix round-2 candidate; scoped round-2 re-review pending
 - Completed evidence: design review READY; `git diff --check` PASS; M0 compatibility manifest and downstream facade checks independently approved at `9e689c7f04e3d8c0479c74d91669c170a4c66e52`
 - Terminal M0 verification: `rtk cargo fmt --check` PASS; focused manifest test PASS; full compatibility baseline PASS (9 passed, 1 ignored); `rtk git diff --check` PASS; bounded privacy scan PASS (zero matches)
 - M0 status: terminally closed; Spec PASS and Task quality Approved
@@ -25,8 +25,10 @@
 - M2 closure evidence: `m2-manifest.json` schema `1.0` anchors the pre-closure HEAD and lists 18 sorted path/byte/SHA-256 entries. Its contract test observed RED because the manifest was absent, then GREEN 1/1 after creation.
 - M2 final-review findings accepted for one separate fix commit: `load` had a path-metadata/reopen TOCTOU window and no explicit regular-file policy; public envelope and expansion wrappers could be mutated after validation; HTTPS authority checks accepted malformed hosts and ports; derived envelope Debug could disclose fixed-environment literals. Documentation also overstated identity, arbitrary argv safety, and provenance-digest verification.
 - M2 final-review fix anchor/current HEAD: `3f77c426681d3118e5e00cfeee5bb7c9c8c2b663`; the candidate remains pending scoped specification-compliance and code-quality/security re-review. No re-review PASS is claimed here.
+- M2 final-review round 1 re-review found three remaining findings: documentation still called manifest metadata an identity; the strict HTTPS change rejected a valid no-port bracketed IPv6 authority while accepting fragments; and expansion retained derived Debug that could disclose fixed-environment literals. Round 2 corrects only those findings. The FIFO/nonblocking-open residual is explicitly out of scope pending separate portable policy design.
+- M2 final-review round-2 fix anchor/current HEAD: `2e6286cc23584d5e82842aacf106c3bb5e7462df`; scoped round-2 specification-compliance and code-quality/security re-review remains pending. No PASS is claimed.
 - M2 residual boundary: inert library validation and expansion only. No official pack, CLI entry point, tool/image qualification, Docker execution, hosted exact-head result, push, PR update, merge, stable installation, tag, or release is implied. M3 must first review the `rust-deep` tool/image/license matrix and design the smallest user entry point without weakening M0 compatibility guarantees.
-- Unproven: scoped re-review and hosted CI for exact final-fix candidate head, push, draft PR, publication, release gates, and reference packs. No external mutation occurred.
+- Unproven: scoped round-2 re-review and hosted CI for exact final-fix candidate head, push, draft PR, publication, release gates, and reference packs. No external mutation occurred.
 - Heavy processes: none
 - External mutations: none
 - Restart checkpoint: requested 2026-08-30; tracked handoff and resume prompt added under `restart/2026-08-30/`; the final exact branch and external archive hashes are recorded in the persistent `RECOVERY_MANIFEST.md`
