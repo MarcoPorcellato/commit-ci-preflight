@@ -255,9 +255,7 @@ impl CapabilityPackEnvelopeV1 {
 
 impl CapabilityPackExpansionV1 {
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, CapabilityPackError> {
-        if !self.pack_digest.starts_with("sha256:") {
-            return Err(CapabilityPackError::PackDigestMismatch);
-        }
+        validate_digest("pack_digest", &self.pack_digest)?;
         self.execution_plan.canonical_bytes()?;
         Ok(canonical_json(self)?)
     }

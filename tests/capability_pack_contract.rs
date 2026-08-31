@@ -763,3 +763,20 @@ fn expansion_rejects_unknown_profile_and_invalid_repository_binding() {
         )))
     ));
 }
+
+#[test]
+fn expansion_canonical_bytes_rejects_malformed_pack_digest() {
+    let pack = validate_fixture(VALID).expect("pack");
+    let mut expansion = pack.expand(valid_binding()).expect("expansion");
+    for digest in [
+        "sha256:".to_owned(),
+        "sha256:ABC".to_owned(),
+        "sha256:".to_owned() + &("0".repeat(63) + "g"),
+    ] {
+        expansion.pack_digest = digest;
+        assert!(matches!(
+            expansion.canonical_bytes(),
+            Err(CapabilityPackError::InvalidField("pack_digest"))
+        ));
+    }
+}
