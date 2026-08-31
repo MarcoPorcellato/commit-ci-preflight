@@ -24,3 +24,6 @@ Documentation-only update to `docs/superpowers/programmes/2026-08-30-capability-
 
 Commit message: `docs: record capability pack review acceptance`
 
+## Follow-up qualification record
+
+At implementation/review-record anchor `6018319a331f09e2731a0f44195e197b96e31abd`, controller checks recorded fmt PASS, strict workspace Clippy PASS, capability contract 27/27 PASS, compatibility manifest 1/1 PASS, M2 manifest 1/1 PASS, empty scoped compatibility diff, diff-check PASS, and host full suite 494 passed/5 ignored/28 suites/10.09s. The next commit is documentation-only evidence recording.

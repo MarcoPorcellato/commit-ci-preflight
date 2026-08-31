@@ -29,7 +29,9 @@
 - M2 final-review round-2 fix anchor: `2e6286cc23584d5e82842aacf106c3bb5e7462df`; final gap fix/current implementation HEAD before this review-record commit: `4c9af6f0b220a789f30e214d8ff90996f21e1d00`.
 - FIFO/nonblocking-open remains an explicit future portable-policy residual, not an M2 blocker.
 - M2 residual boundary: inert library validation and expansion only. No official pack, CLI entry point, tool/image qualification, Docker execution, hosted exact-head result, push, PR update, merge, stable installation, tag, or release is implied. M3 must first review the `rust-deep` tool/image/license matrix and design the smallest user entry point without weakening M0 compatibility guarantees.
-- Unproven: final exact-head host rerun remains pending controller verification; hosted exact-head CI, push, draft PR, publication, release gates, and reference packs remain unproven. No external mutation occurred.
+- M2 final local qualification at `6018319a331f09e2731a0f44195e197b96e31abd`: fmt PASS; strict workspace Clippy PASS; capability contract 27/27 PASS; compatibility manifest 1/1 PASS; M2 manifest 1/1 PASS; scoped compatibility diff empty; diff-check PASS; host full suite 494 passed, 5 ignored, 28 suites, 10.09s. Worktree was clean before this documentation update.
+- `6018319a331f09e2731a0f44195e197b96e31abd` is the locally qualified implementation/review-record anchor. This follow-up is documentation-only evidence recording; it makes no source, schema, or manifest change.
+- Unproven: hosted exact-head CI, push, draft PR, publication, release gates, and reference packs. No external mutation occurred.
 - Heavy processes: none
 - External mutations: none
-- Next action: fresh final local verification, then exact non-force push/draft PR/hosted CI authorization.
+- Next action: exact non-force push/draft PR/hosted CI authorization.
