@@ -19,7 +19,8 @@ use commit_ci_preflight::capability_pack::{
 };
 const PINNED_SCHEMA: &str = include_str!("../schema/capability-pack-v1.schema.json");
 use commit_ci_preflight::config::{ConfigError, RuntimeKind};
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const VALID: &str = include_str!("fixtures/capability-pack-v1/valid-minimal.toml");
@@ -47,6 +48,85 @@ fn generated_capability_pack_schema_matches_pinned_bytes() {
             .expect("capability pack schema"),
         PINNED_SCHEMA
     );
+}
+
+#[test]
+fn m2_manifest_matches_exact_file_bytes() {
+    const EXPECTED_PATHS: [&str; 18] = [
+        "CHANGELOG.md",
+        "docs/CAPABILITY_PACKS.md",
+        "schema/capability-pack-v1.schema.json",
+        "src/capability_pack.rs",
+        "src/lib.rs",
+        "tests/capability_pack_contract.rs",
+        "tests/fixtures/capability-pack-v1/dependency-cycle.toml",
+        "tests/fixtures/capability-pack-v1/invalid-image.toml",
+        "tests/fixtures/capability-pack-v1/invalid-license.toml",
+        "tests/fixtures/capability-pack-v1/invalid-path.toml",
+        "tests/fixtures/capability-pack-v1/invalid-provenance.toml",
+        "tests/fixtures/capability-pack-v1/shell-entrypoint.toml",
+        "tests/fixtures/capability-pack-v1/unknown-field.toml",
+        "tests/fixtures/capability-pack-v1/unknown-version.toml",
+        "tests/fixtures/capability-pack-v1/valid-minimal.canonical.json",
+        "tests/fixtures/capability-pack-v1/valid-minimal-reordered.toml",
+        "tests/fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json",
+        "tests/fixtures/capability-pack-v1/valid-minimal.toml",
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_path = root.join(
+        "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest.json",
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read M2 manifest"))
+            .expect("parse M2 manifest");
+    let object = manifest.as_object().expect("M2 manifest object");
+    assert_eq!(
+        object
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["base_commit", "files", "schema_version"])
+    );
+    assert_eq!(manifest["schema_version"], "1.0");
+    assert_eq!(
+        manifest["base_commit"],
+        "da3849b0c6b06d7992ee4c68cf5d9d6e2781425f"
+    );
+    let entries = manifest["files"].as_array().expect("M2 manifest files");
+    let paths = entries
+        .iter()
+        .map(|entry| {
+            let entry = entry.as_object().expect("M2 manifest file entry");
+            assert_eq!(
+                entry
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>(),
+                std::collections::BTreeSet::from(["bytes", "path", "sha256"])
+            );
+            entry["path"].as_str().expect("M2 manifest path")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(paths, EXPECTED_PATHS);
+
+    for entry in entries {
+        let relative = entry["path"].as_str().expect("M2 manifest path");
+        let bytes = std::fs::read(root.join(relative)).expect("read manifested file");
+        assert_eq!(
+            entry["bytes"].as_u64(),
+            Some(bytes.len() as u64),
+            "{relative}"
+        );
+        let digest = Sha256::digest(&bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            entry["sha256"].as_str(),
+            Some(format!("sha256:{digest}").as_str()),
+            "{relative}"
+        );
+    }
 }
 
 fn valid_binding() -> CapabilityPackBindingV1 {

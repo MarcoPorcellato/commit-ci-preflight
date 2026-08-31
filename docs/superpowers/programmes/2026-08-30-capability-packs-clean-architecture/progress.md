@@ -4,7 +4,7 @@
 - Predecessor: `17e069a7eb3bcc6596c93bb6432984eba8472208`
 - Branch: `codex/capability-packs-clean-architecture-delivery-v1`
 - Specification commit: `5ef9707930f7095a2f57bc3e38e53bfeac06aaf2`
-- Current milestone: M2 Capability Pack contract plan (ready; implementation gated by hosted CI)
+- Current milestone: M2 Capability Pack contract closure candidate; required local commit and controller-owned dual review pending
 - Completed evidence: design review READY; `git diff --check` PASS; M0 compatibility manifest and downstream facade checks independently approved at `9e689c7f04e3d8c0479c74d91669c170a4c66e52`
 - Terminal M0 verification: `rtk cargo fmt --check` PASS; focused manifest test PASS; full compatibility baseline PASS (9 passed, 1 ignored); `rtk git diff --check` PASS; bounded privacy scan PASS (zero matches)
 - M0 status: terminally closed; Spec PASS and Task quality Approved
@@ -17,7 +17,14 @@
 - M2 plan commit: `a1c922d4f47fd06e74a336b89a19aecc703908bd`
 - M2 plan decision: TOML-only schema `1.0`; library-first inert validation/inspection; explicit one-profile binding into the existing schema-`1.3` plan; separate pack and plan digests; no CLI, receipt, policy, execution, or publication change in M2
 - M2 plan review: initial NOT_READY findings for implicit types/helpers and missing error mappings were corrected; final Luna re-review READY with no Critical or Important findings
-- Unproven: hosted CI for the exact M0-M1-plus-plan head, push, draft PR, publication, and release gates; all M2 implementation; reference packs
+- M2 accepted implementation commits: Task 1 `1cb0f03ea83b6b3bfd53319345d16d909ec0e3fe`, review fix `324476e6d53c4b727ccbc41cff7884ec0c6d37f6`; Task 2 `d4d6f5fb4f9612c1f4a0f1ada4235731e3a55380`, review fixes `b5cc2ba272adbda2f148e8b05d61064a11361377` and `7962c2ab2139444bb3dfffc9848582478078b22a`; Task 3 `58e8820ed38b08b9583dd9ca3d411e1f8d582219`, review fix `b0cddc02cd534f295cc45c6c506aeea13d0f171`; Task 4 `da3849b0c6b06d7992ee4c68cf5d9d6e2781425f`.
+- M2 accepted reviews: Task 1 scoped re-review PASS after one Important fix; Task 2 scoped re-reviews PASS after two shell-parser fixes, with one parked Minor duplicate-ID assertion concern; Task 3 scoped re-review PASS after its exact-digest validation fix; Task 4 independent review PASS with no Critical, Important, or Minor findings. Task 5 dual review remains pending and is not claimed.
+- M2 pre-closure anchor/current HEAD: `da3849b0c6b06d7992ee4c68cf5d9d6e2781425f` (`docs: define capability pack contract`); before the required Task 5 commit, the candidate worktree is dirty only in Task 5-owned closure files.
+- M2 local qualification: rustfmt PASS; strict workspace Clippy PASS; capability-pack contract 20 PASS before Task 5 test; compatibility baseline 9 PASS, 1 ignored; plan CLI 11 PASS; matrix contract 16 PASS; receipt contract 10 PASS; verification contract 20 PASS, 1 ignored. The original sandbox broad run stopped at 279 PASS, 3 `Operation not permitted` denials, 1 ignored. Controller repeated the same exact broad command under narrow host permission: 487 PASS, 5 ignored, 28 suites, 7.65s. The host result is qualification evidence; sandbox denials are neither product failures nor PASS.
+- M2 compatibility evidence: scoped diff against `5fed7c443504969e62980141048f9279f9fa1dfe` over CLI/config/matrix/receipt/verify and v1/v2 schema surfaces was empty. The available exact compatibility manifest test `manifest_paths_and_hashes_match` passed 1/1. The brief's named `manifest_matches_the_exact_compatibility_corpus` filter selected no test (0 PASS, 10 filtered) and is not treated as evidence.
+- M2 closure evidence: `m2-manifest.json` schema `1.0` anchors the pre-closure HEAD and lists 18 sorted path/byte/SHA-256 entries. Its contract test observed RED because the manifest was absent, then GREEN 1/1 after creation.
+- M2 residual boundary: inert library validation and expansion only. No official pack, CLI entry point, tool/image qualification, Docker execution, hosted exact-head result, push, PR update, merge, stable installation, tag, or release is implied. M3 must first review the `rust-deep` tool/image/license matrix and design the smallest user entry point without weakening M0 compatibility guarantees.
+- Unproven: hosted CI for exact Task 5 candidate head, push, draft PR, publication, release gates, and reference packs. No external mutation occurred.
 - Heavy processes: none
 - External mutations: none
 - Restart checkpoint: requested 2026-08-30; tracked handoff and resume prompt added under `restart/2026-08-30/`; the final exact branch and external archive hashes are recorded in the persistent `RECOVERY_MANIFEST.md`
