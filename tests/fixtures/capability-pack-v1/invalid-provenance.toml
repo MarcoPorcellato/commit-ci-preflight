@@ -25,7 +25,7 @@ id = "clippy"
 version = "1.87.0"
 license = "Apache-2.0"
 url = "https://github.com/rust-lang/rust"
-digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbB"
 
 [[profiles.inputs]]
 id = "rustsec-db"

@@ -60,6 +60,15 @@ mount_path = ".cache/cargo"
 [[profiles.checks]]
 id = "clippy"
 required = true
-argv = ["cargo", "clippy", "--locked", "--offline", "--all-targets", "--all-features", "--", "-D", "warnings"]
+argv = ["cargo", "clippy"]
 working_directory = "."
 timeout_seconds = 1800
+depends_on = ["tests"]
+
+[[profiles.checks]]
+id = "tests"
+required = true
+argv = ["cargo", "test"]
+working_directory = "."
+timeout_seconds = 1800
+depends_on = ["clippy"]

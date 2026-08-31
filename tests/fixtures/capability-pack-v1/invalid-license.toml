@@ -1,7 +1,7 @@
 schema_version = "1.0"
 pack_id = "ccp.rust-minimal"
 pack_version = "1.0.0"
-license = "Apache-2.0"
+license = "Apache-2.0 OR MIT"
 description = "One inert profile used to prove the Capability Pack contract."
 
 [[upstream_sources]]

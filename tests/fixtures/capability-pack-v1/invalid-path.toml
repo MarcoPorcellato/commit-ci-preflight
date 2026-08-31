@@ -55,7 +55,7 @@ max_cache_growth_bytes = 1048576
 
 [[profiles.caches]]
 id = "cargo"
-mount_path = ".cache/cargo"
+mount_path = "../cargo"
 
 [[profiles.checks]]
 id = "clippy"

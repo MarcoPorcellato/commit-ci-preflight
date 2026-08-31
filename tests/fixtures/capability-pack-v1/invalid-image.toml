@@ -37,7 +37,7 @@ max_age_seconds = 604800
 
 [profiles.runtime]
 kind = "docker_compatible"
-image = "ghcr.io/example/rust@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+image = "ghcr.io/example/rust"
 cpu_count = 2
 memory_mib = 2048
 pids_limit = 256
