@@ -22,6 +22,16 @@ stored digest would rewrite the M2 evidence and is forbidden.
 `m2-manifest.json` remains schema `1.0`, byte-for-byte unchanged, and stays
 bound to commit `2e6286cc23584d5e82842aacf106c3bb5e7462df`.
 
+The preserved legacy record is now known invalid: after acquiring its declared
+commit object, three entries disagree with that commit's raw blobs. Its
+existence and SHA-256 remain historical evidence of the faulty record, not a
+claim that the record verified. A new sibling
+`m2-manifest-v1.1.json` retains schema `1.0`, the same base commit, fixed path
+list, and corrected byte/SHA-256 values. The filename version identifies the
+corrected evidence record without mutating or relabelling v1.0. Only v1.1 is
+the positive closure contract; v1.0 is exercised as a preserved fail-closed
+negative record.
+
 The M2 contract test will verify each declared path against the Git object at
 that recorded commit, not against the current checkout. It will use the
 existing CCP test process supervisor with a two-second wall-clock deadline,
@@ -54,7 +64,10 @@ file list, schema field, or base commit in the historical manifest is changed.
 Modify only:
 
 - `tests/capability_pack_contract.rs` — replace the live-tree assertion with
-  historical-object verification and deterministic failure coverage;
+  historical-object verification, a preserved-invalid-v1.0 assertion, and
+  deterministic failure coverage;
+- `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest-v1.1.json`
+  — corrected, immutable historical record generated from the declared base;
 - `.github/workflows/rust-ci.yml` — fetch sufficient history only in the Linux/
   macOS test matrix that executes this contract;
 - `docs/TESTING_AND_FAULT_INJECTION.md` — declare the Git-history prerequisite
@@ -70,16 +83,19 @@ configuration, policies, and historical M2 manifest remain unchanged.
 
 1. Preserve the currently observed RED: a live-tree comparison fails after the
    `macos-v5` changelog entry.
-2. Add focused deterministic tests for malformed identity/path, missing and
+2. Preserve v1.0 exactly and prove it fails against its declared historical
+   objects without falling back to the working tree.
+3. Add a v1.1 corrected record and prove it passes against the same declared
+   historical commit and raw blobs.
+4. Add focused deterministic tests for malformed identity/path, missing and
    non-commit objects, missing blobs, bad bytes/digests, supervisor timeout,
    overflow, read failure, nonzero exit, cleanup failure, and zero fallback.
-3. Add a focused test that expects historical M2 verification to pass from the
-   recorded commit object and raw blobs.
-4. Run the focused capability-pack contract, then the offline workspace suite,
+5. Run the focused capability-pack contract, then the offline workspace suite,
    formatting, and strict Clippy checks.
 
 ## Non-goals
 
 - No mutable "current M2" manifest.
-- No update to M2 hashes, file list, schema version, or base commit.
+- No update to v1.0 M2 hashes, file list, schema version, base commit, or
+  filename.
 - No GitHub, Docker, CCP guarded command, candidate installation, push, or PR.

@@ -21,14 +21,18 @@ const PINNED_SCHEMA: &str = include_str!("../schema/capability-pack-v1.schema.js
 use commit_ci_preflight::config::{ConfigError, RuntimeKind};
 use commit_ci_preflight::process::{
     CancellationToken, CapturedStream, CleanupStatus, ExitOutcome, GenerationGuard, ProcessError,
-    ProcessRequest, ProcessResult, ProcessTermination, RunIdentity, SupervisorPort,
+    ProcessRequest, ProcessResult, ProcessSupervisor, ProcessTermination, RunIdentity,
+    SupervisorPort,
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 const VALID: &str = include_str!("fixtures/capability-pack-v1/valid-minimal.toml");
@@ -100,7 +104,8 @@ impl SupervisorPort for ScriptedSupervisor {
             .lock()
             .expect("scripted request lock")
             .push(request.clone());
-        let response = self.responses
+        let response = self
+            .responses
             .lock()
             .expect("scripted response lock")
             .pop_front()
@@ -224,6 +229,8 @@ enum HistoricalManifestError {
     BaseNotCommit,
     PathNotBlob,
     Length,
+    Manifest,
+    Digest,
 }
 
 struct HistoricalGitReader<'a, R: SupervisorPort> {
@@ -265,11 +272,7 @@ impl<'a, R: SupervisorPort> HistoricalGitReader<'a, R> {
         if self.raw_object_type(&revision)? != "blob" {
             return Err(HistoricalManifestError::PathNotBlob);
         }
-        let bytes = self.execute_git(vec![
-            "cat-file".into(),
-            "blob".into(),
-            revision.into(),
-        ])?;
+        let bytes = self.execute_git(vec!["cat-file".into(), "blob".into(), revision.into()])?;
         if bytes.len() != declared_bytes {
             return Err(HistoricalManifestError::Length);
         }
@@ -360,7 +363,10 @@ fn validate_historical_process_result(
 }
 
 fn is_lowercase_hex_object_id(value: &str) -> bool {
-    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn is_safe_historical_path(value: &str) -> bool {
@@ -372,6 +378,135 @@ fn is_safe_historical_path(value: &str) -> bool {
         && Path::new(value)
             .components()
             .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+const M2_LEGACY_MANIFEST_PATH: &str =
+    "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest.json";
+const M2_CORRECTED_MANIFEST_PATH: &str = "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest-v1.1.json";
+const EXPECTED_M2_PATHS: [&str; 18] = [
+    "CHANGELOG.md",
+    "docs/CAPABILITY_PACKS.md",
+    "schema/capability-pack-v1.schema.json",
+    "src/capability_pack.rs",
+    "src/lib.rs",
+    "tests/capability_pack_contract.rs",
+    "tests/fixtures/capability-pack-v1/dependency-cycle.toml",
+    "tests/fixtures/capability-pack-v1/invalid-image.toml",
+    "tests/fixtures/capability-pack-v1/invalid-license.toml",
+    "tests/fixtures/capability-pack-v1/invalid-path.toml",
+    "tests/fixtures/capability-pack-v1/invalid-provenance.toml",
+    "tests/fixtures/capability-pack-v1/shell-entrypoint.toml",
+    "tests/fixtures/capability-pack-v1/unknown-field.toml",
+    "tests/fixtures/capability-pack-v1/unknown-version.toml",
+    "tests/fixtures/capability-pack-v1/valid-minimal.canonical.json",
+    "tests/fixtures/capability-pack-v1/valid-minimal-reordered.toml",
+    "tests/fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json",
+    "tests/fixtures/capability-pack-v1/valid-minimal.toml",
+];
+
+fn parsed_m2_manifest() -> serde_json::Value {
+    read_legacy_m2_manifest(repo_root()).expect("read checked-in legacy M2 manifest")
+}
+
+fn read_legacy_m2_manifest(root: &Path) -> Result<serde_json::Value, HistoricalManifestError> {
+    read_m2_manifest_at(root, M2_LEGACY_MANIFEST_PATH)
+}
+
+fn read_corrected_m2_manifest(root: &Path) -> Result<serde_json::Value, HistoricalManifestError> {
+    read_m2_manifest_at(root, M2_CORRECTED_MANIFEST_PATH)
+}
+
+fn read_m2_manifest_at(
+    root: &Path,
+    relative_path: &str,
+) -> Result<serde_json::Value, HistoricalManifestError> {
+    let bytes =
+        std::fs::read(root.join(relative_path)).map_err(|_| HistoricalManifestError::Manifest)?;
+    serde_json::from_slice(&bytes).map_err(|_| HistoricalManifestError::Manifest)
+}
+
+fn verify_m2_manifest_historical<R: SupervisorPort>(
+    root: &Path,
+    manifest: &serde_json::Value,
+    reader: &HistoricalGitReader<'_, R>,
+) -> Result<(), HistoricalManifestError> {
+    if !root.is_absolute() {
+        return Err(HistoricalManifestError::InvalidRoot);
+    }
+    let object = manifest
+        .as_object()
+        .ok_or(HistoricalManifestError::Manifest)?;
+    if !has_exact_keys(object, &["base_commit", "files", "schema_version"])
+        || manifest["schema_version"].as_str() != Some("1.0")
+        || manifest["base_commit"].as_str() != Some(M2_BASE_COMMIT)
+    {
+        return Err(HistoricalManifestError::Manifest);
+    }
+    let entries = manifest["files"]
+        .as_array()
+        .ok_or(HistoricalManifestError::Manifest)?;
+    if entries.len() != EXPECTED_M2_PATHS.len() {
+        return Err(HistoricalManifestError::Manifest);
+    }
+
+    let mut validated_entries = Vec::with_capacity(entries.len());
+    for (entry, expected_path) in entries.iter().zip(EXPECTED_M2_PATHS) {
+        let entry = entry.as_object().ok_or(HistoricalManifestError::Manifest)?;
+        if !has_exact_keys(entry, &["bytes", "path", "sha256"]) {
+            return Err(HistoricalManifestError::Manifest);
+        }
+        let path = entry["path"]
+            .as_str()
+            .filter(|path| *path == expected_path && is_safe_historical_path(path))
+            .ok_or(HistoricalManifestError::Manifest)?;
+        let bytes = entry["bytes"]
+            .as_u64()
+            .filter(|bytes| *bytes <= HISTORICAL_CAPTURE_BYTES as u64)
+            .ok_or(HistoricalManifestError::DeclaredSizeTooLarge)?;
+        let digest = entry["sha256"]
+            .as_str()
+            .filter(|digest| is_lowercase_sha256_digest(digest))
+            .ok_or(HistoricalManifestError::Digest)?;
+        validated_entries.push((path, bytes, digest));
+    }
+
+    for (path, declared_bytes, declared_digest) in validated_entries {
+        let bytes = reader.blob(path, declared_bytes)?;
+        if u64::try_from(bytes.len()).map_err(|_| HistoricalManifestError::Length)?
+            != declared_bytes
+        {
+            return Err(HistoricalManifestError::Length);
+        }
+        if sha256_prefixed(&bytes) != declared_digest {
+            return Err(HistoricalManifestError::Digest);
+        }
+    }
+    Ok(())
+}
+
+fn has_exact_keys(object: &serde_json::Map<String, serde_json::Value>, expected: &[&str]) -> bool {
+    object.len() == expected.len()
+        && object
+            .keys()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+}
+
+fn is_lowercase_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{digest}")
 }
 
 #[test]
@@ -390,9 +525,11 @@ fn historical_reader_rejects_oversized_declaration_without_calling_git() {
     let supervisor = ScriptedSupervisor::default();
     let reader = HistoricalGitReader::new(repo_root(), &supervisor);
 
-    assert!(reader
-        .blob("CHANGELOG.md", (HISTORICAL_CAPTURE_BYTES + 1) as u64)
-        .is_err());
+    assert!(
+        reader
+            .blob("CHANGELOG.md", (HISTORICAL_CAPTURE_BYTES + 1) as u64)
+            .is_err()
+    );
     assert_eq!(supervisor.call_count(), 0);
 }
 
@@ -472,6 +609,47 @@ fn historical_reader_rejects_blob_length_mismatch() {
 }
 
 #[test]
+fn m2_manifest_rejects_missing_historical_blob_without_live_tree_fallback() {
+    let manifest = parsed_m2_manifest();
+    let supervisor = ScriptedSupervisor::with_responses([
+        scripted_success(b"commit\n"),
+        scripted_nonzero(b"missing\n"),
+    ]);
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert!(verify_m2_manifest_historical(repo_root(), &manifest, &reader).is_err());
+    assert_eq!(supervisor.call_count(), 2);
+}
+
+#[test]
+fn m2_manifest_rejects_bad_declared_length_before_historical_read() {
+    let mut manifest = parsed_m2_manifest();
+    manifest["files"][0]["bytes"] = serde_json::json!(65_537_u64);
+    let supervisor = ScriptedSupervisor::default();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert!(verify_m2_manifest_historical(repo_root(), &manifest, &reader).is_err());
+    assert_eq!(supervisor.call_count(), 0);
+}
+
+#[test]
+fn m2_manifest_rejects_malformed_shape_and_digest_before_historical_read() {
+    let mut malformed = parsed_m2_manifest();
+    malformed["unexpected"] = serde_json::json!(true);
+    let malformed_supervisor = ScriptedSupervisor::default();
+    let malformed_reader = HistoricalGitReader::new(repo_root(), &malformed_supervisor);
+    assert!(verify_m2_manifest_historical(repo_root(), &malformed, &malformed_reader).is_err());
+    assert_eq!(malformed_supervisor.call_count(), 0);
+
+    let mut bad_digest = parsed_m2_manifest();
+    bad_digest["files"][0]["sha256"] = serde_json::json!("sha256:ABC");
+    let digest_supervisor = ScriptedSupervisor::default();
+    let digest_reader = HistoricalGitReader::new(repo_root(), &digest_supervisor);
+    assert!(verify_m2_manifest_historical(repo_root(), &bad_digest, &digest_reader).is_err());
+    assert_eq!(digest_supervisor.call_count(), 0);
+}
+
+#[test]
 fn generated_capability_pack_schema_matches_pinned_bytes() {
     assert_eq!(
         commit_ci_preflight::capability_pack::capability_pack_schema_json()
@@ -481,82 +659,31 @@ fn generated_capability_pack_schema_matches_pinned_bytes() {
 }
 
 #[test]
-fn m2_manifest_matches_exact_file_bytes() {
-    const EXPECTED_PATHS: [&str; 18] = [
-        "CHANGELOG.md",
-        "docs/CAPABILITY_PACKS.md",
-        "schema/capability-pack-v1.schema.json",
-        "src/capability_pack.rs",
-        "src/lib.rs",
-        "tests/capability_pack_contract.rs",
-        "tests/fixtures/capability-pack-v1/dependency-cycle.toml",
-        "tests/fixtures/capability-pack-v1/invalid-image.toml",
-        "tests/fixtures/capability-pack-v1/invalid-license.toml",
-        "tests/fixtures/capability-pack-v1/invalid-path.toml",
-        "tests/fixtures/capability-pack-v1/invalid-provenance.toml",
-        "tests/fixtures/capability-pack-v1/shell-entrypoint.toml",
-        "tests/fixtures/capability-pack-v1/unknown-field.toml",
-        "tests/fixtures/capability-pack-v1/unknown-version.toml",
-        "tests/fixtures/capability-pack-v1/valid-minimal.canonical.json",
-        "tests/fixtures/capability-pack-v1/valid-minimal-reordered.toml",
-        "tests/fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json",
-        "tests/fixtures/capability-pack-v1/valid-minimal.toml",
-    ];
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let manifest_path = root.join(
-        "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest.json",
-    );
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read M2 manifest"))
-            .expect("parse M2 manifest");
-    let object = manifest.as_object().expect("M2 manifest object");
+fn m2_legacy_manifest_is_preserved_and_rejected() {
+    let bytes =
+        std::fs::read(repo_root().join(M2_LEGACY_MANIFEST_PATH)).expect("read legacy M2 manifest");
     assert_eq!(
-        object
-            .keys()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from(["base_commit", "files", "schema_version"])
+        sha256_prefixed(&bytes),
+        "sha256:a0aa38b4ac04ac8eaff0c591825bd50da2d53830fe649c79122b3849a358c80d"
     );
-    assert_eq!(manifest["schema_version"], "1.0");
-    assert_eq!(
-        manifest["base_commit"],
-        "2e6286cc23584d5e82842aacf106c3bb5e7462df"
-    );
-    let entries = manifest["files"].as_array().expect("M2 manifest files");
-    let paths = entries
-        .iter()
-        .map(|entry| {
-            let entry = entry.as_object().expect("M2 manifest file entry");
-            assert_eq!(
-                entry
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<std::collections::BTreeSet<_>>(),
-                std::collections::BTreeSet::from(["bytes", "path", "sha256"])
-            );
-            entry["path"].as_str().expect("M2 manifest path")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(paths, EXPECTED_PATHS);
+    let manifest = read_legacy_m2_manifest(repo_root()).expect("parse legacy M2 manifest");
+    let supervisor = ProcessSupervisor::standard();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
 
-    for entry in entries {
-        let relative = entry["path"].as_str().expect("M2 manifest path");
-        let bytes = std::fs::read(root.join(relative)).expect("read manifested file");
-        assert_eq!(
-            entry["bytes"].as_u64(),
-            Some(bytes.len() as u64),
-            "{relative}"
-        );
-        let digest = Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        assert_eq!(
-            entry["sha256"].as_str(),
-            Some(format!("sha256:{digest}").as_str()),
-            "{relative}"
-        );
-    }
+    assert_eq!(
+        verify_m2_manifest_historical(repo_root(), &manifest, &reader),
+        Err(HistoricalManifestError::Length)
+    );
+}
+
+#[test]
+fn m2_corrected_manifest_matches_historical_git_objects() {
+    let manifest = read_corrected_m2_manifest(repo_root()).expect("read corrected M2 manifest");
+    let supervisor = ProcessSupervisor::standard();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    verify_m2_manifest_historical(repo_root(), &manifest, &reader)
+        .expect("corrected historical M2 closure");
 }
 
 fn valid_binding() -> CapabilityPackBindingV1 {

@@ -19,8 +19,8 @@ rejects every abnormal terminal result before comparing bytes and SHA-256.
 
 ## Global Constraints
 
-- Leave `m2-manifest.json` byte-for-byte unchanged: schema, base commit,
-  paths, lengths, and digests are historical M2 evidence.
+- Leave `m2-manifest.json` byte-for-byte unchanged: it is preserved evidence
+  of invalid v1.0. Add `m2-manifest-v1.1.json` as immutable corrected evidence.
 - Only fixed commit `2e6286cc23584d5e82842aacf106c3bb5e7462df` may supply
   historical blobs. No working-tree fallback exists.
 - Reuse CCP's `ProcessSupervisor` with two-second wall-clock deadline and
@@ -60,7 +60,8 @@ rejects every abnormal terminal result before comparing bytes and SHA-256.
 
 | Path | Responsibility |
 |---|---|
-| `tests/capability_pack_contract.rs` | Test-only typed manifest verifier, hardened Git requests, injected-process tests, real historical-object contract. |
+| `tests/capability_pack_contract.rs` | Test-only verifier, hardened Git requests, injected-process tests, legacy-invalid and corrected historical contracts. |
+| `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest-v1.1.json` | Corrected immutable M2 evidence for pinned historical base. |
 | `.github/workflows/rust-ci.yml` | Full Git history in hosted matrix executing historical-object test. |
 | `docs/TESTING_AND_FAULT_INJECTION.md` | Deterministic-environment prerequisite for M2 historical objects. |
 | `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md` | Corrected historical—not live checkout—closure semantics. |
@@ -242,6 +243,7 @@ Expected: focused reader tests pass; no diff errors.
 
 **Files:**
 
+- Create: `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest-v1.1.json`
 - Modify: `tests/capability_pack_contract.rs:54-120`
 - Modify: `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md:25`
 
@@ -250,8 +252,7 @@ Expected: focused reader tests pass; no diff errors.
 - Consumes `HistoricalGitReader<R>` for any injected `R: SupervisorPort`, with
   production test using `R = ProcessSupervisor<StdProcessSpawner>`.
 - Produces `verify_m2_manifest_historical(root, manifest, reader) -> Result<(), HistoricalManifestError>`.
-- Public `m2_manifest_matches_historical_git_objects` may use `expect` only at
-  final test assertion.
+- Public corrected-record test may use `expect` only at final test assertion.
 
 - [ ] **Step 1: Write RED tests for manifest semantics and no fallback**
 
@@ -287,14 +288,18 @@ rtk cargo test --locked --offline --test capability_pack_contract m2_manifest_ -
 ```
 
 Expected: live-tree test fails on `CHANGELOG.md`; helper symbols absent until
-implementation.
+implementation. Add RED proving legacy v1.0 file hash is preserved and its
+historical verification returns an error, while v1.1 positive contract is not
+yet present.
 
 - [ ] **Step 3: Implement strict manifest verifier and real contract**
 
 Keep exact top-level `{base_commit, files, schema_version}`, schema `"1.0"`,
 fixed `M2_BASE_COMMIT`, exact sorted `EXPECTED_PATHS`, exact entry
-`{bytes, path, sha256}`. Parse bytes as `u64`; validate lower-case `sha256:`
-plus 64 hex characters before reads. Each entry invokes only:
+`{bytes, path, sha256}`. Create v1.1 by retaining all v1.0 entries except
+the three byte/SHA-256 values proven inconsistent with base `2e6286…`. Parse
+bytes as `u64`; validate lower-case `sha256:` plus 64 hex characters before
+reads. Each entry invokes only:
 
 ```rust
 let bytes = reader.blob(relative_path, declared_bytes)?;
@@ -307,9 +312,11 @@ if sha256_prefixed(&bytes) != declared_digest {
 ```
 
 Instantiate real reader with `ProcessSupervisor::new(StdProcessSpawner)`.
-Rename `m2_manifest_matches_exact_file_bytes` to
-`m2_manifest_matches_historical_git_objects`. It reads only manifest from
-checkout; manifested bytes come only from raw Git blobs. Never edit manifest.
+Replace `m2_manifest_matches_exact_file_bytes` with
+`m2_legacy_manifest_is_preserved_and_rejected` and
+`m2_corrected_manifest_matches_historical_git_objects`. Both read manifest
+metadata from checkout; manifested bytes come only from raw Git blobs. Never
+edit legacy manifest.
 
 - [ ] **Step 4: Document corrected evidence semantics**
 
@@ -330,7 +337,8 @@ rtk git add tests/capability_pack_contract.rs docs/superpowers/programmes/2026-0
 rtk git commit -m "test: verify M2 closure from historical Git objects"
 ```
 
-Expected: real historical contract and injected fail-closed tests pass.
+Expected: corrected historical contract and injected fail-closed tests pass;
+legacy v1.0 preservation test proves typed rejection.
 
 ### Task 3: Make deterministic test environments history-complete
 
@@ -386,8 +394,9 @@ rtk git commit -m "ci: retain M2 historical verification objects"
 
 ## Final Review Gate
 
-- [ ] Confirm `m2-manifest.json` has no diff and `CHANGELOG.md` retains
-  unrelated `macos-v5` entry.
+- [ ] Confirm `m2-manifest.json` has no diff, `m2-manifest-v1.1.json` is the
+  only new evidence record, and `CHANGELOG.md` retains unrelated `macos-v5`
+  entry.
 - [ ] Confirm every historical Git request has bounded supervisor lifecycle,
   exact environment allowlist, `--no-replace-objects`, `--no-lazy-fetch`, raw
   commit/blob checks, no current-tree fallback.
