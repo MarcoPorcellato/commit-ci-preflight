@@ -29,7 +29,8 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-          fetch-depth: 1
+          # M2 historical-object contract reads its fixed base commit.
+          fetch-depth: 0
           lfs: false
           submodules: false
       - name: Resolve the pinned Rust toolchain

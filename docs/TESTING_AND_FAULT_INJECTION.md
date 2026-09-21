@@ -59,6 +59,18 @@ must not merely rename, ignore, or remove it.
 
 ## Deterministic seams already available
 
+### M2 historical-object prerequisite
+
+The M2 corrected-evidence contract invokes the local `git` executable and
+reads raw objects at commit `2e6286cc23584d5e82842aacf106c3bb5e7462df`.
+Its Linux/macOS hosted test matrix therefore checks out complete history.
+Source archives, shallow clones, and partial clones missing that commit or its
+declared blobs fail the deterministic test; they are not equivalent test
+environments. The contract supplies `GIT_NO_LAZY_FETCH=1` and Git's
+`--no-lazy-fetch`, so it never repairs a missing object through network access.
+The legacy `m2-manifest.json` remains a preserved invalid record; only sibling
+`m2-manifest-v1.1.json` is a positive historical-object contract.
+
 - Process execution uses `ProcessSpawner`, `ManagedProcess`, `SupervisorPort`,
   `CancellationToken`, and `GenerationGuard`.
 - Runtime qualification can use a fake `SupervisorPort`.
