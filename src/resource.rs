@@ -28,16 +28,14 @@ use crate::process::{
 };
 
 pub const RESOURCE_SCHEMA_VERSION: &str = "1.0";
-pub const MACOS_POLICY_VERSION: &str = "macos-v4";
+pub const MACOS_POLICY_VERSION: &str = "macos-v5";
 pub const WATCHDOG_SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
 pub const RESOURCE_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 pub const RESOURCE_CAPTURE_BYTES: usize = 65_536;
 pub const MIN_PRESTART_AVAILABLE_PERCENT: u8 = 20;
 pub const MIN_PRESTART_FREE_BYTES: u64 = 3 * 1024 * 1024 * 1024;
-pub const MAX_PRESTART_SWAP_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const HARD_AVAILABLE_PERCENT: u8 = 3;
 pub const HARD_RECLAIMABLE_BYTES: u64 = 512 * 1024 * 1024;
-pub const HARD_SWAP_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const HARD_COMPRESSOR_PERCENT: u8 = 70;
 pub const HARD_COMPRESSOR_COMPANION_AVAILABLE_PERCENT: u8 = 8;
 pub const SOFT_AVAILABLE_PERCENT: u8 = 10;
@@ -215,12 +213,9 @@ pub fn evaluate_pre_start(
     snapshot: &ResourceSnapshot,
 ) -> Result<PreStartDecision, ResourceProbeError> {
     snapshot.validate()?;
-    let proportional_swap_limit = snapshot.total_memory_bytes.saturating_mul(30) / 100;
-    let swap_limit = MAX_PRESTART_SWAP_BYTES.min(proportional_swap_limit);
     Ok(
         if snapshot.available_percent >= MIN_PRESTART_AVAILABLE_PERCENT
             && snapshot.reclaimable_uncompressed_bytes >= MIN_PRESTART_FREE_BYTES
-            && snapshot.swap_used_bytes <= swap_limit
             && !snapshot.has_hard_compound_compression()
         {
             PreStartDecision::Admit
@@ -272,7 +267,6 @@ impl WatchdogState {
             ) >= SOFT_SWAP_GROWTH_BYTES;
         if snapshot.available_percent <= HARD_AVAILABLE_PERCENT
             || snapshot.reclaimable_uncompressed_bytes < HARD_RECLAIMABLE_BYTES
-            || snapshot.swap_used_bytes >= HARD_SWAP_BYTES
             || snapshot.has_hard_compound_compression()
         {
             self.first_trip = Some(WatchdogTripReason::HardPressure);
@@ -882,14 +876,12 @@ mod tests {
 
     #[test]
     fn policy_boundaries_are_explicit() {
-        assert_eq!(MACOS_POLICY_VERSION, "macos-v4");
+        assert_eq!(MACOS_POLICY_VERSION, "macos-v5");
         assert_eq!(MIN_PRESTART_AVAILABLE_PERCENT, 20);
-        assert_eq!(MAX_PRESTART_SWAP_BYTES, 8 * 1024 * 1024 * 1024);
         assert_eq!(SOFT_CONSECUTIVE_SAMPLES, 15);
         assert_eq!(SOFT_REQUIRED_SIGNALS, 2);
         assert_eq!(SOFT_COMPRESSOR_PERCENT, 55);
         assert_eq!(HARD_COMPRESSOR_PERCENT, 70);
-        assert_eq!(HARD_SWAP_BYTES, 8 * 1024 * 1024 * 1024);
         assert_eq!(
             evaluate_pre_start(&snapshot()).expect("admit"),
             PreStartDecision::Admit
@@ -897,7 +889,7 @@ mod tests {
         let mut denied = snapshot();
         denied.available_percent = MIN_PRESTART_AVAILABLE_PERCENT;
         denied.reclaimable_uncompressed_bytes = MIN_PRESTART_FREE_BYTES;
-        denied.swap_used_bytes = MAX_PRESTART_SWAP_BYTES;
+        denied.swap_used_bytes = 12 * 1024 * 1024 * 1024;
         assert_eq!(
             evaluate_pre_start(&denied).expect("boundary"),
             PreStartDecision::Admit
@@ -909,36 +901,36 @@ mod tests {
         );
 
         denied = snapshot();
-        denied.swap_total_bytes = 12 * 1024 * 1024 * 1024;
-        denied.swap_used_bytes = MAX_PRESTART_SWAP_BYTES;
-        assert_eq!(
-            evaluate_pre_start(&denied).expect("8 GiB swap boundary admit"),
-            PreStartDecision::Admit
-        );
-        denied.swap_used_bytes = MAX_PRESTART_SWAP_BYTES + 1;
-        assert_eq!(
-            evaluate_pre_start(&denied).expect("above 8 GiB swap deny"),
-            PreStartDecision::Deny
-        );
-        denied = snapshot();
         denied.total_memory_bytes = 16 * 1024 * 1024 * 1024;
         denied.compressor_occupied_bytes = denied.total_memory_bytes / 10;
         denied.swap_total_bytes = denied.total_memory_bytes;
-        denied.swap_used_bytes = 30 * denied.total_memory_bytes / 100;
+        denied.swap_used_bytes = 12 * 1024 * 1024 * 1024;
         assert_eq!(
-            evaluate_pre_start(&denied).expect("30 percent small host boundary admit"),
+            evaluate_pre_start(&denied).expect("high swap small host admit"),
             PreStartDecision::Admit
-        );
-        denied.swap_used_bytes += 1;
-        assert_eq!(
-            evaluate_pre_start(&denied).expect("above proportional swap deny"),
-            PreStartDecision::Deny
         );
         denied = snapshot();
         denied.reclaimable_uncompressed_bytes = MIN_PRESTART_FREE_BYTES - 1;
         assert_eq!(
             evaluate_pre_start(&denied).expect("free deny"),
             PreStartDecision::Deny
+        );
+    }
+
+    #[test]
+    fn pre_start_admits_healthy_host_with_high_static_swap() {
+        let observed = ResourceSnapshot {
+            available_percent: 55,
+            reclaimable_uncompressed_bytes: 10_585_554_944,
+            compressor_occupied_bytes: 11_111_120_896,
+            total_memory_bytes: 38_654_705_664,
+            swap_used_bytes: 11_543_899_013,
+            swap_total_bytes: 12_884_901_888,
+        };
+
+        assert_eq!(
+            evaluate_pre_start(&observed).expect("healthy high-swap host"),
+            PreStartDecision::Admit
         );
     }
 
@@ -1016,13 +1008,12 @@ mod tests {
     }
 
     #[test]
-    fn hard_pressure_requires_a_critical_signal_or_compound_compression() {
+    fn hard_pressure_requires_critical_memory_or_compound_compression() {
         for pressure in [
             |value: &mut ResourceSnapshot| value.available_percent = HARD_AVAILABLE_PERCENT,
             |value: &mut ResourceSnapshot| {
                 value.reclaimable_uncompressed_bytes = HARD_RECLAIMABLE_BYTES - 1
             },
-            |value: &mut ResourceSnapshot| value.swap_used_bytes = HARD_SWAP_BYTES,
             |value: &mut ResourceSnapshot| {
                 value.compressor_occupied_bytes =
                     percent_ceiling(value.total_memory_bytes, u64::from(HARD_COMPRESSOR_PERCENT));
@@ -1037,17 +1028,43 @@ mod tests {
                 WatchdogDecision::Tripped(WatchdogTripReason::HardPressure)
             );
         }
+    }
 
+    #[test]
+    fn watchdog_treats_high_static_swap_as_a_companion_signal() {
         let mut state = WatchdogState::default();
-        let mut hard = snapshot();
-        hard.swap_used_bytes = HARD_SWAP_BYTES;
+        let mut healthy = snapshot();
+        healthy.swap_used_bytes = 11 * 1024 * 1024 * 1024;
+        healthy.swap_total_bytes = 12 * 1024 * 1024 * 1024;
+
+        for _ in 0..(SOFT_CONSECUTIVE_SAMPLES * 2) {
+            assert_eq!(
+                state.observe(&healthy).expect("healthy high-swap host"),
+                WatchdogDecision::Continue
+            );
+        }
+        assert_eq!(state.consecutive_soft_samples(), 0);
+    }
+
+    #[test]
+    fn high_static_swap_needs_a_second_signal_and_a_sustained_window() {
+        let mut state = WatchdogState::default();
+        let mut pressured = snapshot();
+        pressured.swap_used_bytes = 11 * 1024 * 1024 * 1024;
+        pressured.swap_total_bytes = 12 * 1024 * 1024 * 1024;
+        pressured.available_percent = SOFT_AVAILABLE_PERCENT - 1;
+
+        for _ in 0..(SOFT_CONSECUTIVE_SAMPLES - 1) {
+            assert_eq!(
+                state.observe(&pressured).expect("compound soft pressure"),
+                WatchdogDecision::Continue
+            );
+        }
         assert_eq!(
-            state.observe(&hard).expect("hard"),
-            WatchdogDecision::Tripped(WatchdogTripReason::HardPressure)
-        );
-        assert_eq!(
-            state.observe(&snapshot()).expect("first trip preserved"),
-            WatchdogDecision::Tripped(WatchdogTripReason::HardPressure)
+            state
+                .observe(&pressured)
+                .expect("sustained compound pressure"),
+            WatchdogDecision::Tripped(WatchdogTripReason::SoftPressure)
         );
     }
 

@@ -198,6 +198,11 @@ Semantic Versioning after its first public release.
 - Clarify that `dry-run` renders a planning and mount-review surface rather
   than a self-contained replay bundle; copied container arguments require
   independently validated, caller-owned writable mount sources.
+- Version the macOS resource policy as `macos-v5`: retain the existing shared
+  FIFO single-slot admission, 20% available-memory and 3 GiB reclaimable-memory
+  pre-start gates, compound-compression protection, fail-closed telemetry, and
+  sustained two-signal watchdog. Static swap occupancy is now a companion
+  signal rather than an independent pre-start or immediate-stop veto.
 - Plans with no artifact contracts now finalize with an empty artifact manifest
   without requiring or creating a managed `artifacts` directory; plans with
   declared contracts retain the existing fail-closed observation checks.

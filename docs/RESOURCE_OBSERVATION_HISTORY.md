@@ -12,7 +12,7 @@ The observation-history storage subsystem has no admission authority. It
 records bounded local summaries only after a `guard exec` workload has passed
 the active pre-start gate. History write failures are advisory and never change
 the guarded process result. Aggregate v2 observations informed the separately
-reviewed `macos-v4` policy; an individual record still cannot alter a decision.
+reviewed `macos-v5` policy; an individual record still cannot alter a decision.
 
 ## Evolution record
 
@@ -21,11 +21,12 @@ reviewed `macos-v4` policy; an individual record still cannot alter a decision.
 | `macos-v1` | Fixed pre-start thresholds and two-second watchdog | Shipped in PR 12 |
 | `macos-v2` | Swap-only admission relaxed to `min(10 GiB, 30% RAM)` | Shipped in PR 15 |
 | `macos-v3` | Pre-start admission uses 20% available memory, 40% compressor and `min(8 GiB, 30% RAM)` swap; compressor alone trips the in-run watchdog at 40% soft / 45% hard | Superseded after measured false positives |
-| `macos-v4` | Keeps the v3 available/reclaimable/swap pre-start limits; compressor alone is advisory before and during execution, soft pressure requires two signals for about 30 seconds, and immediate stops use critical memory/swap or compound 70% compression | Current policy |
+| `macos-v4` | Keeps the v3 available/reclaimable/swap pre-start limits; compressor alone is advisory before and during execution, soft pressure requires two signals for about 30 seconds, and immediate stops use critical memory/swap or compound 70% compression | Superseded because static swap alone created avoidable pre-start denials |
+| `macos-v5` | Keeps the available/reclaimable and compound-compression admission gates; static swap is a companion soft signal, soft pressure requires two signals for about 30 seconds, and immediate stops use critical memory or compound 70% compression | Current policy |
 | observation history v1 | Per-profile baseline, extrema, duration and outcome; no prediction | Legacy file retained unchanged |
 | observation history v2 | Adds bounded workload/executor context and an optional closed terminal-failure detail for comparable cross-repository samples | Current tranche |
 | forecast shadow mode | Backtest a deterministic upper-bound forecast without changing admission | Future, requires sufficient comparable samples |
-| workload-aware admission | May forecast workload headroom while retaining the macOS-v4 hard limits and watchdog | Future owner gate |
+| workload-aware admission | May forecast workload headroom while retaining the macOS-v5 hard limits and watchdog | Future owner gate |
 
 ## Operator usage
 
