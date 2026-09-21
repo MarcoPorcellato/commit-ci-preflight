@@ -68,9 +68,11 @@ jobs:
         env:
           M2_BASE_COMMIT: 2e6286cc23584d5e82842aacf106c3bb5e7462df
           M2_REPOSITORY: ${{ github.repository }}
-        run: >-
-          git fetch --no-tags --no-write-fetch-head
-          "https://github.com/${M2_REPOSITORY}.git" "${M2_BASE_COMMIT}"
+        run: |
+          git fetch --no-tags --no-write-fetch-head \
+            "https://github.com/${M2_REPOSITORY}.git" \
+            "${M2_BASE_COMMIT}:refs/ccp/m2/${M2_BASE_COMMIT}"
+          git cat-file -e "${M2_BASE_COMMIT}^{commit}"
       - name: Resolve the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Run the complete deterministic suite
