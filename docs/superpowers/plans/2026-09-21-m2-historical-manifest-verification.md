@@ -52,7 +52,9 @@ rejects every abnormal terminal result before comparing bytes and SHA-256.
 - Timeout, truncation, read/cleanup error, nonzero exit all fail closed; Task 1
   injects every terminal outcome through `SupervisorPort`.
 - CI must retain M2 base object; Task 3 sets full history only in Linux/macOS
-  test matrix and documents archive/shallow failure.
+  test matrix, then explicitly fetches fixed object from canonical
+  `${{ github.repository }}` because it is not reachable from `main`, and
+  documents archive/shallow failure.
 
 ---
 
@@ -62,7 +64,7 @@ rejects every abnormal terminal result before comparing bytes and SHA-256.
 |---|---|
 | `tests/capability_pack_contract.rs` | Test-only verifier, hardened Git requests, injected-process tests, legacy-invalid and corrected historical contracts. |
 | `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest-v1.1.json` | Corrected immutable M2 evidence for pinned historical base. |
-| `.github/workflows/rust-ci.yml` | Full Git history in hosted matrix executing historical-object test. |
+| `.github/workflows/rust-ci.yml` | Full Git history plus exact canonical-base provisioning in hosted matrix executing historical-object test. |
 | `docs/TESTING_AND_FAULT_INJECTION.md` | Deterministic-environment prerequisite for M2 historical objects. |
 | `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md` | Corrected historical—not live checkout—closure semantics. |
 

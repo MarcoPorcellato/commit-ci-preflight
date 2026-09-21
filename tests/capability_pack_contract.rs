@@ -52,6 +52,7 @@ const PINNED_CANONICAL: &[u8] =
 const PINNED_EXPANSION: &[u8] =
     include_bytes!("fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json");
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static HISTORICAL_GIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct ScriptedSupervisor {
     requests: Mutex<Vec<ProcessRequest>>,
@@ -90,6 +91,10 @@ impl ScriptedSupervisor {
         let requests = self.requests.lock().expect("scripted request lock");
         assert_eq!(requests.len(), 1);
         requests[0].clone()
+    }
+
+    fn requests(&self) -> Vec<ProcessRequest> {
+        self.requests.lock().expect("scripted request lock").clone()
     }
 }
 
@@ -191,6 +196,20 @@ fn scripted_truncated_stdout() -> Result<ProcessResult, ProcessError> {
         }),
         true,
         false,
+    ))
+}
+
+fn scripted_truncated_stderr() -> Result<ProcessResult, ProcessError> {
+    Ok(scripted_result(
+        b"commit\n",
+        b"truncated",
+        ProcessTermination::Completed,
+        Some(ExitOutcome {
+            success: true,
+            code: Some(0),
+        }),
+        false,
+        true,
     ))
 }
 
@@ -329,7 +348,10 @@ fn historical_request(root: &Path, argv: Vec<OsString>) -> ProcessRequest {
             project: "m2-historical-contract".to_owned(),
             commit: Some(M2_BASE_COMMIT.to_owned()),
             config_digest: "sha256:m2-historical-contract".to_owned(),
-            generation: "test".to_owned(),
+            generation: format!(
+                "historical-{}",
+                HISTORICAL_GIT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ),
         },
         program: "git".into(),
         argv,
@@ -559,6 +581,23 @@ fn historical_reader_builds_hardened_git_request() {
 }
 
 #[test]
+fn historical_reader_assigns_distinct_generations_to_each_git_request() {
+    let supervisor = ScriptedSupervisor::with_responses([
+        scripted_success(b"commit\n"),
+        scripted_success(b"commit\n"),
+    ]);
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert!(reader.object_type(M2_BASE_COMMIT).is_ok());
+    assert!(reader.object_type(M2_BASE_COMMIT).is_ok());
+    let requests = supervisor.requests();
+    assert_ne!(
+        requests[0].identity.generation,
+        requests[1].identity.generation
+    );
+}
+
+#[test]
 fn historical_reader_rejects_non_commit_base() {
     let supervisor = ScriptedSupervisor::with_success_stdout(b"tree\n");
     let reader = HistoricalGitReader::new(repo_root(), &supervisor);
@@ -576,6 +615,16 @@ fn historical_reader_rejects_missing_or_non_blob_path() {
 }
 
 #[test]
+fn historical_reader_rejects_non_blob_path() {
+    let supervisor = ScriptedSupervisor::with_responses([
+        scripted_success(b"commit\n"),
+        scripted_success(b"tree\n"),
+    ]);
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+    assert!(reader.blob("CHANGELOG.md", 1).is_err());
+}
+
+#[test]
 fn historical_reader_rejects_timeout_and_truncated_capture() {
     let timeout_supervisor = ScriptedSupervisor::with_result(scripted_timeout());
     let timeout_reader = HistoricalGitReader::new(repo_root(), &timeout_supervisor);
@@ -584,6 +633,10 @@ fn historical_reader_rejects_timeout_and_truncated_capture() {
     let truncated_supervisor = ScriptedSupervisor::with_result(scripted_truncated_stdout());
     let truncated_reader = HistoricalGitReader::new(repo_root(), &truncated_supervisor);
     assert!(truncated_reader.object_type(M2_BASE_COMMIT).is_err());
+
+    let stderr_supervisor = ScriptedSupervisor::with_result(scripted_truncated_stderr());
+    let stderr_reader = HistoricalGitReader::new(repo_root(), &stderr_supervisor);
+    assert!(stderr_reader.object_type(M2_BASE_COMMIT).is_err());
 }
 
 #[test]
@@ -647,6 +700,38 @@ fn m2_manifest_rejects_malformed_shape_and_digest_before_historical_read() {
     let digest_reader = HistoricalGitReader::new(repo_root(), &digest_supervisor);
     assert!(verify_m2_manifest_historical(repo_root(), &bad_digest, &digest_reader).is_err());
     assert_eq!(digest_supervisor.call_count(), 0);
+
+    let mut reordered = parsed_m2_manifest();
+    reordered["files"]
+        .as_array_mut()
+        .expect("M2 files")
+        .swap(0, 1);
+    let reordered_supervisor = ScriptedSupervisor::default();
+    let reordered_reader = HistoricalGitReader::new(repo_root(), &reordered_supervisor);
+    assert!(verify_m2_manifest_historical(repo_root(), &reordered, &reordered_reader).is_err());
+    assert_eq!(reordered_supervisor.call_count(), 0);
+
+    let mut unexpected_entry_key = parsed_m2_manifest();
+    unexpected_entry_key["files"][17]["unexpected"] = serde_json::json!(true);
+    let entry_supervisor = ScriptedSupervisor::default();
+    let entry_reader = HistoricalGitReader::new(repo_root(), &entry_supervisor);
+    assert!(
+        verify_m2_manifest_historical(repo_root(), &unexpected_entry_key, &entry_reader).is_err()
+    );
+    assert_eq!(entry_supervisor.call_count(), 0);
+}
+
+#[test]
+fn m2_corrected_manifest_rejects_same_length_wrong_digest() {
+    let mut manifest = read_corrected_m2_manifest(repo_root()).expect("read corrected M2 manifest");
+    manifest["files"][17]["sha256"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    let supervisor = ProcessSupervisor::standard();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert_eq!(
+        verify_m2_manifest_historical(repo_root(), &manifest, &reader),
+        Err(HistoricalManifestError::Digest)
+    );
 }
 
 #[test]

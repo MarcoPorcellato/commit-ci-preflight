@@ -63,11 +63,13 @@ must not merely rename, ignore, or remove it.
 
 The M2 corrected-evidence contract invokes the local `git` executable and
 reads raw objects at commit `2e6286cc23584d5e82842aacf106c3bb5e7462df`.
-Its Linux/macOS hosted test matrix therefore checks out complete history.
-Source archives, shallow clones, and partial clones missing that commit or its
-declared blobs fail the deterministic test; they are not equivalent test
-environments. The contract supplies `GIT_NO_LAZY_FETCH=1` and Git's
-`--no-lazy-fetch`, so it never repairs a missing object through network access.
+Its Linux/macOS hosted test matrix checks out complete source history and then
+fetches that fixed object explicitly from canonical `${{ github.repository }}`:
+the base is not assumed to be reachable from the tested ref. Source archives,
+shallow clones, and partial clones missing that commit or its declared blobs
+fail the deterministic test; they are not equivalent test environments. The
+contract supplies `GIT_NO_LAZY_FETCH=1` and Git's `--no-lazy-fetch`, so its
+test subprocess never repairs a missing object through network access.
 The legacy `m2-manifest.json` remains a preserved invalid record; only sibling
 `m2-manifest-v1.1.json` is a positive historical-object contract.
 

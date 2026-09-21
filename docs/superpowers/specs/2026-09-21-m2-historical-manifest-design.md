@@ -69,7 +69,9 @@ Modify only:
 - `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest-v1.1.json`
   — corrected, immutable historical record generated from the declared base;
 - `.github/workflows/rust-ci.yml` — fetch sufficient history only in the Linux/
-  macOS test matrix that executes this contract;
+  macOS test matrix that executes this contract, then explicitly provision the
+  fixed base object from canonical `${{ github.repository }}` because it is not
+  reachable from `main`;
 - `docs/TESTING_AND_FAULT_INJECTION.md` — declare the Git-history prerequisite
   for this deterministic historical-evidence test;
 - `docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/progress.md`

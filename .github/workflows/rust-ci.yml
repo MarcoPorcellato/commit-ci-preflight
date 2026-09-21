@@ -29,8 +29,7 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-          # M2 historical-object contract reads its fixed base commit.
-          fetch-depth: 0
+          fetch-depth: 1
           lfs: false
           submodules: false
       - name: Resolve the pinned Rust toolchain
@@ -61,9 +60,17 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-          fetch-depth: 1
+          # M2 historical-object contract reads its fixed base commit.
+          fetch-depth: 0
           lfs: false
           submodules: false
+      - name: Fetch immutable M2 base object
+        env:
+          M2_BASE_COMMIT: 2e6286cc23584d5e82842aacf106c3bb5e7462df
+          M2_REPOSITORY: ${{ github.repository }}
+        run: >-
+          git fetch --no-tags --no-write-fetch-head
+          "https://github.com/${M2_REPOSITORY}.git" "${M2_BASE_COMMIT}"
       - name: Resolve the pinned Rust toolchain
         run: rustup show active-toolchain
       - name: Run the complete deterministic suite
