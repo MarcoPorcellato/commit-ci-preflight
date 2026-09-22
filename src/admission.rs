@@ -301,6 +301,72 @@ struct ReconciliationTestControls {
     lease_remove_attempts: std::sync::atomic::AtomicUsize,
     fail_sync_on: std::sync::Mutex<Option<(ReconciliationSyncPoint, usize)>>,
     quarantine_suffix: std::sync::Mutex<Option<String>>,
+    cleanup_runs: std::sync::atomic::AtomicUsize,
+}
+
+struct ReconciliationApplyLocks {
+    queue: Option<File>,
+    slot: Option<File>,
+    tickets: Vec<(File, PathBuf, u64, u64)>,
+    #[cfg(test)]
+    test_controls: std::sync::Arc<ReconciliationTestControls>,
+}
+
+impl ReconciliationApplyLocks {
+    #[cfg(not(test))]
+    fn new(queue: File, slot: File) -> Self {
+        Self {
+            queue: Some(queue),
+            slot: Some(slot),
+            tickets: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn new(
+        queue: File,
+        slot: File,
+        test_controls: std::sync::Arc<ReconciliationTestControls>,
+    ) -> Self {
+        Self {
+            queue: Some(queue),
+            slot: Some(slot),
+            tickets: Vec::new(),
+            test_controls,
+        }
+    }
+
+    fn release_all(&mut self) -> Option<&'static str> {
+        let mut first_error = None;
+        for (file, _, ..) in self.tickets.drain(..) {
+            if FileExt::unlock(&file).is_err() && first_error.is_none() {
+                first_error = Some("ticket_unlock_failed");
+            }
+        }
+        if let Some(slot) = self.slot.take()
+            && FileExt::unlock(&slot).is_err()
+            && first_error.is_none()
+        {
+            first_error = Some("slot_unlock_failed");
+        }
+        if let Some(mut queue) = self.queue.take()
+            && unlock(&mut queue).is_err()
+            && first_error.is_none()
+        {
+            first_error = Some("queue_unlock_failed");
+        }
+        first_error
+    }
+}
+
+impl Drop for ReconciliationApplyLocks {
+    fn drop(&mut self) {
+        let _ = self.release_all();
+        #[cfg(test)]
+        self.test_controls
+            .cleanup_runs
+            .fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -449,6 +515,13 @@ impl AdmissionCoordinator {
             .quarantine_suffix
             .lock()
             .expect("reconciliation suffix lock") = Some(suffix.to_owned());
+    }
+
+    #[cfg(test)]
+    fn reconciliation_cleanup_runs(&self) -> usize {
+        self.reconciliation_test_controls
+            .cleanup_runs
+            .load(Ordering::SeqCst)
     }
 
     pub fn acquire(
@@ -770,15 +843,14 @@ impl AdmissionCoordinator {
             }
         };
         #[cfg(test)]
+        let mut locks =
+            ReconciliationApplyLocks::new(queue, slot, self.reconciliation_test_controls.clone());
+        #[cfg(not(test))]
+        let mut locks = ReconciliationApplyLocks::new(queue, slot);
+        #[cfg(test)]
         self.reach_reconciliation_gate(ReconciliationTestGatePoint::AfterExclusion);
-        let mut locked: Vec<(File, PathBuf, u64, u64)> = Vec::new();
         macro_rules! reject {
             ($reason:expr) => {{
-                for (file, _path, ..) in locked.drain(..) {
-                    let _ = FileExt::unlock(&file);
-                }
-                let _ = FileExt::unlock(&slot);
-                let _ = unlock(&mut queue);
                 return Err(AdmissionReconciliationError::Blocked($reason));
             }};
         }
@@ -829,13 +901,13 @@ impl AdmissionCoordinator {
             let (dev, ino) = (descriptor_metadata.dev(), descriptor_metadata.ino());
             #[cfg(not(unix))]
             let (dev, ino) = (descriptor_metadata.len(), 0);
-            locked.push((file, path, dev, ino));
+            locks.tickets.push((file, path, dev, ino));
         }
 
         #[cfg(test)]
         self.reach_reconciliation_gate(ReconciliationTestGatePoint::AfterSelectedDescriptors);
 
-        for (_file, path, dev, ino) in &locked {
+        for (_file, path, dev, ino) in &locks.tickets {
             let current = match fs::symlink_metadata(path) {
                 Ok(current) => current,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -873,11 +945,6 @@ impl AdmissionCoordinator {
                         classification: "not_attempted".to_owned(),
                     }
                 }));
-                for (file, _, ..) in &locked {
-                    let _ = FileExt::unlock(file);
-                }
-                let _ = FileExt::unlock(&slot);
-                let _ = unlock(&mut queue);
                 return Err(AdmissionReconciliationError::Partial {
                     reason: $reason,
                     report: AdmissionReconciliationApplyReportV1 {
@@ -888,7 +955,9 @@ impl AdmissionCoordinator {
             }};
         }
 
-        for (index, (id, (_file, path, ..))) in canonical.iter().zip(locked.iter()).enumerate() {
+        for (index, (id, (_file, path, ..))) in
+            canonical.iter().zip(locks.tickets.iter()).enumerate()
+        {
             if let Err(error) = deadline.check(cancellation) {
                 if outcomes.is_empty() {
                     return Err(AdmissionReconciliationError::Admission(error));
@@ -1007,29 +1076,9 @@ impl AdmissionCoordinator {
                 classification: "quarantined".to_owned(),
             });
         }
-        for (file, _, ..) in locked {
-            if FileExt::unlock(&file).is_err() {
-                return Err(AdmissionReconciliationError::Partial {
-                    reason: "ticket_unlock_failed",
-                    report: AdmissionReconciliationApplyReportV1 {
-                        schema_version: "1.0".to_owned(),
-                        outcomes,
-                    },
-                });
-            }
-        }
-        if FileExt::unlock(&slot).is_err() {
+        if let Some(reason) = locks.release_all() {
             return Err(AdmissionReconciliationError::Partial {
-                reason: "slot_unlock_failed",
-                report: AdmissionReconciliationApplyReportV1 {
-                    schema_version: "1.0".to_owned(),
-                    outcomes,
-                },
-            });
-        }
-        if unlock(&mut queue).is_err() {
-            return Err(AdmissionReconciliationError::Partial {
-                reason: "queue_unlock_failed",
+                reason,
                 report: AdmissionReconciliationApplyReportV1 {
                     schema_version: "1.0".to_owned(),
                     outcomes,
@@ -3237,6 +3286,7 @@ mod tests {
         let protected = ReconciliationProtectedState::capture(&c, unselected);
         let gate = Arc::new(ReconciliationTestGate::new());
         c.set_reconciliation_after_lease_removal_gate(1, gate.clone());
+        assert_eq!(c.reconciliation_cleanup_runs(), 0);
         let cancellation = CancellationToken::default();
         let worker_c = c.clone();
         let worker_cancel = cancellation.clone();
@@ -3270,6 +3320,7 @@ mod tests {
         );
         protected.assert_unchanged();
         assert_reconciliation_locks_reusable(&c, &[&first_path, &second_path]);
+        assert_eq!(c.reconciliation_cleanup_runs(), 1);
     }
 
     #[test]
@@ -3791,6 +3842,7 @@ mod tests {
         fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
         write_lease_fixture(&c, first, "active", 1, 1);
         let missing = "00000000000000000015".to_owned();
+        assert_eq!(c.reconciliation_cleanup_runs(), 0);
         let result = c.reconcile_apply_with_timeout(
             &[first.to_owned(), missing],
             Duration::from_secs(1),
@@ -3800,6 +3852,7 @@ mod tests {
             result,
             Err(AdmissionReconciliationError::Admission(_))
         ));
+        assert_eq!(c.reconciliation_cleanup_runs(), 1);
         let follow_up = c
             .reconcile_apply_with_timeout(
                 &[first.to_owned()],
@@ -3808,6 +3861,63 @@ mod tests {
             )
             .expect("follow-up apply");
         assert_eq!(follow_up.outcomes, vec![outcome(first, "quarantined")]);
+    }
+
+    #[test]
+    fn reconciliation_identity_io_error_uses_cleanup_owner_and_leaves_locks_reusable() {
+        let c = coordinator("reconcile-identity-io-cleanup-round6");
+        c.initialize().expect("initialize");
+        let first = "00000000000000000069";
+        let second = "00000000000000000070";
+        expired_ticket(&c, first);
+        expired_ticket(&c, second);
+        let gate = Arc::new(ReconciliationTestGate::new());
+        c.set_reconciliation_gate(
+            ReconciliationTestGatePoint::AfterSelectedDescriptors,
+            gate.clone(),
+        );
+        assert_eq!(c.reconciliation_cleanup_runs(), 0);
+
+        let worker_c = c.clone();
+        let worker = thread::spawn(move || {
+            worker_c.reconcile_apply_with_timeout(
+                &[second.to_owned(), first.to_owned()],
+                Duration::from_secs(2),
+                &CancellationToken::default(),
+            )
+        });
+        gate.wait_until_reached();
+        let tickets = c.root().join(TICKETS_DIR);
+        let retained_tickets = c.root().join("tickets-retained-round6");
+        fs::rename(&tickets, &retained_tickets).expect("retain tickets directory");
+        fs::write(&tickets, b"force ENOTDIR during identity recheck")
+            .expect("replace tickets directory with file");
+        gate.release();
+
+        assert!(matches!(
+            worker.join().expect("reconciler"),
+            Err(AdmissionReconciliationError::Admission(
+                AdmissionError::Io { .. }
+            ))
+        ));
+        assert_eq!(c.reconciliation_cleanup_runs(), 1);
+        fs::remove_file(&tickets).expect("remove identity I/O fixture");
+        fs::rename(&retained_tickets, &tickets).expect("restore tickets directory");
+
+        let report = c
+            .reconcile_apply_with_timeout(
+                &[second.to_owned(), first.to_owned()],
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .expect("locks reusable after identity I/O error");
+        assert_eq!(
+            report.outcomes,
+            vec![
+                outcome(first, "quarantined"),
+                outcome(second, "quarantined")
+            ]
+        );
     }
 
     #[test]
