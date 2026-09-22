@@ -20,6 +20,7 @@ mod cache_payload;
 pub mod capability_pack;
 pub mod config;
 pub mod durable_fs;
+pub mod economic_evaluation;
 pub mod github_actions;
 pub mod matrix;
 mod matrix_legacy;
