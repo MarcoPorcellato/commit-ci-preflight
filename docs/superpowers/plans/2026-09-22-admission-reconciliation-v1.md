@@ -16,6 +16,9 @@
 - Apply requires `--apply` plus one or more exact `--ticket-id` values; it never selects all tickets.
 - Apply holds queue and slot exclusion, locks every selected ticket, then rereads every record before mutation.
 - Only a valid CCP-owned unlocked selected ticket with an absent or definitely expired lease is eligible.
+- A free slot is expected once reconciliation holds it; it is not itself a
+  slot/lease contradiction. A selected valid ticket with an absent or
+  definitely expired, semantically valid lease remains eligible.
 - Preserve status schema `2.0`, existing on-disk schemas, `recover`, receipt, cache, `run`, `benchmark`, and `guard exec` behavior.
 - JSON contains only bounded opaque IDs and fixed categories, never paths, commands, environments, process inventory, raw errors, or logs.
 - No network, Docker workload, CCP heavy command, release, installation, or manual coordinator cleanup belongs to this plan.
@@ -134,10 +137,11 @@ foreign, malformed, unsafe, lease-only, or contradictory state.
 
 - [ ] **Step 4: Write and run lock RED/GREEN tests.**
 
-Create a held selected ticket fixture and capture its bytes before apply; create
-a free slot lock plus a valid selected expired lease residue; and invoke apply
-with duplicate, malformed, and omitted target IDs. Each must return a bounded
-blocked or usage result and preserve every ticket, lease, and counter byte.
+Create a held selected ticket fixture and capture its bytes before apply; prove
+that a free slot plus a valid selected expired lease is quarantined under the
+reconciler's held slot; and invoke apply with duplicate, malformed, and omitted
+target IDs. The rejected-input cases must return a bounded blocked or usage
+result and preserve every ticket, lease, and counter byte.
 
 Run: `cargo test --locked reconciliation_apply -- --nocapture`
 
