@@ -14,12 +14,15 @@
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -591,12 +594,7 @@ impl AdmissionCoordinator {
                 .root
                 .join(TICKETS_DIR)
                 .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"));
-            validate_regular(&path).map_err(AdmissionReconciliationError::Admission)?;
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .map_err(|_| AdmissionReconciliationError::Blocked("unknown_ticket"))?;
+            let mut file = open_selected_ticket(&path)?;
             match file.try_lock_exclusive() {
                 Ok(()) => {}
                 Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
@@ -608,7 +606,7 @@ impl AdmissionCoordinator {
                     ));
                 }
             }
-            let marker = read_ticket(&path).map_err(AdmissionReconciliationError::Admission)?;
+            let marker = read_ticket_from_descriptor(&mut file, &path)?;
             if marker.owner != "commit-ci-preflight"
                 || marker.purpose != "host-admission-ticket"
                 || marker.schema_version != ADMISSION_SCHEMA_VERSION
@@ -1633,6 +1631,81 @@ fn read_ticket(path: &Path) -> Result<TicketMarker, AdmissionError> {
     serde_json::from_slice(&bytes).map_err(|_| AdmissionError::MalformedTicket(path.to_path_buf()))
 }
 
+fn open_selected_ticket(path: &Path) -> Result<File, AdmissionReconciliationError> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        const O_NOFOLLOW: i32 = if cfg!(target_os = "macos") {
+            0x100
+        } else {
+            0x20000
+        };
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(path)
+            .map_err(|source| {
+                let symlink = fs::symlink_metadata(path)
+                    .map(|metadata| metadata.file_type().is_symlink())
+                    .unwrap_or(false);
+                if source.kind() == io::ErrorKind::TooManyLinks || symlink {
+                    AdmissionReconciliationError::Blocked("unsafe_selected_ticket")
+                } else {
+                    AdmissionReconciliationError::Admission(AdmissionError::Io {
+                        path: path.to_path_buf(),
+                        source,
+                    })
+                }
+            })?;
+        if !file
+            .metadata()
+            .map_err(|source| {
+                AdmissionReconciliationError::Admission(AdmissionError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            })?
+            .is_file()
+        {
+            return Err(AdmissionReconciliationError::Blocked(
+                "unsafe_selected_ticket",
+            ));
+        }
+        Ok(file)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = path;
+        Err(AdmissionReconciliationError::Blocked(
+            "unsupported_selected_ticket_open",
+        ))
+    }
+}
+
+fn read_ticket_from_descriptor(
+    file: &mut File,
+    path: &Path,
+) -> Result<TicketMarker, AdmissionReconciliationError> {
+    file.seek(std::io::SeekFrom::Start(0))
+        .and_then(|_| {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).map(|_| bytes)
+        })
+        .map_err(|source| {
+            AdmissionReconciliationError::Admission(AdmissionError::Io {
+                path: path.to_path_buf(),
+                source,
+            })
+        })
+        .and_then(|bytes| {
+            serde_json::from_slice(&bytes).map_err(|_| {
+                AdmissionReconciliationError::Admission(AdmissionError::MalformedTicket(
+                    path.to_path_buf(),
+                ))
+            })
+        })
+}
+
 fn read_lease(path: &Path) -> Result<LeaseMarker, AdmissionError> {
     let bytes = fs::read(path).map_err(|source| AdmissionError::Io {
         path: path.to_path_buf(),
@@ -2381,6 +2454,32 @@ mod tests {
             )
             .expect("follow-up apply");
         assert_eq!(follow_up.outcomes, vec![outcome(first, "quarantined")]);
+    }
+
+    #[test]
+    fn reconciliation_apply_rejects_selected_symlink_without_mutation() {
+        let c = coordinator("reconcile-selected-symlink");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000016";
+        let path = fixture_ticket(&c, id, valid_marker(id));
+        fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
+        write_lease_fixture(&c, id, "active", 1, 1);
+        let lease_before = fs::read(c.lease_path(id)).expect("lease");
+        fs::remove_file(&path).expect("remove ticket");
+        std::os::unix::fs::symlink(c.root().join(OWNER_FILE), &path).expect("symlink");
+        let result = c.reconcile_apply_with_timeout(
+            &[id.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert!(matches!(
+            result,
+            Err(AdmissionReconciliationError::Blocked(
+                "unsafe_selected_ticket"
+            ))
+        ));
+        assert!(path.is_symlink());
+        assert_eq!(lease_before, fs::read(c.lease_path(id)).expect("lease"));
     }
 
     fn wait_for_ticket_count(root: &Path, expected: usize) {
