@@ -247,9 +247,9 @@ struct StaleTicket {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReconciliationSyncPoint {
-    LeaseDirectory,
-    TicketsDirectory,
-    QuarantineDirectory,
+    Lease,
+    Tickets,
+    Quarantine,
 }
 
 #[cfg(test)]
@@ -338,7 +338,7 @@ impl ReconciliationApplyLocks {
 
     fn release_all(&mut self) -> Option<&'static str> {
         let mut first_error = None;
-        for (file, _, ..) in self.tickets.drain(..) {
+        for (file, _, _, _) in self.tickets.drain(..) {
             if FileExt::unlock(&file).is_err() && first_error.is_none() {
                 first_error = Some("ticket_unlock_failed");
             }
@@ -999,7 +999,7 @@ impl AdmissionCoordinator {
                 && self
                     .sync_reconciliation_directory(
                         &self.root.join(LEASES_DIR),
-                        ReconciliationSyncPoint::LeaseDirectory,
+                        ReconciliationSyncPoint::Lease,
                         index + 1,
                     )
                     .is_err()
@@ -1055,7 +1055,7 @@ impl AdmissionCoordinator {
             if self
                 .sync_reconciliation_directory(
                     &self.root.join(TICKETS_DIR),
-                    ReconciliationSyncPoint::TicketsDirectory,
+                    ReconciliationSyncPoint::Tickets,
                     index + 1,
                 )
                 .is_err()
@@ -1065,7 +1065,7 @@ impl AdmissionCoordinator {
             if self
                 .sync_reconciliation_directory(
                     &self.root.join(QUARANTINE_DIR),
-                    ReconciliationSyncPoint::QuarantineDirectory,
+                    ReconciliationSyncPoint::Quarantine,
                     index + 1,
                 )
                 .is_err()
@@ -3198,7 +3198,7 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(path.exists());
-        assert_eq!(fs::read(c.lease_path(id)).is_err(), true);
+        assert!(fs::read(c.lease_path(id)).is_err());
         assert_eq!(retained_after_change, tree_bytes(c.root()));
     }
 
@@ -3397,7 +3397,7 @@ mod tests {
         let second_before = fs::read(&second_path).expect("second ticket");
         let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
         let protected = ReconciliationProtectedState::capture(&c, unselected);
-        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::LeaseDirectory, 1);
+        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::Lease, 1);
 
         let result = c.reconcile_apply_with_timeout(
             &[second.to_owned(), first.to_owned()],
@@ -3439,7 +3439,7 @@ mod tests {
         let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
         let protected = ReconciliationProtectedState::capture(&c, unselected);
         c.set_reconciliation_quarantine_suffix("ticket-sync-failure");
-        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::TicketsDirectory, 1);
+        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::Tickets, 1);
 
         let result = c.reconcile_apply_with_timeout(
             &[first.to_owned(), second.to_owned()],
@@ -3481,7 +3481,7 @@ mod tests {
         let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
         let protected = ReconciliationProtectedState::capture(&c, unselected);
         c.set_reconciliation_quarantine_suffix("quarantine-sync-failure");
-        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::QuarantineDirectory, 1);
+        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::Quarantine, 1);
 
         let result = c.reconcile_apply_with_timeout(
             &[second.to_owned(), first.to_owned()],
@@ -3940,7 +3940,7 @@ mod tests {
         let third_lease = fs::read(c.lease_path(third)).expect("third lease");
         let protected = ReconciliationProtectedState::capture(&c, unselected);
         c.set_reconciliation_quarantine_suffix("sync-failure");
-        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::QuarantineDirectory, 2);
+        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::Quarantine, 2);
 
         let result = c.reconcile_apply_with_timeout(
             &[third.to_owned(), first.to_owned(), second.to_owned()],
