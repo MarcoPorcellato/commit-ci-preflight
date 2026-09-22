@@ -1959,8 +1959,10 @@ mod tests {
 
     #[test]
     fn reconciliation_preview_absent_root_preserves_parent() {
-        let root = test_root("reconcile-absent");
-        let parent = root.parent().expect("parent").to_path_buf();
+        let parent = test_root("reconcile-absent-parent");
+        let _ = fs::remove_dir_all(&parent);
+        fs::create_dir_all(&parent).expect("parent");
+        let root = parent.join("root");
         let metadata = fs::symlink_metadata(&parent).expect("parent metadata");
         let before = (metadata.len(), metadata.modified().expect("mtime"));
         let c = AdmissionCoordinator::test_at(root.clone());
