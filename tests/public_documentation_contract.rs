@@ -36,8 +36,10 @@ fn local_link_destinations(markdown: &str) -> Vec<String> {
 fn markdown_heading_anchors(markdown: &str) -> HashSet<String> {
     markdown
         .lines()
-        .filter_map(|line| line.strip_prefix('#'))
-        .filter(|line| line.starts_with([' ', '\t']))
+        .filter_map(|line| {
+            let heading = line.trim_start_matches('#');
+            heading.starts_with([' ', '\t']).then_some(heading)
+        })
         .map(|line| {
             line.trim()
                 .trim_end_matches('#')
@@ -196,6 +198,18 @@ fn png_dimensions_rejects_invalid_or_truncated_bytes() {
         png_dimensions(truncated_ihdr),
         Err("truncated IHDR chunk".into())
     );
+}
+
+#[test]
+fn markdown_heading_anchors_support_all_atx_levels() {
+    let anchors = markdown_heading_anchors(
+        "# Root heading\n## Second level\n### Third level!\n####not-a-heading\n",
+    );
+
+    assert!(anchors.contains("root-heading"));
+    assert!(anchors.contains("second-level"));
+    assert!(anchors.contains("third-level"));
+    assert!(!anchors.contains("not-a-heading"));
 }
 
 #[test]

@@ -13,7 +13,40 @@ The release asset is byte-integrity-verifiable, not signed. Build from a
 reviewed source commit instead when the macOS arm64 prerelease artifact does
 not fit your platform or trust requirements.
 
-## Prerequisites
+## Use the published macOS arm64 prerelease
+
+This path needs only macOS arm64, `tar`, and `shasum`. From the
+[RC.2 release page](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2),
+download both `commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz`
+and `SHA256SUMS` into an empty directory you control.
+
+```console
+cd /absolute/download/directory
+shasum -a 256 -c SHA256SUMS
+tar -xzf commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz
+cd commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin
+sed -n '1,120p' RELEASE_MANIFEST.json
+./commit-ci-preflight --version
+```
+
+The manifest identifies the release label, source commit, Cargo package
+version, target, and archive name. A matching checksum proves only byte
+integrity relative to the separately obtained checksum file; it does not sign
+the asset or prove producer identity.
+
+To make the verified binary available from a user-controlled directory, copy
+only that extracted binary after the check succeeds:
+
+```console
+install -m 0755 ./commit-ci-preflight /absolute/user-controlled/bin/commit-ci-preflight
+/absolute/user-controlled/bin/commit-ci-preflight --version
+```
+
+This does not start a daemon, alter repository settings, register a GitHub
+runner, or execute project checks. Do not replace a separately qualified CCP
+installation without its own rollback and authorization procedure.
+
+## Prerequisites for source builds and complete local runs
 
 - Git;
 - Rust 1.87 or newer, with the repository-pinned toolchain recommended;
@@ -25,7 +58,7 @@ qualification is recorded in
 [`evidence/pr09/`](evidence/pr09/README.md). That benchmark evidence does not
 claim that every runtime path is qualified on every platform.
 
-## Install from a reviewed source checkout
+## Alternative: install from a reviewed source checkout
 
 Clone and inspect the exact commit before installing:
 

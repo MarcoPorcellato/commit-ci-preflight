@@ -92,13 +92,15 @@ repository decision.
 
 ## Quick start
 
-Adopting CCP in another repository? Start with the
-[complete adoption guide](docs/ADOPTION_GUIDE.md). It covers what remains on
-GitHub, persistent cache setup, configuration and policy authoring, OrbStack or
-Docker-compatible execution, exact-commit receipts, the cross-repository gate,
-safe rollout, and rollback.
+### 1. Verify the published macOS arm64 prerelease
 
-### 1. Five-minute source inspection
+On macOS arm64, start with the [published release asset, checksum, manifest,
+and direct invocation](docs/INSTALLATION.md#use-the-published-macos-arm64-prerelease).
+It is unsigned and prerelease-only; the guide explains exactly what the
+checksum does and does not prove. For other platforms or stricter trust needs,
+use the reviewed-source alternative instead.
+
+### 2. Five-minute source inspection
 
 ```console
 git clone https://github.com/MarcoPorcellato/commit-ci-preflight.git
@@ -136,7 +138,7 @@ memory and 3 GiB reclaimable uncompressed memory. Static swap occupancy is a
 companion pressure signal rather than an independent veto; details and the
 watchdog boundary are in the local run contract.
 
-### 2. Run the clean-room demo
+### 3. Run the clean-room demo
 
 Follow the [end-to-end tutorial](docs/TUTORIAL.md). It copies a tiny public Rust
 fixture into its own Git repository, runs its test through a pinned container,
@@ -145,6 +147,12 @@ repository policy.
 
 For installation, checksum verification, and local candidate archives, see
 [the installation guide](docs/INSTALLATION.md).
+
+Adopting CCP in another repository? Continue with the
+[complete adoption guide](docs/ADOPTION_GUIDE.md). It covers what remains on
+GitHub, persistent cache setup, configuration and policy authoring, OrbStack or
+Docker-compatible execution, exact-commit receipts, the cross-repository gate,
+safe rollout, and rollback.
 
 ## Repository CI policy
 

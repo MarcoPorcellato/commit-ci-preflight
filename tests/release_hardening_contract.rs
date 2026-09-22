@@ -73,6 +73,7 @@ fn public_readme_is_human_first_and_truthfully_differentiated() {
     assert!(README.contains("Run heavy CI locally. Prove the exact commit on GitHub."));
     assert!(README.contains("## Is CCP for this repository?"));
     assert!(README.contains("## Start here"));
+    assert!(README.contains("Verify the published macOS arm64 prerelease"));
     for path in ["Evaluate cost", "Try safely", "Adopt CCP"] {
         assert!(README.contains(path), "missing README entry path: {path}");
     }
@@ -201,6 +202,11 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     ));
     assert!(INSTALLATION.contains("published GitHub prerelease"));
     assert!(INSTALLATION.contains("unsigned macOS arm64 archive"));
+    assert!(INSTALLATION.contains("## Use the published macOS arm64 prerelease"));
+    assert!(INSTALLATION.contains("commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz"));
+    assert!(INSTALLATION.contains("./commit-ci-preflight --version"));
+    assert!(INSTALLATION.contains("install -m 0755"));
+    assert!(INSTALLATION.contains("## Alternative: install from a reviewed source checkout"));
     assert!(INSTALLATION.contains("There is no crate, Homebrew"));
     assert!(INSTALLATION.contains("or signed artifact"));
     assert!(INSTALLATION.contains("--release-label v0.1.0-rc.2"));
