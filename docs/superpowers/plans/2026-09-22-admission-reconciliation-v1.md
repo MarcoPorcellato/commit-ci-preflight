@@ -135,7 +135,9 @@ retain slot lock. Open/lock every requested ticket, reread ticket and lease
 under locks, and reject the whole request for unknown, held, active/future,
 foreign, malformed, unsafe, lease-only residue, or contradictory state. A
 selected owned ticket without a matching lease is eligible; a lease-only
-residue is not.
+residue is not. On Unix, open each selected ticket with an atomic no-follow
+flag and parse it from the locked descriptor; on other platforms, fail closed
+unless the same guarantee can be established.
 
 - [ ] **Step 4: Write and run lock RED/GREEN tests.**
 
