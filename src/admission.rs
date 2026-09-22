@@ -294,8 +294,11 @@ impl ReconciliationTestGate {
 struct ReconciliationTestControls {
     after_exclusion: std::sync::Mutex<Option<std::sync::Arc<ReconciliationTestGate>>>,
     after_selected_descriptors: std::sync::Mutex<Option<std::sync::Arc<ReconciliationTestGate>>>,
+    after_lease_removal: std::sync::Mutex<Option<(usize, std::sync::Arc<ReconciliationTestGate>)>>,
     fail_move_on_attempt: std::sync::atomic::AtomicUsize,
     move_attempts: std::sync::atomic::AtomicUsize,
+    fail_lease_remove_on_attempt: std::sync::atomic::AtomicUsize,
+    lease_remove_attempts: std::sync::atomic::AtomicUsize,
     fail_sync_on: std::sync::Mutex<Option<(ReconciliationSyncPoint, usize)>>,
     quarantine_suffix: std::sync::Mutex<Option<String>>,
 }
@@ -363,6 +366,19 @@ impl AdmissionCoordinator {
     }
 
     #[cfg(test)]
+    fn set_reconciliation_after_lease_removal_gate(
+        &self,
+        ticket_ordinal: usize,
+        gate: std::sync::Arc<ReconciliationTestGate>,
+    ) {
+        *self
+            .reconciliation_test_controls
+            .after_lease_removal
+            .lock()
+            .expect("reconciliation lease-removal gate lock") = Some((ticket_ordinal, gate));
+    }
+
+    #[cfg(test)]
     fn reach_reconciliation_gate(&self, point: ReconciliationTestGatePoint) {
         let target = match point {
             ReconciliationTestGatePoint::AfterExclusion => {
@@ -379,12 +395,41 @@ impl AdmissionCoordinator {
     }
 
     #[cfg(test)]
+    fn reach_reconciliation_after_lease_removal_gate(&self, ticket_ordinal: usize) {
+        let gate = {
+            let mut target = self
+                .reconciliation_test_controls
+                .after_lease_removal
+                .lock()
+                .expect("reconciliation lease-removal gate lock");
+            if target.as_ref().map(|(ordinal, _)| *ordinal) == Some(ticket_ordinal) {
+                target.take().map(|(_, gate)| gate)
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.stop();
+        }
+    }
+
+    #[cfg(test)]
     fn fail_reconciliation_move_on_attempt(&self, attempt: usize) {
         self.reconciliation_test_controls
             .move_attempts
             .store(0, Ordering::SeqCst);
         self.reconciliation_test_controls
             .fail_move_on_attempt
+            .store(attempt, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    fn fail_reconciliation_lease_remove_on_attempt(&self, attempt: usize) {
+        self.reconciliation_test_controls
+            .lease_remove_attempts
+            .store(0, Ordering::SeqCst);
+        self.reconciliation_test_controls
+            .fail_lease_remove_on_attempt
             .store(attempt, Ordering::SeqCst);
     }
 
@@ -703,10 +748,22 @@ impl AdmissionCoordinator {
         let mut queue = self.lock_queue_until(&deadline, cancellation)?;
         let slot_path = self.root.join(SLOT_LOCK);
         let slot = match open_existing_lock_file(&slot_path)? {
-            Some(file) => {
-                lock_exclusive_until(&file, &slot_path, &deadline, cancellation)?;
-                file
-            }
+            Some(file) => match file.try_lock_exclusive() {
+                Ok(()) => file,
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    unlock(&mut queue)?;
+                    return Err(AdmissionReconciliationError::Blocked("slot_busy"));
+                }
+                Err(source) => {
+                    unlock(&mut queue)?;
+                    return Err(AdmissionReconciliationError::Admission(
+                        AdmissionError::Lock {
+                            path: slot_path,
+                            source,
+                        },
+                    ));
+                }
+            },
             None => {
                 unlock(&mut queue)?;
                 return Err(AdmissionReconciliationError::Blocked("missing_slot_lock"));
@@ -845,7 +902,7 @@ impl AdmissionCoordinator {
             }
 
             let lease_path = self.lease_path(id);
-            let lease_removed = match fs::remove_file(&lease_path) {
+            let lease_removed = match self.remove_reconciliation_lease(&lease_path) {
                 Ok(()) => true,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => false,
                 Err(source) => {
@@ -860,6 +917,10 @@ impl AdmissionCoordinator {
                     partial!(index, "lease_remove_failed", "partial_lease_remove_failed");
                 }
             };
+            #[cfg(test)]
+            if lease_removed {
+                self.reach_reconciliation_after_lease_removal_gate(index + 1);
+            }
             if lease_removed
                 && self
                     .sync_reconciliation_directory(
@@ -1427,6 +1488,26 @@ impl AdmissionCoordinator {
                 .join(format!("{}.{}", name.to_string_lossy(), suffix));
         let _ = ticket_ordinal;
         atomic_rename_no_replace(path, &destination)
+    }
+
+    fn remove_reconciliation_lease(&self, path: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            let attempt = self
+                .reconciliation_test_controls
+                .lease_remove_attempts
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
+            if self
+                .reconciliation_test_controls
+                .fail_lease_remove_on_attempt
+                .compare_exchange(attempt, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Err(io::Error::other("injected lease removal failure"));
+            }
+        }
+        fs::remove_file(path)
     }
 
     fn sync_reconciliation_directory(
@@ -2816,10 +2897,13 @@ mod tests {
         c.initialize().expect("initialize");
         let id = "00000000000000000021";
         let path = fixture_ticket(&c, id, valid_marker(id));
-        let before = tree_bytes(c.root());
+        let before_preview = tree_bytes(c.root());
         c.reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
             .expect("preview");
+        assert_eq!(before_preview, tree_bytes(c.root()));
         fs::write(&path, b"changed").expect("change");
+        let retained_after_change = tree_bytes(c.root());
+        assert_ne!(before_preview, retained_after_change);
         let result = c.reconcile_apply_with_timeout(
             &[id.to_owned()],
             Duration::from_secs(1),
@@ -2828,7 +2912,7 @@ mod tests {
         assert!(result.is_err());
         assert!(path.exists());
         assert_eq!(fs::read(c.lease_path(id)).is_err(), true);
-        let _ = before;
+        assert_eq!(retained_after_change, tree_bytes(c.root()));
     }
 
     fn outcome(ticket_id: &str, classification: &str) -> AdmissionReconciliationOutcomeV1 {
@@ -2842,6 +2926,397 @@ mod tests {
         let path = fixture_ticket(coordinator, id, valid_marker(id));
         write_lease_fixture(coordinator, id, "active", 1, 1);
         path
+    }
+
+    struct ReconciliationProtectedState {
+        files: Vec<(PathBuf, Vec<u8>)>,
+    }
+
+    impl ReconciliationProtectedState {
+        fn capture(coordinator: &AdmissionCoordinator, unselected_id: &str) -> Self {
+            fs::write(coordinator.root().join(NEXT_TICKET), b"77\n").expect("counter");
+            let unselected_ticket = expired_ticket(coordinator, unselected_id);
+            let journal = coordinator.root().with_extension("journal-sentinel");
+            let cache = coordinator.root().with_extension("cache-sentinel");
+            fs::write(&journal, b"journal unchanged").expect("journal sentinel");
+            fs::write(&cache, b"cache unchanged").expect("cache sentinel");
+            let files = [
+                coordinator.root().join(NEXT_TICKET),
+                journal,
+                cache,
+                unselected_ticket,
+                coordinator.lease_path(unselected_id),
+            ]
+            .into_iter()
+            .map(|path| {
+                let bytes = fs::read(&path).expect("protected bytes");
+                (path, bytes)
+            })
+            .collect();
+            Self { files }
+        }
+
+        fn assert_unchanged(&self) {
+            for (path, expected) in &self.files {
+                assert_eq!(&fs::read(path).expect("retained protected bytes"), expected);
+            }
+        }
+    }
+
+    fn assert_reconciliation_locks_reusable(
+        coordinator: &AdmissionCoordinator,
+        ticket_paths: &[&Path],
+    ) {
+        for path in [
+            coordinator.root().join(QUEUE_LOCK),
+            coordinator.root().join(SLOT_LOCK),
+        ] {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("open reusable coordinator lock");
+            file.try_lock_exclusive()
+                .expect("coordinator lock reusable");
+            FileExt::unlock(&file).expect("unlock reusable coordinator lock");
+        }
+        for path in ticket_paths {
+            if path.exists() {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .expect("open retained ticket");
+                file.try_lock_exclusive().expect("ticket lock reusable");
+                FileExt::unlock(&file).expect("unlock retained ticket");
+            }
+        }
+    }
+
+    #[test]
+    fn reconciliation_injected_lease_remove_failure_before_mutation_preserves_everything() {
+        let c = coordinator("reconcile-lease-remove-pre-mutation-round5");
+        c.initialize().expect("initialize");
+        let selected = "00000000000000000043";
+        let unselected = "00000000000000000044";
+        let selected_path = expired_ticket(&c, selected);
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
+        let before = tree_bytes(c.root());
+        c.fail_reconciliation_lease_remove_on_attempt(1);
+
+        let result = c.reconcile_apply_with_timeout(
+            &[selected.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(AdmissionReconciliationError::Admission(
+                AdmissionError::Io { .. }
+            ))
+        ));
+        assert_eq!(before, tree_bytes(c.root()));
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&selected_path]);
+    }
+
+    #[test]
+    fn reconciliation_injected_lease_remove_failure_after_success_is_canonical_partial() {
+        let c = coordinator("reconcile-lease-remove-partial-round5");
+        c.initialize().expect("initialize");
+        let first = "00000000000000000045";
+        let second = "00000000000000000046";
+        let third = "00000000000000000047";
+        let unselected = "00000000000000000048";
+        expired_ticket(&c, first);
+        let second_path = expired_ticket(&c, second);
+        let third_path = expired_ticket(&c, third);
+        let second_before = fs::read(&second_path).expect("second ticket");
+        let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
+        let third_before = fs::read(&third_path).expect("third ticket");
+        let third_lease_before = fs::read(c.lease_path(third)).expect("third lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
+        c.fail_reconciliation_lease_remove_on_attempt(2);
+
+        let result = c.reconcile_apply_with_timeout(
+            &[third.to_owned(), first.to_owned(), second.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+
+        match result {
+            Err(AdmissionReconciliationError::Partial { reason, report }) => {
+                assert_eq!(reason, "lease_remove_failed");
+                assert_eq!(
+                    report.outcomes,
+                    vec![
+                        outcome(first, "quarantined"),
+                        outcome(second, "partial_lease_remove_failed"),
+                        outcome(third, "not_attempted"),
+                    ]
+                );
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+        assert_eq!(
+            fs::read(&second_path).expect("second retained"),
+            second_before
+        );
+        assert_eq!(
+            fs::read(c.lease_path(second)).expect("second lease retained"),
+            second_lease_before
+        );
+        assert_eq!(fs::read(&third_path).expect("third retained"), third_before);
+        assert_eq!(
+            fs::read(c.lease_path(third)).expect("third lease retained"),
+            third_lease_before
+        );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&second_path, &third_path]);
+    }
+
+    fn assert_two_target_partial(
+        result: Result<AdmissionReconciliationApplyReportV1, AdmissionReconciliationError>,
+        reason_expected: &str,
+        first_id: &str,
+        first_classification: &str,
+        second_id: &str,
+    ) {
+        match result {
+            Err(AdmissionReconciliationError::Partial { reason, report }) => {
+                assert_eq!(reason, reason_expected);
+                assert_eq!(
+                    report.outcomes,
+                    vec![
+                        outcome(first_id, first_classification),
+                        outcome(second_id, "not_attempted"),
+                    ]
+                );
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconciliation_injected_lease_directory_sync_failure_is_canonical_partial() {
+        let c = coordinator("reconcile-lease-sync-round5");
+        c.initialize().expect("initialize");
+        let first = "00000000000000000049";
+        let second = "00000000000000000050";
+        let unselected = "00000000000000000051";
+        let first_path = expired_ticket(&c, first);
+        let second_path = expired_ticket(&c, second);
+        let second_before = fs::read(&second_path).expect("second ticket");
+        let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
+        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::LeaseDirectory, 1);
+
+        let result = c.reconcile_apply_with_timeout(
+            &[second.to_owned(), first.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+
+        assert_two_target_partial(
+            result,
+            "lease_sync_failed",
+            first,
+            "partial_lease_sync_failed",
+            second,
+        );
+        assert!(first_path.exists());
+        assert!(!c.lease_path(first).exists());
+        assert_eq!(
+            fs::read(&second_path).expect("second retained"),
+            second_before
+        );
+        assert_eq!(
+            fs::read(c.lease_path(second)).expect("second lease retained"),
+            second_lease_before
+        );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&first_path, &second_path]);
+    }
+
+    #[test]
+    fn reconciliation_injected_tickets_directory_sync_failure_is_canonical_partial() {
+        let c = coordinator("reconcile-ticket-sync-round5");
+        c.initialize().expect("initialize");
+        let first = "00000000000000000052";
+        let second = "00000000000000000053";
+        let unselected = "00000000000000000054";
+        let first_path = expired_ticket(&c, first);
+        let second_path = expired_ticket(&c, second);
+        let second_before = fs::read(&second_path).expect("second ticket");
+        let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
+        c.set_reconciliation_quarantine_suffix("ticket-sync-failure");
+        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::TicketsDirectory, 1);
+
+        let result = c.reconcile_apply_with_timeout(
+            &[first.to_owned(), second.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+
+        assert_two_target_partial(
+            result,
+            "ticket_sync_failed",
+            first,
+            "partial_ticket_sync_failed",
+            second,
+        );
+        assert!(!first_path.exists());
+        assert!(!c.lease_path(first).exists());
+        assert_eq!(
+            fs::read(&second_path).expect("second retained"),
+            second_before
+        );
+        assert_eq!(
+            fs::read(c.lease_path(second)).expect("second lease retained"),
+            second_lease_before
+        );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&second_path]);
+    }
+
+    #[test]
+    fn reconciliation_injected_quarantine_directory_sync_failure_is_canonical_partial() {
+        let c = coordinator("reconcile-quarantine-sync-round5");
+        c.initialize().expect("initialize");
+        let first = "00000000000000000055";
+        let second = "00000000000000000056";
+        let unselected = "00000000000000000057";
+        let first_path = expired_ticket(&c, first);
+        let second_path = expired_ticket(&c, second);
+        let second_before = fs::read(&second_path).expect("second ticket");
+        let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
+        c.set_reconciliation_quarantine_suffix("quarantine-sync-failure");
+        c.fail_reconciliation_sync_on(ReconciliationSyncPoint::QuarantineDirectory, 1);
+
+        let result = c.reconcile_apply_with_timeout(
+            &[second.to_owned(), first.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+
+        assert_two_target_partial(
+            result,
+            "quarantine_sync_failed",
+            first,
+            "partial_quarantine_sync_failed",
+            second,
+        );
+        assert!(!first_path.exists());
+        assert!(!c.lease_path(first).exists());
+        assert_eq!(
+            fs::read(&second_path).expect("second retained"),
+            second_before
+        );
+        assert_eq!(
+            fs::read(c.lease_path(second)).expect("second lease retained"),
+            second_lease_before
+        );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&second_path]);
+    }
+
+    #[test]
+    fn reconciliation_cancellation_after_lease_removal_is_canonical_partial() {
+        let c = coordinator("reconcile-cancel-after-mutation-round5");
+        c.initialize().expect("initialize");
+        let first = "00000000000000000058";
+        let second = "00000000000000000059";
+        let unselected = "00000000000000000060";
+        let first_path = expired_ticket(&c, first);
+        let second_path = expired_ticket(&c, second);
+        let second_before = fs::read(&second_path).expect("second ticket");
+        let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
+        let gate = Arc::new(ReconciliationTestGate::new());
+        c.set_reconciliation_after_lease_removal_gate(1, gate.clone());
+        let cancellation = CancellationToken::default();
+        let worker_c = c.clone();
+        let worker_cancel = cancellation.clone();
+        let worker = thread::spawn(move || {
+            worker_c.reconcile_apply_with_timeout(
+                &[first.to_owned(), second.to_owned()],
+                Duration::from_secs(1),
+                &worker_cancel,
+            )
+        });
+        gate.wait_until_reached();
+        cancellation.cancel();
+        gate.release();
+
+        assert_two_target_partial(
+            worker.join().expect("reconciler"),
+            "cancelled",
+            first,
+            "partial_after_lease_removal",
+            second,
+        );
+        assert!(first_path.exists());
+        assert!(!c.lease_path(first).exists());
+        assert_eq!(
+            fs::read(&second_path).expect("second retained"),
+            second_before
+        );
+        assert_eq!(
+            fs::read(c.lease_path(second)).expect("second lease retained"),
+            second_lease_before
+        );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&first_path, &second_path]);
+    }
+
+    #[test]
+    fn reconciliation_timeout_after_lease_removal_is_canonical_partial() {
+        let c = coordinator("reconcile-timeout-after-mutation-round5");
+        c.initialize().expect("initialize");
+        let first = "00000000000000000061";
+        let second = "00000000000000000062";
+        let unselected = "00000000000000000063";
+        let first_path = expired_ticket(&c, first);
+        let second_path = expired_ticket(&c, second);
+        let second_before = fs::read(&second_path).expect("second ticket");
+        let second_lease_before = fs::read(c.lease_path(second)).expect("second lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
+        let gate = Arc::new(ReconciliationTestGate::new());
+        c.set_reconciliation_after_lease_removal_gate(1, gate.clone());
+        let worker_c = c.clone();
+        let worker = thread::spawn(move || {
+            worker_c.reconcile_apply_with_timeout(
+                &[first.to_owned(), second.to_owned()],
+                Duration::from_millis(80),
+                &CancellationToken::default(),
+            )
+        });
+        gate.wait_until_reached();
+        thread::sleep(Duration::from_millis(120));
+        gate.release();
+
+        assert_two_target_partial(
+            worker.join().expect("reconciler"),
+            "timeout",
+            first,
+            "partial_after_lease_removal",
+            second,
+        );
+        assert!(first_path.exists());
+        assert!(!c.lease_path(first).exists());
+        assert_eq!(
+            fs::read(&second_path).expect("second retained"),
+            second_before
+        );
+        assert_eq!(
+            fs::read(c.lease_path(second)).expect("second lease retained"),
+            second_lease_before
+        );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&first_path, &second_path]);
     }
 
     #[test]
@@ -2930,15 +3405,53 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_active_guard_busy_slot_blocks_immediately_and_preserves_reuse() {
+        let c = coordinator("reconcile-active-guard-round5");
+        let guard = c
+            .acquire(Duration::from_secs(1), &CancellationToken::default())
+            .expect("active guard");
+        let active_id = guard.ticket_id().to_owned();
+        let unselected = "00000000000000000066";
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
+        let before = tree_bytes(c.root());
+        let started = Instant::now();
+
+        let result = c.reconcile_apply_with_timeout(
+            &[active_id],
+            Duration::from_secs(2),
+            &CancellationToken::default(),
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "busy slot must not be waited on while queue lock is held"
+        );
+        assert!(matches!(
+            result,
+            Err(AdmissionReconciliationError::Blocked("slot_busy"))
+        ));
+        assert_eq!(before, tree_bytes(c.root()));
+        protected.assert_unchanged();
+        guard.release().expect("active guard release");
+        let unselected_path = c
+            .root()
+            .join(TICKETS_DIR)
+            .join(format!("{TICKET_PREFIX}{unselected}{TICKET_SUFFIX}"));
+        assert_reconciliation_locks_reusable(&c, &[&unselected_path]);
+    }
+
+    #[test]
     fn reconciliation_rechecks_every_selected_identity_before_first_mutation() {
         let c = coordinator("reconcile-all-identities-round4");
         c.initialize().expect("initialize");
         let first = "00000000000000000032";
         let second = "00000000000000000033";
+        let unselected = "00000000000000000067";
         let first_path = expired_ticket(&c, first);
         let second_path = expired_ticket(&c, second);
         let first_lease = fs::read(c.lease_path(first)).expect("first lease");
         let second_lease = fs::read(c.lease_path(second)).expect("second lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
         let gate = Arc::new(ReconciliationTestGate::new());
         c.set_reconciliation_gate(
             ReconciliationTestGatePoint::AfterSelectedDescriptors,
@@ -2984,6 +3497,8 @@ mod tests {
                 .count(),
             0
         );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&first_path, &second_path]);
 
         let retry = c
             .reconcile_apply_with_timeout(
@@ -2999,6 +3514,7 @@ mod tests {
                 outcome(second, "quarantined")
             ]
         );
+        protected.assert_unchanged();
     }
 
     #[test]
@@ -3008,6 +3524,7 @@ mod tests {
         let first = "00000000000000000034";
         let second = "00000000000000000035";
         let third = "00000000000000000036";
+        let unselected = "00000000000000000064";
         expired_ticket(&c, first);
         let second_path = expired_ticket(&c, second);
         let third_path = expired_ticket(&c, third);
@@ -3021,6 +3538,7 @@ mod tests {
         ));
         fs::write(&collision, b"preserve collision evidence").expect("collision fixture");
         let third_lease = fs::read(c.lease_path(third)).expect("third lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
 
         let result = c.reconcile_apply_with_timeout(
             &[third.to_owned(), first.to_owned(), second.to_owned()],
@@ -3053,6 +3571,8 @@ mod tests {
             fs::read(c.lease_path(third)).expect("third lease"),
             third_lease
         );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&second_path, &third_path]);
     }
 
     #[test]
@@ -3062,10 +3582,12 @@ mod tests {
         let first = "00000000000000000037";
         let second = "00000000000000000038";
         let third = "00000000000000000039";
+        let unselected = "00000000000000000065";
         expired_ticket(&c, first);
         let second_path = expired_ticket(&c, second);
         let third_path = expired_ticket(&c, third);
         let third_lease = fs::read(c.lease_path(third)).expect("third lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
         c.fail_reconciliation_move_on_attempt(2);
 
         let result = c.reconcile_apply_with_timeout(
@@ -3095,6 +3617,8 @@ mod tests {
             fs::read(c.lease_path(third)).expect("third lease"),
             third_lease
         );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&second_path, &third_path]);
 
         let retry = c
             .reconcile_apply_with_timeout(
@@ -3110,6 +3634,7 @@ mod tests {
                 outcome(third, "quarantined")
             ]
         );
+        protected.assert_unchanged();
     }
 
     #[test]
@@ -3119,10 +3644,12 @@ mod tests {
         let first = "00000000000000000040";
         let second = "00000000000000000041";
         let third = "00000000000000000042";
+        let unselected = "00000000000000000068";
         expired_ticket(&c, first);
         let second_path = expired_ticket(&c, second);
         let third_path = expired_ticket(&c, third);
         let third_lease = fs::read(c.lease_path(third)).expect("third lease");
+        let protected = ReconciliationProtectedState::capture(&c, unselected);
         c.set_reconciliation_quarantine_suffix("sync-failure");
         c.fail_reconciliation_sync_on(ReconciliationSyncPoint::QuarantineDirectory, 2);
 
@@ -3165,6 +3692,8 @@ mod tests {
             fs::read(c.lease_path(third)).expect("third lease"),
             third_lease
         );
+        protected.assert_unchanged();
+        assert_reconciliation_locks_reusable(&c, &[&third_path]);
 
         assert_eq!(
             c.reconcile_apply_with_timeout(
@@ -3176,6 +3705,7 @@ mod tests {
             .outcomes,
             vec![outcome(third, "quarantined")]
         );
+        protected.assert_unchanged();
     }
 
     #[test]
