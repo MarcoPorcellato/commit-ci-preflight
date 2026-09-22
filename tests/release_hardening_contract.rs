@@ -243,7 +243,8 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     ));
     assert!(!TUTORIAL.contains("cargo build --locked"));
     assert!(TUTORIAL.contains("does not prove who ran the command"));
-    assert!(CHANGELOG.contains("Corrected public documentation to describe the published"));
+    assert!(CHANGELOG.contains("## [0.1.0-rc.3]"));
+    assert!(CHANGELOG.contains("## [0.1.0-rc.2]"));
     for stale_claim in [
         "planned GitHub prerelease candidate",
         "not published until a separate owner authorization",
@@ -259,6 +260,41 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
         assert!(
             !BETA_SUPPORT.contains(stale_claim),
             "beta support guide still contains stale release claim: {stale_claim}"
+        );
+    }
+}
+
+#[test]
+fn rc3_notes_describe_only_merged_scope_and_preserve_prerelease_boundaries() {
+    let rc3 = CHANGELOG
+        .split("## [0.1.0-rc.3]")
+        .nth(1)
+        .and_then(|section| section.split("## [").next())
+        .expect("RC.3 release-note section");
+
+    for expected in [
+        "clearer public onboarding",
+        "checksum-first installation guidance",
+        "explicit admission reconciliation",
+        "unsigned macOS arm64 prerelease archive",
+        "checksum-verifiable",
+        "not a publisher identity attestation",
+    ] {
+        assert!(rc3.contains(expected), "RC.3 notes missing: {expected}");
+    }
+    for forbidden in [
+        "PR #64",
+        "PR #74",
+        "is a signed release",
+        "includes a package manager channel",
+        "provides Windows runtime qualification",
+        "provides Linux runtime qualification",
+        "is stable support",
+        "guarantees savings",
+    ] {
+        assert!(
+            !rc3.contains(forbidden),
+            "RC.3 notes overclaim: {forbidden}"
         );
     }
 }

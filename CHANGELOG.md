@@ -7,11 +7,13 @@ Semantic Versioning after its first public release.
 
 ## [Unreleased]
 
+## [0.1.0-rc.3] - 2026-09-22
+
 ### Changed
 
-- Corrected public documentation to describe the published `v0.1.0-rc.2`
-  prerelease and its unsigned macOS arm64 release asset without implying a
-  package channel, signature, or broader platform qualification.
+- Improved clearer public onboarding and checksum-first installation guidance
+  without implying a package channel, signature, or broader platform
+  qualification.
 
 - Added an owner-gated read-only audit checklist for GitHub presentation
   metadata; source documentation does not change remote settings.
@@ -22,6 +24,15 @@ Semantic Versioning after its first public release.
   authorization with exact ticket IDs, bounded results, fresh post-apply status,
   Docker, and resource checks, plus journal-only recovery and trusted-local
   boundaries. Manual deletion remains unsupported.
+
+RC.3 remains an unsigned macOS arm64 prerelease archive. It is
+checksum-verifiable, not a publisher identity attestation, and does not claim
+stable support, a package manager channel, runtime qualification beyond the
+documented matrix, or guaranteed savings.
+
+## [0.1.0-rc.2] - 2026-09-22
+
+### Added
 
 - Added a source-bound `v0.1.0-rc.2` candidate-archive contract: a caller
   supplies a validated RC label, the archive includes a public release manifest,
@@ -342,5 +353,7 @@ Semantic Versioning after its first public release.
 - Made benchmark contract verification explicit about GitHub Actions metadata
   and kept versioned text contracts byte-identical across Windows checkouts.
 
-[Unreleased]: https://github.com/MarcoPorcellato/commit-ci-preflight/compare/v0.1.0-rc.1...HEAD
+[Unreleased]: https://github.com/MarcoPorcellato/commit-ci-preflight/compare/v0.1.0-rc.3...HEAD
+[0.1.0-rc.3]: https://github.com/MarcoPorcellato/commit-ci-preflight/compare/v0.1.0-rc.2...v0.1.0-rc.3
+[0.1.0-rc.2]: https://github.com/MarcoPorcellato/commit-ci-preflight/compare/v0.1.0-rc.1...v0.1.0-rc.2
 [0.1.0-rc.1]: https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.1
