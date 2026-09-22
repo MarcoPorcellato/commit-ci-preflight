@@ -616,17 +616,16 @@ impl AdmissionCoordinator {
             {
                 reject!("foreign_or_malformed_ticket");
             }
-            let lease = self
+            if let Some(lease) = self
                 .read_lease(id)
-                .map_err(AdmissionReconciliationError::Admission)?;
-            let Some(lease) = lease else {
-                reject!("lease_only_or_absent");
-            };
-            if !lease_is_semantically_valid(&lease) || lease.state != "active" {
-                reject!("invalid_lease");
-            }
-            if !lease_is_expired(&lease) {
-                reject!("live_or_future_lease");
+                .map_err(AdmissionReconciliationError::Admission)?
+            {
+                if !lease_is_semantically_valid(&lease) || lease.state != "active" {
+                    reject!("invalid_lease");
+                }
+                if !lease_is_expired(&lease) {
+                    reject!("live_or_future_lease");
+                }
             }
             locked.push((file, path));
         }
@@ -2330,6 +2329,19 @@ mod tests {
             ));
             assert_eq!(before, tree_bytes(c.root()));
         }
+    }
+
+    #[test]
+    fn reconciliation_apply_quarantines_selected_ticket_with_absent_lease() {
+        let c = coordinator("reconcile-absent-lease-apply");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000013";
+        fixture_ticket(&c, id, valid_marker(id));
+        fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
+        let result = c.reconcile_apply_with_timeout(
+            &[id.to_owned()], Duration::from_secs(1), &CancellationToken::default());
+        assert_eq!(result.expect("apply").outcomes, vec![outcome(id, "quarantined")]);
+        assert!(!c.root().join(TICKETS_DIR).join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}")).exists());
     }
 
     fn wait_for_ticket_count(root: &Path, expected: usize) {
