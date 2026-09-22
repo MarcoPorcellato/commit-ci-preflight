@@ -153,7 +153,7 @@ Apply only after separate exact authorization naming each ticket:
 
 ```console
 commit-ci-preflight admission reconcile --json
-commit-ci-preflight admission reconcile --ticket-id <ticket-id> --json
+commit-ci-preflight admission reconcile --apply --ticket-id <ticket-id> --json
 ```
 
 Apply has no implicit all-ticket mode. It validates CCP ownership and advisory

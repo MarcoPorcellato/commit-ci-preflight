@@ -300,7 +300,12 @@ fn social_preview_png_is_uploadable() {
 
 #[test]
 fn reconciliation_docs_preserve_the_no_manual_deletion_boundary() {
-    assert!(COORDINATION_RUNBOOK.contains("admission reconcile --ticket-id"));
+    let valid_apply = "admission reconcile --apply --ticket-id <ticket-id> --json";
+    let misleading_apply = "admission reconcile --ticket-id <ticket-id> --json";
+    assert!(COORDINATION_RUNBOOK.contains(valid_apply));
+    assert!(LOCAL_RUN.contains(valid_apply));
+    assert!(!COORDINATION_RUNBOOK.contains(misleading_apply));
+    assert!(!LOCAL_RUN.contains(misleading_apply));
     assert!(TROUBLESHOOTING.contains("active: false"));
     assert!(LOCAL_RUN.contains("recover status/apply"));
 }

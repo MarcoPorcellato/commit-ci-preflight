@@ -177,7 +177,7 @@ commit-ci-preflight admission reconcile --json
 Apply only after separate exact authorization naming explicit ticket IDs:
 
 ```console
-commit-ci-preflight admission reconcile --ticket-id <ticket-id> --json
+commit-ci-preflight admission reconcile --apply --ticket-id <ticket-id> --json
 ```
 
 Inspect bounded result, then run fresh `admission status --json`, `docker ps -q`,
