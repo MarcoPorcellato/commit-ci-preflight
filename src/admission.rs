@@ -60,6 +60,8 @@ const WAIT_INTERVAL: Duration = Duration::from_millis(25);
 const PROCESS_VISIBILITY_NOTE: &str =
     "No process visible in the local shell does not prove global inactivity.";
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_FAIL_NO_REPLACE_MOVE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy)]
 struct AdmissionDeadline {
@@ -1118,6 +1120,13 @@ impl AdmissionCoordinator {
     /// destination on Unix.  Use the kernel no-replace primitive; unsupported
     /// hosts fail closed rather than falling back to an overwrite-capable move.
     fn quarantine_file_no_replace(&self, path: &Path) -> io::Result<()> {
+        #[cfg(test)]
+        if TEST_FAIL_NO_REPLACE_MOVE.swap(0, Ordering::SeqCst) == 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "injected move failure",
+            ));
+        }
         let name = path
             .file_name()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ticket has no name"))?;
@@ -2536,6 +2545,64 @@ mod tests {
         fs::write(&path, b"replacement").expect("replacement");
         let current = fs::symlink_metadata(&path).expect("current");
         assert!(current.dev() != metadata.dev() || current.ino() != metadata.ino());
+    }
+
+    #[test]
+    fn reconciliation_apply_collision_returns_partial_and_preserves_bytes() {
+        let c = coordinator("reconcile-apply-collision-round3");
+        c.initialize().expect("init");
+        let id = "00000000000000000024";
+        fixture_ticket(&c, id, valid_marker(id));
+        let seq = QUARANTINE_SEQUENCE.load(Ordering::SeqCst);
+        let dest = c
+            .root()
+            .join(QUARANTINE_DIR)
+            .join(format!("ticket-{id}.json.{seq}"));
+        fs::write(&dest, b"keep").expect("collision");
+        let result = c.reconcile_apply_with_timeout(
+            &[id.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        match result {
+            Err(AdmissionReconciliationError::Partial { report, .. }) => assert_eq!(
+                report.outcomes[0].classification,
+                "partial_quarantine_collision"
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert_eq!(fs::read(dest).expect("bytes"), b"keep");
+        assert!(
+            c.root()
+                .join(TICKETS_DIR)
+                .join(format!("ticket-{id}.json"))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn reconciliation_apply_injected_move_failure_returns_partial_residual() {
+        let c = coordinator("reconcile-apply-failure-round3");
+        c.initialize().expect("init");
+        let id = "00000000000000000025";
+        fixture_ticket(&c, id, valid_marker(id));
+        TEST_FAIL_NO_REPLACE_MOVE.store(1, Ordering::SeqCst);
+        let result = c.reconcile_apply_with_timeout(
+            &[id.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        match result {
+            Ok(report) => assert_eq!(report.outcomes[0].classification, "partial_move_failed"),
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(
+            c.root()
+                .join(TICKETS_DIR)
+                .join(format!("ticket-{id}.json"))
+                .exists()
+        );
+        assert!(!c.lease_path(id).exists());
     }
 
     fn outcome(ticket_id: &str, classification: &str) -> AdmissionReconciliationOutcomeV1 {
