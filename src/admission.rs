@@ -481,12 +481,15 @@ impl AdmissionCoordinator {
                         "blocked_slot_locked"
                     } else if lease.is_none() {
                         "eligible_absent_lease"
-                    } else if lease.as_ref().is_some_and(lease_is_expired) {
-                        "eligible_expired_lease"
-                    } else if lease.as_ref().is_some_and(lease_is_semantically_valid) {
-                        "blocked_live_lease"
                     } else {
-                        "blocked_invalid_lease"
+                        match lease.as_ref() {
+                            Some(lease) if !lease_is_semantically_valid(lease) => {
+                                "blocked_invalid_lease"
+                            }
+                            Some(lease) if lease_is_expired(lease) => "eligible_expired_lease",
+                            Some(_) => "blocked_live_lease",
+                            None => unreachable!(),
+                        }
                     };
                     FileExt::unlock(&file).map_err(|source| AdmissionError::Lock {
                         path: path.clone(),
@@ -1873,7 +1876,7 @@ mod tests {
                 let metadata = fs::symlink_metadata(&path).expect("metadata");
                 if metadata.is_dir() {
                     visit(&path, root, out);
-                } else {
+                } else if metadata.is_file() {
                     out.push((
                         path.strip_prefix(root).expect("relative").to_path_buf(),
                         fs::read(&path).expect("bytes"),
@@ -1885,6 +1888,185 @@ mod tests {
         visit(root, root, &mut out);
         out.sort();
         out
+    }
+
+    fn fixture_ticket(
+        coordinator: &AdmissionCoordinator,
+        id: &str,
+        marker: TicketMarker,
+    ) -> PathBuf {
+        fs::write(coordinator.root().join(SLOT_LOCK), []).expect("slot lock");
+        let path = coordinator
+            .root()
+            .join(TICKETS_DIR)
+            .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"));
+        fs::write(&path, serde_json::to_vec(&marker).expect("marker")).expect("ticket");
+        path
+    }
+
+    fn valid_marker(id: &str) -> TicketMarker {
+        TicketMarker {
+            owner: "commit-ci-preflight".to_owned(),
+            purpose: "host-admission-ticket".to_owned(),
+            schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
+            ticket_id: id.to_owned(),
+        }
+    }
+
+    fn write_lease_fixture(
+        coordinator: &AdmissionCoordinator,
+        id: &str,
+        state: &str,
+        acquired: u64,
+        heartbeat: u64,
+    ) {
+        let lease = LeaseMarker {
+            owner: "commit-ci-preflight".to_owned(),
+            purpose: "host-admission-lease".to_owned(),
+            schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
+            owner_run_id: id.to_owned(),
+            acquired_at_unix_seconds: acquired,
+            heartbeat_at_unix_seconds: heartbeat,
+            state: state.to_owned(),
+        };
+        fs::write(
+            coordinator.lease_path(id),
+            serde_json::to_vec(&lease).expect("lease"),
+        )
+        .expect("lease");
+    }
+
+    #[test]
+    fn reconciliation_preview_preserves_held_ticket_with_future_lease() {
+        let c = coordinator("reconcile-held-future");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000002";
+        let path = fixture_ticket(&c, id, valid_marker(id));
+        write_lease_fixture(&c, id, "active", 4_000_000_000, 4_000_000_001);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("open");
+        file.lock_exclusive().expect("lock");
+        let before = tree_bytes(c.root());
+        let report = c
+            .reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
+            .expect("preview");
+        assert_eq!(report.candidates[0].classification, "blocked_ticket_locked");
+        assert_eq!(before, tree_bytes(c.root()));
+    }
+
+    #[test]
+    fn reconciliation_preview_absent_root_preserves_parent() {
+        let root = test_root("reconcile-absent");
+        let parent = root.parent().expect("parent").to_path_buf();
+        let metadata = fs::symlink_metadata(&parent).expect("parent metadata");
+        let before = (metadata.len(), metadata.modified().expect("mtime"));
+        let c = AdmissionCoordinator::test_at(root.clone());
+        let report = c
+            .reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
+            .expect("preview");
+        assert!(report.candidates.is_empty());
+        assert!(!root.exists());
+        let metadata = fs::symlink_metadata(&parent).expect("parent metadata");
+        assert_eq!(
+            before,
+            (metadata.len(), metadata.modified().expect("mtime"))
+        );
+    }
+
+    #[test]
+    fn reconciliation_preview_rejects_symlink_ticket_without_mutation() {
+        let c = coordinator("reconcile-symlink");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000003";
+        let path = c
+            .root()
+            .join(TICKETS_DIR)
+            .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"));
+        fixture_ticket(
+            &c,
+            "00000000000000000004",
+            valid_marker("00000000000000000004"),
+        );
+        fs::remove_file(
+            c.root()
+                .join(TICKETS_DIR)
+                .join("ticket-00000000000000000004.json"),
+        )
+        .expect("remove");
+        std::os::unix::fs::symlink(c.root().join(OWNER_FILE), &path).expect("symlink");
+        let before = tree_bytes(c.root());
+        let result =
+            c.reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default());
+        assert!(matches!(
+            result,
+            Err(AdmissionReconciliationError::Admission(
+                AdmissionError::UnsafeLayout(_)
+            ))
+        ));
+        assert_eq!(before, tree_bytes(c.root()));
+    }
+
+    #[test]
+    fn reconciliation_preview_rejects_foreign_json_without_mutation() {
+        let c = coordinator("reconcile-foreign");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000005";
+        let mut marker = valid_marker(id);
+        marker.owner = "foreign".to_owned();
+        fixture_ticket(&c, id, marker);
+        let before = tree_bytes(c.root());
+        let result =
+            c.reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default());
+        assert!(matches!(
+            result,
+            Err(AdmissionReconciliationError::Admission(
+                AdmissionError::ForeignTicket(_)
+            ))
+        ));
+        assert_eq!(before, tree_bytes(c.root()));
+    }
+
+    #[test]
+    fn reconciliation_preview_missing_slot_lock_is_blocked_without_creation() {
+        let c = coordinator("reconcile-no-slot");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000006";
+        let path = c
+            .root()
+            .join(TICKETS_DIR)
+            .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"));
+        fs::write(
+            &path,
+            serde_json::to_vec(&valid_marker(id)).expect("marker"),
+        )
+        .expect("ticket");
+        let before = tree_bytes(c.root());
+        let result =
+            c.reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default());
+        assert!(matches!(
+            result,
+            Err(AdmissionReconciliationError::Blocked("missing_slot_lock"))
+        ));
+        assert_eq!(before, tree_bytes(c.root()));
+        assert!(!c.root().join(SLOT_LOCK).exists());
+    }
+
+    #[test]
+    fn reconciliation_preview_blocks_invalid_lease_before_expiration() {
+        let c = coordinator("reconcile-invalid-lease");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000007";
+        fixture_ticket(&c, id, valid_marker(id));
+        write_lease_fixture(&c, id, "unknown", 4_000_000_000, 1);
+        let before = tree_bytes(c.root());
+        let report = c
+            .reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
+            .expect("preview");
+        assert_eq!(report.candidates[0].classification, "blocked_invalid_lease");
+        assert_eq!(before, tree_bytes(c.root()));
     }
 
     fn wait_for_ticket_count(root: &Path, expected: usize) {
