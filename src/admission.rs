@@ -2339,9 +2339,20 @@ mod tests {
         fixture_ticket(&c, id, valid_marker(id));
         fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
         let result = c.reconcile_apply_with_timeout(
-            &[id.to_owned()], Duration::from_secs(1), &CancellationToken::default());
-        assert_eq!(result.expect("apply").outcomes, vec![outcome(id, "quarantined")]);
-        assert!(!c.root().join(TICKETS_DIR).join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}")).exists());
+            &[id.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert_eq!(
+            result.expect("apply").outcomes,
+            vec![outcome(id, "quarantined")]
+        );
+        assert!(
+            !c.root()
+                .join(TICKETS_DIR)
+                .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"))
+                .exists()
+        );
     }
 
     fn wait_for_ticket_count(root: &Path, expected: usize) {
