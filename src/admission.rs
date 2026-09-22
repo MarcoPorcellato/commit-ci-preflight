@@ -121,8 +121,21 @@ pub struct AdmissionReconciliationCandidateV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AdmissionReconciliationReportV1 {
+    pub schema_version: String,
     pub mode: AdmissionReconciliationModeV1,
     pub candidates: Vec<AdmissionReconciliationCandidateV1>,
+}
+
+#[derive(Debug)]
+pub enum AdmissionReconciliationError {
+    Admission(AdmissionError),
+    Blocked(&'static str),
+}
+
+impl From<AdmissionError> for AdmissionReconciliationError {
+    fn from(error: AdmissionError) -> Self {
+        Self::Admission(error)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -377,17 +390,20 @@ impl AdmissionCoordinator {
         &self,
         timeout: Duration,
         cancellation: &CancellationToken,
-    ) -> Result<AdmissionReconciliationReportV1, AdmissionError> {
+    ) -> Result<AdmissionReconciliationReportV1, AdmissionReconciliationError> {
         let deadline = AdmissionDeadline::from_timeout(timeout)?;
         deadline.check(cancellation)?;
         if !self.root_exists()? {
             return Ok(AdmissionReconciliationReportV1 {
+                schema_version: "1.0".to_owned(),
                 mode: AdmissionReconciliationModeV1::Preview,
                 candidates: Vec::new(),
             });
         }
         if !self.valid_owner_marker_exists()? {
-            return Err(AdmissionError::ForeignOwner(self.root.join(OWNER_FILE)));
+            return Err(AdmissionReconciliationError::Admission(
+                AdmissionError::ForeignOwner(self.root.join(OWNER_FILE)),
+            ));
         }
         self.validate_layout(true)?;
         let mut queue = self.lock_queue_until(&deadline, cancellation)?;
@@ -399,16 +415,31 @@ impl AdmissionCoordinator {
                     slot_blocked = true;
                     None
                 }
-                Err(source) => return Err(AdmissionError::Lock { path: self.root.join(SLOT_LOCK), source }),
+                Err(source) => {
+                    return Err(AdmissionReconciliationError::Admission(
+                        AdmissionError::Lock {
+                            path: self.root.join(SLOT_LOCK),
+                            source,
+                        },
+                    ));
+                }
             },
-            None => None,
+            None => return Err(AdmissionReconciliationError::Blocked("missing_slot_lock")),
         };
         let mut candidates = Vec::new();
-        let directory = fs::read_dir(self.root.join(TICKETS_DIR)).map_err(|source| AdmissionError::Io {
-            path: self.root.join(TICKETS_DIR),
-            source,
-        })?;
+        let directory =
+            fs::read_dir(self.root.join(TICKETS_DIR)).map_err(|source| AdmissionError::Io {
+                path: self.root.join(TICKETS_DIR),
+                source,
+            })?;
+        let mut count = 0;
         for entry in directory {
+            count += 1;
+            if count > MAX_QUEUE_TICKETS {
+                return Err(AdmissionReconciliationError::Admission(
+                    AdmissionError::QueueFull,
+                ));
+            }
             deadline.check(cancellation)?;
             let entry = entry.map_err(AdmissionError::ReadDir)?;
             let path = entry.path();
@@ -420,33 +451,68 @@ impl AdmissionCoordinator {
                 || marker.schema_version != ADMISSION_SCHEMA_VERSION
                 || marker.ticket_id != id
             {
-                return Err(AdmissionError::ForeignTicket(path));
+                return Err(AdmissionReconciliationError::Admission(
+                    AdmissionError::ForeignTicket(path),
+                ));
             }
-            let file = OpenOptions::new().read(true).write(true).open(&path).map_err(|source| AdmissionError::Io { path: path.clone(), source })?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|source| AdmissionError::Io {
+                    path: path.clone(),
+                    source,
+                })?;
             let classification = match file.try_lock_exclusive() {
-                Err(source) if source.kind() == io::ErrorKind::WouldBlock => "blocked_ticket_locked",
-                Err(source) => return Err(AdmissionError::Lock { path: path.clone(), source }),
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    "blocked_ticket_locked"
+                }
+                Err(source) => {
+                    return Err(AdmissionReconciliationError::Admission(
+                        AdmissionError::Lock {
+                            path: path.clone(),
+                            source,
+                        },
+                    ));
+                }
                 Ok(()) => {
                     let lease = self.read_lease(&id)?;
                     let result = if slot_blocked {
                         "blocked_slot_locked"
-                    } else if lease.is_none() || lease.as_ref().is_some_and(lease_is_expired) {
+                    } else if lease.is_none() {
                         "eligible_absent_lease"
-                    } else {
+                    } else if lease.as_ref().is_some_and(lease_is_expired) {
+                        "eligible_expired_lease"
+                    } else if lease.as_ref().is_some_and(lease_is_semantically_valid) {
                         "blocked_live_lease"
+                    } else {
+                        "blocked_invalid_lease"
                     };
-                    FileExt::unlock(&file).map_err(|source| AdmissionError::Lock { path: path.clone(), source })?;
+                    FileExt::unlock(&file).map_err(|source| AdmissionError::Lock {
+                        path: path.clone(),
+                        source,
+                    })?;
                     result
                 }
             };
-            candidates.push(AdmissionReconciliationCandidateV1 { ticket_id: id, classification: classification.to_owned() });
+            candidates.push(AdmissionReconciliationCandidateV1 {
+                ticket_id: id,
+                classification: classification.to_owned(),
+            });
         }
         if let Some(slot) = slot {
-            FileExt::unlock(&slot).map_err(|source| AdmissionError::Lock { path: self.root.join(SLOT_LOCK), source })?;
+            FileExt::unlock(&slot).map_err(|source| AdmissionError::Lock {
+                path: self.root.join(SLOT_LOCK),
+                source,
+            })?;
         }
         unlock(&mut queue)?;
         candidates.sort_by(|left, right| left.ticket_id.cmp(&right.ticket_id));
-        Ok(AdmissionReconciliationReportV1 { mode: AdmissionReconciliationModeV1::Preview, candidates })
+        Ok(AdmissionReconciliationReportV1 {
+            schema_version: "1.0".to_owned(),
+            mode: AdmissionReconciliationModeV1::Preview,
+            candidates,
+        })
     }
 
     #[cfg(test)]
@@ -1463,6 +1529,11 @@ fn lease_is_expired(lease: &LeaseMarker) -> bool {
     now.saturating_sub(lease.heartbeat_at_unix_seconds) >= LEASE_DURATION.as_secs()
 }
 
+fn lease_is_semantically_valid(lease: &LeaseMarker) -> bool {
+    matches!(lease.state.as_str(), "queued" | "active")
+        && lease.heartbeat_at_unix_seconds >= lease.acquired_at_unix_seconds
+}
+
 fn parse_ticket_name(path: &Path) -> Result<String, AdmissionError> {
     let name = path
         .file_name()
@@ -1778,12 +1849,10 @@ mod tests {
             ticket_id: id.to_owned(),
         };
         fs::write(&ticket_path, serde_json::to_vec(&marker).expect("marker")).expect("ticket");
+        fs::write(coordinator.root().join(SLOT_LOCK), []).expect("slot lock");
         let before = tree_bytes(coordinator.root());
         let report = coordinator
-            .reconcile_preview_with_timeout(
-                Duration::from_secs(1),
-                &CancellationToken::default(),
-            )
+            .reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
             .expect("preview");
         assert_eq!(report.mode, AdmissionReconciliationModeV1::Preview);
         assert_eq!(
@@ -1805,7 +1874,10 @@ mod tests {
                 if metadata.is_dir() {
                     visit(&path, root, out);
                 } else {
-                    out.push((path.strip_prefix(root).expect("relative").to_path_buf(), fs::read(&path).expect("bytes")));
+                    out.push((
+                        path.strip_prefix(root).expect("relative").to_path_buf(),
+                        fs::read(&path).expect("bytes"),
+                    ));
                 }
             }
         }
