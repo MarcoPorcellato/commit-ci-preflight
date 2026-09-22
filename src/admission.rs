@@ -126,6 +126,18 @@ pub struct AdmissionReconciliationReportV1 {
     pub candidates: Vec<AdmissionReconciliationCandidateV1>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdmissionReconciliationOutcomeV1 {
+    pub ticket_id: String,
+    pub classification: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdmissionReconciliationApplyReportV1 {
+    pub schema_version: String,
+    pub outcomes: Vec<AdmissionReconciliationOutcomeV1>,
+}
+
 #[derive(Debug)]
 pub enum AdmissionReconciliationError {
     Admission(AdmissionError),
@@ -515,6 +527,132 @@ impl AdmissionCoordinator {
             schema_version: "1.0".to_owned(),
             mode: AdmissionReconciliationModeV1::Preview,
             candidates,
+        })
+    }
+
+    pub fn reconcile_apply_with_timeout(
+        &self,
+        selected_ids: &[String],
+        timeout: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<AdmissionReconciliationApplyReportV1, AdmissionReconciliationError> {
+        let deadline = AdmissionDeadline::from_timeout(timeout)?;
+        deadline.check(cancellation)?;
+        if selected_ids.is_empty() {
+            return Err(AdmissionReconciliationError::Blocked("empty_target"));
+        }
+        let mut canonical = selected_ids.to_vec();
+        canonical.sort();
+        canonical.dedup();
+        if canonical.len() != selected_ids.len() {
+            return Err(AdmissionReconciliationError::Blocked("duplicate_target"));
+        }
+        if canonical.iter().any(|id| {
+            id.len() != 20 || !id.bytes().all(|byte| byte.is_ascii_digit())
+        }) {
+            return Err(AdmissionReconciliationError::Blocked("malformed_target"));
+        }
+        if !self.root_exists()? {
+            return Err(AdmissionReconciliationError::Blocked("unknown_ticket"));
+        }
+        if !self.valid_owner_marker_exists()? {
+            return Err(AdmissionReconciliationError::Admission(
+                AdmissionError::ForeignOwner(self.root.join(OWNER_FILE)),
+            ));
+        }
+        self.validate_layout(true)?;
+        let mut queue = self.lock_queue_until(&deadline, cancellation)?;
+        let slot_path = self.root.join(SLOT_LOCK);
+        let slot = match open_existing_lock_file(&slot_path)? {
+            Some(file) => {
+                lock_exclusive_until(&file, &slot_path, &deadline, cancellation)?;
+                file
+            }
+            None => {
+                unlock(&mut queue)?;
+                return Err(AdmissionReconciliationError::Blocked("missing_slot_lock"));
+            }
+        };
+        let mut locked = Vec::new();
+        macro_rules! reject {
+            ($reason:expr) => {{
+                for (file, _path) in locked.drain(..) {
+                    let _ = FileExt::unlock(&file);
+                }
+                let _ = FileExt::unlock(&slot);
+                let _ = unlock(&mut queue);
+                return Err(AdmissionReconciliationError::Blocked($reason));
+            }};
+        }
+        for id in &canonical {
+            deadline.check(cancellation)?;
+            let path = self
+                .root
+                .join(TICKETS_DIR)
+                .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"));
+            validate_regular(&path).map_err(AdmissionReconciliationError::Admission)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|_| AdmissionReconciliationError::Blocked("unknown_ticket"))?;
+            match file.try_lock_exclusive() {
+                Ok(()) => {}
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    reject!("held_ticket");
+                }
+                Err(source) => {
+                    return Err(AdmissionReconciliationError::Admission(AdmissionError::Lock {
+                        path,
+                        source,
+                    }));
+                }
+            }
+            let marker = read_ticket(&path).map_err(AdmissionReconciliationError::Admission)?;
+            if marker.owner != "commit-ci-preflight"
+                || marker.purpose != "host-admission-ticket"
+                || marker.schema_version != ADMISSION_SCHEMA_VERSION
+                || marker.ticket_id != *id
+            {
+                reject!("foreign_or_malformed_ticket");
+            }
+            let lease = self.read_lease(id).map_err(AdmissionReconciliationError::Admission)?;
+            let Some(lease) = lease else { reject!("lease_only_or_absent"); };
+            if !lease_is_semantically_valid(&lease) || lease.state != "active" {
+                reject!("invalid_lease");
+            }
+            if !lease_is_expired(&lease) {
+                reject!("live_or_future_lease");
+            }
+            locked.push((file, path));
+        }
+        let mut outcomes = Vec::new();
+        for (id, (_file, path)) in canonical.iter().zip(locked.iter()) {
+            self.remove_lease(id)?;
+            self.quarantine_file(path)?;
+            outcomes.push(AdmissionReconciliationOutcomeV1 {
+                ticket_id: id.clone(),
+                classification: "quarantined".to_owned(),
+            });
+        }
+        for (file, _) in locked {
+            FileExt::unlock(&file).map_err(|source| AdmissionReconciliationError::Admission(
+                AdmissionError::Lock {
+                    path: self.root.join(TICKETS_DIR),
+                    source,
+                },
+            ))?;
+        }
+        FileExt::unlock(&slot).map_err(|source| AdmissionReconciliationError::Admission(
+            AdmissionError::Lock {
+                path: slot_path,
+                source,
+            },
+        ))?;
+        unlock(&mut queue)?;
+        Ok(AdmissionReconciliationApplyReportV1 {
+            schema_version: "1.0".to_owned(),
+            outcomes,
         })
     }
 
@@ -2093,6 +2231,72 @@ mod tests {
             .expect("preview");
         assert_eq!(report.candidates[0].classification, "blocked_invalid_lease");
         assert_eq!(before, tree_bytes(c.root()));
+    }
+
+    #[test]
+    fn reconciliation_apply_quarantines_only_the_selected_expired_ticket() {
+        let c = coordinator("reconcile-target");
+        c.initialize().expect("initialize");
+        let selected = "00000000000000000009";
+        let untouched = "00000000000000000010";
+        fixture_ticket(&c, selected, valid_marker(selected));
+        fixture_ticket(&c, untouched, valid_marker(untouched));
+        fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
+        write_lease_fixture(&c, selected, "active", 1, 1);
+        write_lease_fixture(&c, untouched, "active", 4_000_000_000, 4_000_000_001);
+        let counter = fs::read(c.root().join(NEXT_TICKET)).expect("counter");
+        let report = c
+            .reconcile_apply_with_timeout(
+                &[selected.to_owned()],
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .expect("apply");
+        assert_eq!(report.outcomes, vec![outcome(selected, "quarantined")]);
+        assert!(!c.root().join(TICKETS_DIR).join(format!("{TICKET_PREFIX}{selected}{TICKET_SUFFIX}")).exists());
+        assert!(c.root().join(TICKETS_DIR).join(format!("{TICKET_PREFIX}{untouched}{TICKET_SUFFIX}")).exists());
+        assert_eq!(counter, fs::read(c.root().join(NEXT_TICKET)).expect("counter"));
+    }
+
+    fn outcome(ticket_id: &str, classification: &str) -> AdmissionReconciliationOutcomeV1 {
+        AdmissionReconciliationOutcomeV1 {
+            ticket_id: ticket_id.to_owned(),
+            classification: classification.to_owned(),
+        }
+    }
+
+    #[test]
+    fn reconciliation_apply_rejects_held_ticket_without_mutation() {
+        let c = coordinator("reconcile-held-apply");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000011";
+        let path = fixture_ticket(&c, id, valid_marker(id));
+        fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
+        write_lease_fixture(&c, id, "active", 1, 1);
+        let file = OpenOptions::new().read(true).write(true).open(&path).expect("open");
+        file.lock_exclusive().expect("lock");
+        let before = tree_bytes(c.root());
+        let result = c.reconcile_apply_with_timeout(
+            &[id.to_owned()], Duration::from_millis(50), &CancellationToken::default());
+        assert!(matches!(result, Err(AdmissionReconciliationError::Blocked("held_ticket"))));
+        assert_eq!(before, tree_bytes(c.root()));
+    }
+
+    #[test]
+    fn reconciliation_apply_rejects_duplicate_and_malformed_targets_without_mutation() {
+        let c = coordinator("reconcile-invalid-target");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000012";
+        fixture_ticket(&c, id, valid_marker(id));
+        fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
+        write_lease_fixture(&c, id, "active", 1, 1);
+        let before = tree_bytes(c.root());
+        for ids in [vec![id.to_owned(), id.to_owned()], vec!["bad".to_owned()]] {
+            let result = c.reconcile_apply_with_timeout(
+                &ids, Duration::from_secs(1), &CancellationToken::default());
+            assert!(matches!(result, Err(AdmissionReconciliationError::Blocked(_))));
+            assert_eq!(before, tree_bytes(c.root()));
+        }
     }
 
     fn wait_for_ticket_count(root: &Path, expected: usize) {
