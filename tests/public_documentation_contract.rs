@@ -309,3 +309,28 @@ fn reconciliation_docs_preserve_the_no_manual_deletion_boundary() {
     assert!(TROUBLESHOOTING.contains("active: false"));
     assert!(LOCAL_RUN.contains("recover status/apply"));
 }
+
+#[test]
+fn prerelease_installation_guidance_is_label_neutral_and_manifest_bound() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let readme = std::fs::read_to_string(root.join("README.md")).expect("read README");
+    let installation =
+        std::fs::read_to_string(root.join("docs/INSTALLATION.md")).expect("read installation");
+    let beta_support =
+        std::fs::read_to_string(root.join("docs/BETA_SUPPORT.md")).expect("read beta support");
+
+    for document in [&readme, &installation, &beta_support] {
+        assert!(
+            document.contains("https://github.com/MarcoPorcellato/commit-ci-preflight/releases")
+        );
+        assert!(!document.contains("releases/tag/v0.1.0-rc.2"));
+        assert!(!document.contains("v0.1.0-rc.2 published prerelease"));
+    }
+    for required in ["SHA256SUMS", "RELEASE_MANIFEST.json"] {
+        assert!(readme.contains(required), "README missing {required}");
+        assert!(
+            installation.contains(required),
+            "installation missing {required}"
+        );
+    }
+}

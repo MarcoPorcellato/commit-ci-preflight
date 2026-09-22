@@ -69,7 +69,9 @@ fn public_readme_is_human_first_and_truthfully_differentiated() {
     }
     assert!(README.contains("not an identity attestation"));
     assert!(README.contains("does not execute marketplace actions"));
-    assert!(README.contains("v0.1.0-rc.2 published prerelease"));
+    assert!(README.contains("GitHub Releases"));
+    assert!(README.contains("RELEASE_MANIFEST.json"));
+    assert!(!README.contains("v0.1.0-rc.2 published prerelease"));
     assert!(README.contains("Run heavy CI locally. Prove the exact commit on GitHub."));
     assert!(README.contains("## Is CCP for this repository?"));
     assert!(README.contains("## Start here"));
@@ -195,15 +197,18 @@ fn release_candidate_builder_is_local_bounded_and_non_publishing() {
 fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.starts_with("# Installation and artifact verification"));
     for document in [README, INSTALLATION, BETA_SUPPORT] {
-        assert!(document.contains("v0.1.0-rc.2"));
+        assert!(
+            document.contains("https://github.com/MarcoPorcellato/commit-ci-preflight/releases")
+        );
+        assert!(!document.contains("releases/tag/v0.1.0-rc.2"));
+        assert!(!document.contains("v0.1.0-rc.2 published prerelease"));
     }
-    assert!(INSTALLATION.contains(
-        "https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2"
-    ));
     assert!(INSTALLATION.contains("published GitHub prerelease"));
     assert!(INSTALLATION.contains("unsigned macOS arm64 archive"));
     assert!(INSTALLATION.contains("## Use the published macOS arm64 prerelease"));
-    assert!(INSTALLATION.contains("commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz"));
+    assert!(
+        INSTALLATION.contains("commit-ci-preflight-<release-label>-aarch64-apple-darwin.tar.gz")
+    );
     assert!(INSTALLATION.contains("if ! shasum -a 256 -c SHA256SUMS; then"));
     assert!(
         INSTALLATION
@@ -214,7 +219,7 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.contains("## Alternative: install from a reviewed source checkout"));
     assert!(INSTALLATION.contains("There is no crate, Homebrew"));
     assert!(INSTALLATION.contains("or signed artifact"));
-    assert!(INSTALLATION.contains("--release-label v0.1.0-rc.2"));
+    assert!(INSTALLATION.contains("--release-label v0.1.0-rc.N"));
     assert!(INSTALLATION.contains("RELEASE_MANIFEST.json"));
     assert!(INSTALLATION.contains("does not sign the\nasset"));
     assert!(ROLLBACK.starts_with("# Upgrade, rollback, and uninstall"));

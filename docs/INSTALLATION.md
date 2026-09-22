@@ -1,33 +1,35 @@
 # Installation and artifact verification
 
-## RC.2 candidate status
+## Current prerelease status
 
-`v0.1.0-rc.2` is a
-[published GitHub prerelease](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2).
-Start by verifying its unsigned macOS arm64 archive, `SHA256SUMS`, and
-in-archive `RELEASE_MANIFEST.json`. GitHub also provides source archives for
-the exact tag. There is no crate, Homebrew formula, Winget package, container
-image, or signed artifact.
+A [published GitHub prerelease](https://github.com/MarcoPorcellato/commit-ci-preflight/releases)
+is available for macOS arm64. Start by verifying the desired archive's adjacent
+`SHA256SUMS` and its in-archive `RELEASE_MANIFEST.json`. GitHub also provides
+source archives for each exact tag. There is no crate, Homebrew formula, Winget
+package, container image, or signed artifact.
 
-The release asset is byte-integrity-verifiable, not signed. Build from a
-reviewed source commit instead when the macOS arm64 prerelease artifact does
+The unsigned macOS arm64 archive is byte-integrity-verifiable, not signed.
+Build from a reviewed source commit instead when the prerelease artifact does
 not fit your platform or trust requirements.
 
 ## Use the published macOS arm64 prerelease
 
-This path needs only macOS arm64, `tar`, and `shasum`. From the
-[RC.2 release page](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2),
-download both `commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz`
-and `SHA256SUMS` into an empty directory you control.
+This path needs only macOS arm64, `tar`, and `shasum`. From
+[GitHub Releases](https://github.com/MarcoPorcellato/commit-ci-preflight/releases),
+choose one prerelease and download both
+`commit-ci-preflight-<release-label>-aarch64-apple-darwin.tar.gz` and its
+adjacent `SHA256SUMS` into an empty directory you control.
 
 ```console
 cd /absolute/download/directory
+release_label=v0.1.0-rc.N
+archive="commit-ci-preflight-${release_label}-aarch64-apple-darwin.tar.gz"
 if ! shasum -a 256 -c SHA256SUMS; then
   echo "Checksum verification failed; refusing to extract or execute the archive." >&2
   exit 1
 fi
-tar -xzf commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz
-cd commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin
+tar -xzf "$archive"
+cd "${archive%.tar.gz}"
 sed -n '1,120p' RELEASE_MANIFEST.json
 ./commit-ci-preflight --version
 ```
@@ -107,12 +109,12 @@ The bounded packaging script builds the current host target and never publishes
 anything:
 
 ```console
-scripts/build_release_candidate.sh --release-label v0.1.0-rc.2 /absolute/output/directory
+scripts/build_release_candidate.sh --release-label v0.1.0-rc.N /absolute/output/directory
 ```
 
 It creates:
 
-- one `commit-ci-preflight-v0.1.0-rc.2-<target>.tar.gz` archive;
+- one `commit-ci-preflight-<release-label>-<target>.tar.gz` archive;
 - `SHA256SUMS` for the maintainer-uploaded archive asset; and
 - `RELEASE_MANIFEST.json` inside the archive, binding its label, source commit,
   Cargo package version, target, and archive name.
@@ -150,8 +152,8 @@ A matching checksum proves only byte integrity relative to the separately
 obtained checksum file. Extract the archive and inspect its source binding:
 
 ```console
-tar -xzf commit-ci-preflight-v0.1.0-rc.2-<target>.tar.gz
-sed -n '1,120p' commit-ci-preflight-v0.1.0-rc.2-<target>/RELEASE_MANIFEST.json
+tar -xzf commit-ci-preflight-<release-label>-<target>.tar.gz
+sed -n '1,120p' commit-ci-preflight-<release-label>-<target>/RELEASE_MANIFEST.json
 ```
 
 The manifest binds the selected source commit and target but does not sign the
