@@ -2938,6 +2938,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn reconciliation_preview_rejects_symlink_ticket_without_mutation() {
         let c = coordinator("reconcile-symlink");
@@ -4259,6 +4260,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn reconciliation_apply_rejects_selected_symlink_without_mutation() {
         let c = coordinator("reconcile-selected-symlink");
