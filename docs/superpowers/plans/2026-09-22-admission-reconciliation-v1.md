@@ -21,6 +21,9 @@
   definitely expired, semantically valid lease remains eligible.
 - Preserve status schema `2.0`, existing on-disk schemas, `recover`, receipt, cache, `run`, `benchmark`, and `guard exec` behavior.
 - JSON contains only bounded opaque IDs and fixed categories, never paths, commands, environments, process inventory, raw errors, or logs.
+- Apply limits selected IDs to `MAX_QUEUE_TICKETS`; after any mutation, timeout,
+  cancellation, storage, collision, or sync failure returns an inspectable
+  bounded partial report with canonical outcomes and `not_attempted` tails.
 - No network, Docker workload, CCP heavy command, release, installation, or manual coordinator cleanup belongs to this plan.
 
 ## Review Focus
@@ -186,19 +189,27 @@ Expected: failure; the existing broad rename helper is overwrite-capable.
 
 - [ ] **Step 3: Implement the reconciliation-only durable sequence.**
 
-Remove an eligible lease first, then move the ticket only through an atomic
-no-replace destination. If the host lacks such a primitive, return fail-closed;
-never fall back to overwrite-capable rename. If move fails after lease removal,
-preserve the ticket with no lease and report partial.
+Before the first mutation, recheck every locked selected descriptor against its
+current regular pathname; a mismatch blocks the complete request. Under the
+cooperative CCP lock model, remove an eligible lease first, synchronize its
+directory, then move the ticket only through an atomic no-replace destination
+and synchronize the tickets/quarantine directories. If the host lacks any
+required primitive, return fail-closed; never fall back to overwrite-capable
+rename. If move, sync, timeout, or cancellation fails after a mutation,
+preserve the residual state and return an inspectable bounded partial report;
+later canonical targets become `not_attempted`.
 
 - [ ] **Step 4: Add RED fault/race tests, then GREEN.**
 
-Inject one ticket-move failure after a successful lease removal and assert a
-partial result plus residual no-lease ticket. Change selected ticket bytes after
-preview but before apply and assert apply blocks. Hold reconciliation at a
-deterministic barrier after queue/slot acquisition, start ordinary acquisition
-on another thread, assert it cannot enter, then release the barrier and assert
-both paths release their locks.
+Inject a ticket-move and directory-sync failure after a successful lease removal
+and assert a partial error/report plus residual no-lease ticket and
+`not_attempted` later targets. Change selected ticket bytes after preview but
+before apply and assert apply blocks. Hold reconciliation at a deterministic
+barrier after queue/slot acquisition, start ordinary acquisition on another
+thread, prove it cannot enter, then release the barrier and assert both paths
+release their locks. At a second barrier after every selected descriptor has
+been read, replace one selected pathname and assert the all-target identity
+recheck blocks before any mutation.
 
 Run: `cargo test --locked reconciliation_ -- --nocapture`
 

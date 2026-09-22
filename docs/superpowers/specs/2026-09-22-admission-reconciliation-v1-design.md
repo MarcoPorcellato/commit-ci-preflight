@@ -85,6 +85,14 @@ layout, timeout, cancellation, lease-only residue, and unexplained
 slot/lease contradiction. Preview never mutates these records; apply never
 widens the selected target set to repair them.
 
+The v1 reconciliation boundary is cooperative trusted-local coordination:
+every supported CCP ticket-namespace writer must honor the queue, slot, and
+ticket locks. Apply captures selected file identities from locked descriptors,
+then rechecks every selected pathname before its first mutation. A hostile
+same-UID process that ignores those locks and replaces a pathname after the
+final recheck is outside this portable v1 guarantee; no macOS/Linux primitive
+can atomically rename an arbitrary open descriptor by identity.
+
 ## Mutation and durability model
 
 The command does not call the existing broad `scan_tickets(..., true)` or
@@ -92,8 +100,10 @@ The command does not call the existing broad `scan_tickets(..., true)` or
 during scanning, which is outside this feature's authorization boundary.
 
 After all selected tickets have been locked and revalidated, apply handles each
-ticket independently with truthful outcomes. It removes a selected eligible
-lease before moving its ticket to an owned quarantine location. Thus an
+ticket independently with truthful outcomes. It rechecks the identity of every
+selected ticket before beginning any mutation. It removes a selected eligible
+lease before moving its ticket to an owned quarantine location and synchronizes
+the affected directories after each durable mutation. Thus an
 interruption after lease removal leaves a still-locked-at-decision ticket with
 no lease, which a later explicit reconciliation can classify again; it avoids
 creating a lease-only record from the normal success sequence.
@@ -108,6 +118,11 @@ that guarantee cannot be established.
 All acquired ticket, slot, and queue locks are released on success, failure,
 timeout, and cancellation. No result claims all-or-nothing transactionality
 unless every selected outcome reached its terminal durable state.
+
+Once any selected ticket changes, a later storage, synchronization, timeout, or
+cancellation failure returns a bounded partial report in canonical ticket
+order. It records the changed ticket, the failing ticket, and `not_attempted`
+for later selected tickets without exposing paths or raw error text.
 
 ## Compatibility
 
