@@ -108,6 +108,23 @@ pub struct AdmissionLockStatusV1 {
     pub lease_state: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum AdmissionReconciliationModeV1 {
+    Preview,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdmissionReconciliationCandidateV1 {
+    pub ticket_id: String,
+    pub classification: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdmissionReconciliationReportV1 {
+    pub mode: AdmissionReconciliationModeV1,
+    pub candidates: Vec<AdmissionReconciliationCandidateV1>,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TicketMarker {
@@ -354,6 +371,82 @@ impl AdmissionCoordinator {
             queue_lock,
             process_visibility_note: PROCESS_VISIBILITY_NOTE.to_owned(),
         })
+    }
+
+    pub fn reconcile_preview_with_timeout(
+        &self,
+        timeout: Duration,
+        cancellation: &CancellationToken,
+    ) -> Result<AdmissionReconciliationReportV1, AdmissionError> {
+        let deadline = AdmissionDeadline::from_timeout(timeout)?;
+        deadline.check(cancellation)?;
+        if !self.root_exists()? {
+            return Ok(AdmissionReconciliationReportV1 {
+                mode: AdmissionReconciliationModeV1::Preview,
+                candidates: Vec::new(),
+            });
+        }
+        if !self.valid_owner_marker_exists()? {
+            return Err(AdmissionError::ForeignOwner(self.root.join(OWNER_FILE)));
+        }
+        self.validate_layout(true)?;
+        let mut queue = self.lock_queue_until(&deadline, cancellation)?;
+        let mut slot_blocked = false;
+        let slot = match open_existing_lock_file(&self.root.join(SLOT_LOCK))? {
+            Some(file) => match file.try_lock_exclusive() {
+                Ok(()) => Some(file),
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => {
+                    slot_blocked = true;
+                    None
+                }
+                Err(source) => return Err(AdmissionError::Lock { path: self.root.join(SLOT_LOCK), source }),
+            },
+            None => None,
+        };
+        let mut candidates = Vec::new();
+        let directory = fs::read_dir(self.root.join(TICKETS_DIR)).map_err(|source| AdmissionError::Io {
+            path: self.root.join(TICKETS_DIR),
+            source,
+        })?;
+        for entry in directory {
+            deadline.check(cancellation)?;
+            let entry = entry.map_err(AdmissionError::ReadDir)?;
+            let path = entry.path();
+            validate_regular(&path)?;
+            let id = parse_ticket_name(&path)?;
+            let marker = read_ticket(&path)?;
+            if marker.owner != "commit-ci-preflight"
+                || marker.purpose != "host-admission-ticket"
+                || marker.schema_version != ADMISSION_SCHEMA_VERSION
+                || marker.ticket_id != id
+            {
+                return Err(AdmissionError::ForeignTicket(path));
+            }
+            let file = OpenOptions::new().read(true).write(true).open(&path).map_err(|source| AdmissionError::Io { path: path.clone(), source })?;
+            let classification = match file.try_lock_exclusive() {
+                Err(source) if source.kind() == io::ErrorKind::WouldBlock => "blocked_ticket_locked",
+                Err(source) => return Err(AdmissionError::Lock { path: path.clone(), source }),
+                Ok(()) => {
+                    let lease = self.read_lease(&id)?;
+                    let result = if slot_blocked {
+                        "blocked_slot_locked"
+                    } else if lease.is_none() || lease.as_ref().is_some_and(lease_is_expired) {
+                        "eligible_absent_lease"
+                    } else {
+                        "blocked_live_lease"
+                    };
+                    FileExt::unlock(&file).map_err(|source| AdmissionError::Lock { path: path.clone(), source })?;
+                    result
+                }
+            };
+            candidates.push(AdmissionReconciliationCandidateV1 { ticket_id: id, classification: classification.to_owned() });
+        }
+        if let Some(slot) = slot {
+            FileExt::unlock(&slot).map_err(|source| AdmissionError::Lock { path: self.root.join(SLOT_LOCK), source })?;
+        }
+        unlock(&mut queue)?;
+        candidates.sort_by(|left, right| left.ticket_id.cmp(&right.ticket_id));
+        Ok(AdmissionReconciliationReportV1 { mode: AdmissionReconciliationModeV1::Preview, candidates })
     }
 
     #[cfg(test)]
@@ -1667,6 +1760,59 @@ mod tests {
         let root = test_root(name);
         let _ = fs::remove_dir_all(&root);
         AdmissionCoordinator::test_at(root)
+    }
+
+    #[test]
+    fn reconciliation_preview_is_read_only_and_classifies_an_absent_lease() {
+        let coordinator = coordinator("reconcile-preview");
+        coordinator.initialize().expect("initialize");
+        let id = "00000000000000000001";
+        let ticket_path = coordinator
+            .root()
+            .join(TICKETS_DIR)
+            .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"));
+        let marker = TicketMarker {
+            owner: "commit-ci-preflight".to_owned(),
+            purpose: "host-admission-ticket".to_owned(),
+            schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
+            ticket_id: id.to_owned(),
+        };
+        fs::write(&ticket_path, serde_json::to_vec(&marker).expect("marker")).expect("ticket");
+        let before = tree_bytes(coordinator.root());
+        let report = coordinator
+            .reconcile_preview_with_timeout(
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .expect("preview");
+        assert_eq!(report.mode, AdmissionReconciliationModeV1::Preview);
+        assert_eq!(
+            report.candidates,
+            vec![AdmissionReconciliationCandidateV1 {
+                ticket_id: id.to_owned(),
+                classification: "eligible_absent_lease".to_owned(),
+            }]
+        );
+        assert_eq!(before, tree_bytes(coordinator.root()));
+    }
+
+    fn tree_bytes(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        fn visit(path: &Path, root: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for entry in fs::read_dir(path).expect("read tree") {
+                let entry = entry.expect("entry");
+                let path = entry.path();
+                let metadata = fs::symlink_metadata(&path).expect("metadata");
+                if metadata.is_dir() {
+                    visit(&path, root, out);
+                } else {
+                    out.push((path.strip_prefix(root).expect("relative").to_path_buf(), fs::read(&path).expect("bytes")));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        visit(root, root, &mut out);
+        out.sort();
+        out
     }
 
     fn wait_for_ticket_count(root: &Path, expected: usize) {
