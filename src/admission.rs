@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::ffi::CString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
@@ -145,6 +146,7 @@ pub struct AdmissionReconciliationApplyReportV1 {
 pub enum AdmissionReconciliationError {
     Admission(AdmissionError),
     Blocked(&'static str),
+    QuarantineCollision,
 }
 
 impl From<AdmissionError> for AdmissionReconciliationError {
@@ -630,11 +632,31 @@ impl AdmissionCoordinator {
         let mut outcomes = Vec::new();
         for (id, (_file, path)) in canonical.iter().zip(locked.iter()) {
             self.remove_lease(id)?;
-            self.quarantine_file(path)?;
-            outcomes.push(AdmissionReconciliationOutcomeV1 {
-                ticket_id: id.clone(),
-                classification: "quarantined".to_owned(),
-            });
+            match self.quarantine_file_no_replace(path) {
+                Ok(()) => outcomes.push(AdmissionReconciliationOutcomeV1 {
+                    ticket_id: id.clone(),
+                    classification: "quarantined".to_owned(),
+                }),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    outcomes.push(AdmissionReconciliationOutcomeV1 {
+                        ticket_id: id.clone(),
+                        classification: "partial_quarantine_collision".to_owned(),
+                    });
+                    for (file, _) in &locked {
+                        let _ = FileExt::unlock(file);
+                    }
+                    let _ = FileExt::unlock(&slot);
+                    let _ = unlock(&mut queue);
+                    return Err(AdmissionReconciliationError::QuarantineCollision);
+                }
+                Err(error) => {
+                    outcomes.push(AdmissionReconciliationOutcomeV1 {
+                        ticket_id: id.clone(),
+                        classification: "partial_move_failed".to_owned(),
+                    });
+                    let _ = error;
+                }
+            }
         }
         for (file, _) in locked {
             FileExt::unlock(&file).map_err(|source| {
@@ -1056,6 +1078,21 @@ impl AdmissionCoordinator {
             path: path.to_path_buf(),
             source,
         })
+    }
+
+    /// Reconciliation must never use `rename`, which replaces an existing
+    /// destination on Unix.  Use the kernel no-replace primitive; unsupported
+    /// hosts fail closed rather than falling back to an overwrite-capable move.
+    fn quarantine_file_no_replace(&self, path: &Path) -> io::Result<()> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ticket has no name"))?;
+        let destination = self.root.join(QUARANTINE_DIR).join(format!(
+            "{}.{}",
+            name.to_string_lossy(),
+            QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        atomic_rename_no_replace(path, &destination)
     }
 
     fn lease_path(&self, ticket_id: &str) -> PathBuf {
@@ -1558,6 +1595,61 @@ fn durable_error(path: PathBuf, error: DurableFsError) -> AdmissionError {
             ),
         },
     }
+}
+
+#[cfg(target_os = "linux")]
+fn atomic_rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    // Linux renameat2(RENAME_NOREPLACE), available since Linux 3.15.
+    let source = CString::new(source.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid source path"))?;
+    let destination = CString::new(destination.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid destination path"))?;
+    let result = unsafe {
+        nix::libc::syscall(
+            nix::libc::SYS_renameat2,
+            nix::libc::AT_FDCWD,
+            source.as_ptr(),
+            nix::libc::AT_FDCWD,
+            destination.as_ptr(),
+            nix::libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn atomic_rename_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    // macOS renameatx_np(RENAME_EXCL) is the no-replace variant.
+    let source = CString::new(source.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid source path"))?;
+    let destination = CString::new(destination.as_os_str().as_encoded_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid destination path"))?;
+    let result = unsafe {
+        nix::libc::renameatx_np(
+            nix::libc::AT_FDCWD,
+            source.as_ptr(),
+            nix::libc::AT_FDCWD,
+            destination.as_ptr(),
+            nix::libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn atomic_rename_no_replace(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "atomic no-replace rename unavailable on this host",
+    ))
 }
 
 fn keep_first_error(target: &mut Option<AdmissionError>, error: AdmissionError) {
