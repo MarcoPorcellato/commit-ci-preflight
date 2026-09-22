@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use commit_ci_preflight::admission::MAX_QUEUE_TICKETS;
 use fs2::FileExt;
 use serde_json::Value;
 
@@ -192,6 +193,28 @@ fn operational_block_and_unknown_target_are_bounded_non_usage_reports() {
     assert!(human_stdout.contains("Reason category: unknown_target"));
     assert!(human_stdout.contains(&format!("  - {unknown}: blocked")));
     assert!(!human_stdout.contains(home.to_str().unwrap()));
+    fs::remove_dir_all(home).unwrap();
+}
+
+#[test]
+fn over_max_queue_tickets_is_bounded_usage_error_before_platform_access() {
+    let home = fixture();
+    let ticket_ids: Vec<String> = (0..=MAX_QUEUE_TICKETS)
+        .map(|index| format!("{index:020}"))
+        .collect();
+    let mut args = vec!["admission", "reconcile", "--apply"];
+    for ticket_id in &ticket_ids {
+        args.extend(["--ticket-id", ticket_id]);
+    }
+    args.push("--json");
+
+    let output = command(&home).args(args).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--ticket-id values exceed the maximum allowed count"));
+    assert!(!stderr.contains(home.to_str().unwrap()));
+    assert!(!admission_root(&home).exists());
     fs::remove_dir_all(home).unwrap();
 }
 

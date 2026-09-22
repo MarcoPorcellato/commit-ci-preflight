@@ -29,7 +29,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
     ADMISSION_STATUS_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
     AdmissionReconciliationError, AdmissionReconciliationOutcomeV1, DEFAULT_QUEUE_TIMEOUT,
-    DEFAULT_STATUS_TIMEOUT,
+    DEFAULT_STATUS_TIMEOUT, MAX_QUEUE_TICKETS,
 };
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
@@ -2071,6 +2071,11 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
             if canonical_ticket_ids.len() != ticket_ids.len() {
                 return Err(CliError::usage(CliMessageError(
                     "--ticket-id values must be unique",
+                )));
+            }
+            if canonical_ticket_ids.len() > MAX_QUEUE_TICKETS {
+                return Err(CliError::usage(CliMessageError(
+                    "--ticket-id values exceed the maximum allowed count",
                 )));
             }
             let cancellation = CancellationToken::default();
