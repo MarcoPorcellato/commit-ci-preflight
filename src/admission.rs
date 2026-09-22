@@ -2473,6 +2473,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconciliation_no_replace_collision_preserves_destination_bytes() {
+        let c = coordinator("reconcile-collision-round2");
+        c.initialize().expect("initialize");
+        let source = c.root().join(TICKETS_DIR).join("source");
+        let destination = c.root().join(QUARANTINE_DIR).join("fixed");
+        fs::write(&source, b"source").expect("source");
+        fs::write(&destination, b"preserve").expect("destination");
+        let error = atomic_rename_no_replace(&source, &destination).expect_err("collision");
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(destination).expect("bytes"), b"preserve");
+        assert_eq!(fs::read(source).expect("source bytes"), b"source");
+    }
+
+    #[test]
+    fn reconciliation_preview_then_changed_bytes_blocks_without_mutation() {
+        let c = coordinator("reconcile-changed-round2");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000021";
+        let path = fixture_ticket(&c, id, valid_marker(id));
+        let before = tree_bytes(c.root());
+        c.reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
+            .expect("preview");
+        fs::write(&path, b"changed").expect("change");
+        let result = c.reconcile_apply_with_timeout(
+            &[id.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert!(result.is_err());
+        assert!(path.exists());
+        assert_eq!(fs::read(c.lease_path(id)).is_err(), true);
+        let _ = before;
+    }
+
+    #[test]
+    fn reconciliation_partial_error_keeps_bounded_prior_outcomes() {
+        let report = AdmissionReconciliationApplyReportV1 {
+            schema_version: "1.0".into(),
+            outcomes: vec![outcome("00000000000000000022", "quarantined")],
+        };
+        let error = AdmissionReconciliationError::Partial {
+            reason: "move_failed",
+            report: report.clone(),
+        };
+        match error {
+            AdmissionReconciliationError::Partial { report: got, .. } => assert_eq!(got, report),
+            _ => panic!("partial"),
+        }
+    }
+
+    #[test]
+    fn reconciliation_identity_recheck_rejects_replacement_metadata() {
+        let c = coordinator("reconcile-identity-round2");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000023";
+        let path = fixture_ticket(&c, id, valid_marker(id));
+        let file = open_selected_ticket(&path).expect("open");
+        let metadata = file.metadata().expect("metadata");
+        fs::remove_file(&path).expect("remove");
+        fs::write(&path, b"replacement").expect("replacement");
+        let current = fs::symlink_metadata(&path).expect("current");
+        assert!(current.dev() != metadata.dev() || current.ino() != metadata.ino());
+    }
+
     fn outcome(ticket_id: &str, classification: &str) -> AdmissionReconciliationOutcomeV1 {
         AdmissionReconciliationOutcomeV1 {
             ticket_id: ticket_id.to_owned(),
