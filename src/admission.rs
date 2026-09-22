@@ -2369,7 +2369,10 @@ mod tests {
             Duration::from_secs(1),
             &CancellationToken::default(),
         );
-        assert!(matches!(result, Err(AdmissionReconciliationError::Admission(_))));
+        assert!(matches!(
+            result,
+            Err(AdmissionReconciliationError::Admission(_))
+        ));
         let follow_up = c
             .reconcile_apply_with_timeout(
                 &[first.to_owned()],
