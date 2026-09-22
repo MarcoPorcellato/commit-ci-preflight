@@ -28,7 +28,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
     ADMISSION_STATUS_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
-    DEFAULT_QUEUE_TIMEOUT, DEFAULT_STATUS_TIMEOUT,
+    AdmissionReconciliationError, DEFAULT_QUEUE_TIMEOUT, DEFAULT_STATUS_TIMEOUT,
 };
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
@@ -471,6 +471,21 @@ enum AdmissionCommand {
         #[arg(long)]
         json: bool,
         /// Maximum time to wait for a consistent status snapshot.
+        #[arg(long, default_value_t = DEFAULT_STATUS_TIMEOUT.as_secs())]
+        timeout_seconds: u64,
+    },
+    /// Preview or apply explicit admission-ticket reconciliation.
+    Reconcile {
+        /// Apply reconciliation; requires one or more --ticket-id values.
+        #[arg(long)]
+        apply: bool,
+        /// Exact ticket identifier; repeat for multiple selected tickets.
+        #[arg(long = "ticket-id")]
+        ticket_ids: Vec<String>,
+        /// Emit the bounded machine-readable reconciliation report.
+        #[arg(long)]
+        json: bool,
+        /// Maximum time to wait for reconciliation locks.
         #[arg(long, default_value_t = DEFAULT_STATUS_TIMEOUT.as_secs())]
         timeout_seconds: u64,
     },
@@ -2020,7 +2035,96 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
             }
             Ok(())
         }
+        AdmissionCommand::Reconcile {
+            apply,
+            ticket_ids,
+            json,
+            timeout_seconds,
+        } => {
+            if !apply && !ticket_ids.is_empty() {
+                return Err(CliError::usage(CliMessageError(
+                    "--ticket-id requires --apply",
+                )));
+            }
+            if apply && ticket_ids.is_empty() {
+                return Err(CliError::usage(CliMessageError(
+                    "--apply requires at least one --ticket-id",
+                )));
+            }
+            let cancellation = CancellationToken::default();
+            let timeout = Duration::from_secs(timeout_seconds);
+            if apply {
+                let coordinator = AdmissionCoordinator::platform().map_err(CliError::Admission)?;
+                let report = match coordinator.reconcile_apply_with_timeout(
+                    &ticket_ids,
+                    timeout,
+                    &cancellation,
+                ) {
+                    Ok(report) => report,
+                    Err(AdmissionReconciliationError::Partial { report, .. }) => {
+                        print_partial_reconciliation(&report, json)?;
+                        return Err(CliError::RunOutcome(EvidenceStatus::Fail));
+                    }
+                    Err(error) => return Err(reconciliation_cli_error(error)),
+                };
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&report).map_err(CliError::internal)?
+                    );
+                } else {
+                    println!("Admission reconciliation: apply");
+                    for outcome in report.outcomes {
+                        println!("  - {}: {}", outcome.ticket_id, outcome.classification);
+                    }
+                }
+            } else {
+                let coordinator = AdmissionCoordinator::platform().map_err(CliError::Admission)?;
+                let report = coordinator
+                    .reconcile_preview_with_timeout(timeout, &cancellation)
+                    .map_err(reconciliation_cli_error)?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&report).map_err(CliError::internal)?
+                    );
+                } else {
+                    println!("Admission reconciliation: preview");
+                    for candidate in report.candidates {
+                        println!("  - {}: {}", candidate.ticket_id, candidate.classification);
+                    }
+                    println!("Read-only: no state was changed.");
+                }
+            }
+            Ok(())
+        }
     }
+}
+
+fn reconciliation_cli_error(error: AdmissionReconciliationError) -> CliError {
+    match error {
+        AdmissionReconciliationError::Admission(error) => CliError::Admission(error),
+        AdmissionReconciliationError::Blocked(reason) => CliError::usage(CliMessageError(reason)),
+        AdmissionReconciliationError::Partial { .. } => CliError::RunOutcome(EvidenceStatus::Fail),
+    }
+}
+
+fn print_partial_reconciliation(
+    report: &commit_ci_preflight::admission::AdmissionReconciliationApplyReportV1,
+    json: bool,
+) -> Result<(), CliError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(report).map_err(CliError::internal)?
+        );
+    } else {
+        println!("Admission reconciliation: partial");
+        for outcome in &report.outcomes {
+            println!("  - {}: {}", outcome.ticket_id, outcome.classification);
+        }
+    }
+    Ok(())
 }
 
 fn run_resource_command(action: ResourceAction) -> Result<(), CliError> {
