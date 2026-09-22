@@ -133,7 +133,9 @@ Expected: compile failure; apply does not exist.
 Validate non-empty, unique canonical selected IDs. Hold bounded queue lock and
 retain slot lock. Open/lock every requested ticket, reread ticket and lease
 under locks, and reject the whole request for unknown, held, active/future,
-foreign, malformed, unsafe, lease-only, or contradictory state.
+foreign, malformed, unsafe, lease-only residue, or contradictory state. A
+selected owned ticket without a matching lease is eligible; a lease-only
+residue is not.
 
 - [ ] **Step 4: Write and run lock RED/GREEN tests.**
 
