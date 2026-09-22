@@ -40,8 +40,25 @@ Before uploading a preview through **Settings → General → Social preview**:
 The repository does not treat the source SVG as proof that GitHub is currently
 using that image.
 
-The rendered `docs/assets/social-preview.png` is an upload candidate only. It
-has not been uploaded or verified as the live GitHub preview.
+The rendered `docs/assets/social-preview.png` is the approved upload candidate.
+Its presence in source is never proof of the current live GitHub preview; the
+live setting must be checked separately.
+
+## Owner-gated live audit
+
+Before changing any GitHub presentation setting, perform a read-only audit of:
+
+1. description, topics, and website;
+2. social-preview state and the rendered repository card;
+3. Discussions and private vulnerability-reporting availability;
+4. the Community Profile and the presence of contribution, security, support,
+   conduct, citation, and funding surfaces.
+
+Compare the observed live values with this document and the current README.
+Then obtain one explicit owner authorization listing exactly the settings to
+change. Apply only those settings, verify the live result read-only, and record
+any unavailable or deferred surface truthfully. A source commit, local SVG, or
+documentation checklist never changes a GitHub setting.
 
 ## Public claim boundary
 

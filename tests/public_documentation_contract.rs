@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const SOCIAL_PREVIEW_PNG: &[u8] = include_bytes!("../docs/assets/social-preview.png");
+const CONTRIBUTING: &str = include_str!("../CONTRIBUTING.md");
 
 fn unique_fixture_root(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -35,8 +36,10 @@ fn local_link_destinations(markdown: &str) -> Vec<String> {
 fn markdown_heading_anchors(markdown: &str) -> HashSet<String> {
     markdown
         .lines()
-        .filter_map(|line| line.strip_prefix('#'))
-        .filter(|line| line.starts_with([' ', '\t']))
+        .filter_map(|line| {
+            let heading = line.trim_start_matches('#');
+            heading.starts_with([' ', '\t']).then_some(heading)
+        })
         .map(|line| {
             line.trim()
                 .trim_end_matches('#')
@@ -198,6 +201,18 @@ fn png_dimensions_rejects_invalid_or_truncated_bytes() {
 }
 
 #[test]
+fn markdown_heading_anchors_support_all_atx_levels() {
+    let anchors = markdown_heading_anchors(
+        "# Root heading\n## Second level\n### Third level!\n####not-a-heading\n",
+    );
+
+    assert!(anchors.contains("root-heading"));
+    assert!(anchors.contains("second-level"));
+    assert!(anchors.contains("third-level"));
+    assert!(!anchors.contains("not-a-heading"));
+}
+
+#[test]
 fn local_links_reject_traversal_and_percent_encoding() {
     let root = unique_fixture_root("safety");
     std::fs::create_dir_all(&root).expect("create fixture root");
@@ -218,6 +233,7 @@ fn current_public_documents_have_valid_local_links() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     const PUBLIC_DOCUMENTS: &[&str] = &[
         "README.md",
+        "CONTRIBUTING.md",
         "SUPPORT.md",
         "docs/CASE_STUDY_PR71.md",
         "docs/INSTALLATION.md",
@@ -234,6 +250,25 @@ fn current_public_documents_have_valid_local_links() {
         .flat_map(|document| validate_local_links(root, Path::new(document)))
         .collect();
     assert!(findings.is_empty(), "documentation findings: {findings:?}");
+}
+
+#[test]
+fn contributor_route_links_to_authoritative_public_surfaces() {
+    for target in [
+        "README.md",
+        "docs/THREAT_MODEL.md",
+        "SECURITY.md",
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+        ".github/ISSUE_TEMPLATE/feature_request.yml",
+        ".github/ISSUE_TEMPLATE/adoption_help.yml",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+    ] {
+        assert!(
+            CONTRIBUTING.contains(&format!("]({target})")),
+            "CONTRIBUTING.md is missing its route to {target}"
+        );
+    }
+    assert!(!CONTRIBUTING.contains("guarantee"));
 }
 
 #[test]

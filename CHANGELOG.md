@@ -7,6 +7,15 @@ Semantic Versioning after its first public release.
 
 ## [Unreleased]
 
+### Changed
+
+- Corrected public documentation to describe the published `v0.1.0-rc.2`
+  prerelease and its unsigned macOS arm64 release asset without implying a
+  package channel, signature, or broader platform qualification.
+
+- Added an owner-gated read-only audit checklist for GitHub presentation
+  metadata; source documentation does not change remote settings.
+
 ### Added
 
 - Added a source-bound `v0.1.0-rc.2` candidate-archive contract: a caller
