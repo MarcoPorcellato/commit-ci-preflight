@@ -168,6 +168,24 @@ automatically. Admission and resource evidence are not included in receipts
 yet. The complete owner/lease handoff and recovery procedure is in the
 [cross-activity coordination runbook](COORDINATION_RUNBOOK.md).
 
+For retained admission tickets, preview read-only:
+
+```console
+commit-ci-preflight admission reconcile --json
+```
+
+Apply only after separate exact authorization naming explicit ticket IDs:
+
+```console
+commit-ci-preflight admission reconcile --ticket-id <ticket-id> --json
+```
+
+Inspect bounded result, then run fresh `admission status --json`, `docker ps -q`,
+and `resource status --json`. `active: false` never overrides `unknown` or
+contradictory evidence. Manual deletion is unsupported. `recover status/apply`
+is journal-only and does not reconcile tickets; this path is cooperative and
+trusted-local, not host/process identity attestation.
+
 See [troubleshooting and safe recovery](TROUBLESHOOTING.md) before interpreting
 an `active: true` status, diagnosing an absent receipt, or touching any exact
 workspace lock reported after a forced stop.

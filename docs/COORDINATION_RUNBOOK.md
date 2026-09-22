@@ -145,6 +145,26 @@ terminated chat, persists a guarded command for later execution, or executes a
 command after the activity disappears. The legacy `guard exec` path remains
 synchronous and unchanged for terminals and existing official launchers.
 
+### Explicit admission reconciliation
+
+`admission reconcile` is bounded, cooperative inspection/repair; it never
+starts a workload. Default preview is read-only and preserves status evidence.
+Apply only after separate exact authorization naming each ticket:
+
+```console
+commit-ci-preflight admission reconcile --json
+commit-ci-preflight admission reconcile --ticket-id <ticket-id> --json
+```
+
+Apply has no implicit all-ticket mode. It validates CCP ownership and advisory
+lock state, preserving evidence on partial failure. After apply, run fresh
+`admission status --json`, `docker ps -q`, and `resource status --json` before
+another activity proceeds. `active: false` never overrides `unknown`, malformed,
+or contradictory status. Manual deletion/quarantine of coordinator state is
+unsupported. `recover status` and `recover apply` remain journal-only and do not
+reconcile admission tickets. This is trusted-local cooperation, not host or
+process identity attestation.
+
 ## Activity reservation and handoff
 
 Use one owner activity for the complete heavy lifecycle. Record this card before

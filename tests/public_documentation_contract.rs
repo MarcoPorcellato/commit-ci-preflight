@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 const SOCIAL_PREVIEW_PNG: &[u8] = include_bytes!("../docs/assets/social-preview.png");
 const CONTRIBUTING: &str = include_str!("../CONTRIBUTING.md");
+const COORDINATION_RUNBOOK: &str = include_str!("../docs/COORDINATION_RUNBOOK.md");
+const TROUBLESHOOTING: &str = include_str!("../docs/TROUBLESHOOTING.md");
+const LOCAL_RUN: &str = include_str!("../docs/LOCAL_RUN.md");
 
 fn unique_fixture_root(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -293,4 +296,11 @@ fn contributor_route_links_to_authoritative_public_surfaces() {
 fn social_preview_png_is_uploadable() {
     assert_eq!(png_dimensions(SOCIAL_PREVIEW_PNG), Ok((1280, 640)));
     assert!(SOCIAL_PREVIEW_PNG.len() < 1_048_576);
+}
+
+#[test]
+fn reconciliation_docs_preserve_the_no_manual_deletion_boundary() {
+    assert!(COORDINATION_RUNBOOK.contains("admission reconcile --ticket-id"));
+    assert!(TROUBLESHOOTING.contains("active: false"));
+    assert!(LOCAL_RUN.contains("recover status/apply"));
 }

@@ -18,6 +18,11 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Documented explicit admission reconciliation: read-only preview, separate
+  authorization with exact ticket IDs, bounded results, fresh post-apply status,
+  Docker, and resource checks, plus journal-only recovery and trusted-local
+  boundaries. Manual deletion remains unsupported.
+
 - Added a source-bound `v0.1.0-rc.2` candidate-archive contract: a caller
   supplies a validated RC label, the archive includes a public release manifest,
   and an external SHA-256 manifest binds maintainer-uploaded archive bytes.
