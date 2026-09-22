@@ -22,7 +22,10 @@ and `SHA256SUMS` into an empty directory you control.
 
 ```console
 cd /absolute/download/directory
-shasum -a 256 -c SHA256SUMS
+if ! shasum -a 256 -c SHA256SUMS; then
+  echo "Checksum verification failed; refusing to extract or execute the archive." >&2
+  exit 1
+fi
 tar -xzf commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz
 cd commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin
 sed -n '1,120p' RELEASE_MANIFEST.json

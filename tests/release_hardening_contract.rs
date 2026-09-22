@@ -204,6 +204,11 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.contains("unsigned macOS arm64 archive"));
     assert!(INSTALLATION.contains("## Use the published macOS arm64 prerelease"));
     assert!(INSTALLATION.contains("commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz"));
+    assert!(INSTALLATION.contains("if ! shasum -a 256 -c SHA256SUMS; then"));
+    assert!(
+        INSTALLATION
+            .contains("Checksum verification failed; refusing to extract or execute the archive.")
+    );
     assert!(INSTALLATION.contains("./commit-ci-preflight --version"));
     assert!(INSTALLATION.contains("install -m 0755"));
     assert!(INSTALLATION.contains("## Alternative: install from a reviewed source checkout"));
@@ -227,6 +232,11 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(BETA_SUPPORT.contains("Complete project `run` path on Windows x86_64 | `PENDING`"));
     assert!(BETA_SUPPORT.contains("Complete project `run` path on Linux x86_64 | `PENDING`"));
     assert!(TUTORIAL.starts_with("# End-to-end tutorial"));
+    assert!(TUTORIAL.contains("CCP_BIN=/absolute/path/to/commit-ci-preflight"));
+    assert!(!TUTORIAL.contains(
+        "CCP_BIN=/absolute/path/to/commit-ci-preflight/target/debug/commit-ci-preflight"
+    ));
+    assert!(!TUTORIAL.contains("cargo build --locked"));
     assert!(TUTORIAL.contains("does not prove who ran the command"));
     assert!(CHANGELOG.contains("Corrected public documentation to describe the published"));
     for stale_claim in [

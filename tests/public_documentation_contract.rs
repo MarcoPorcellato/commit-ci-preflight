@@ -37,7 +37,16 @@ fn markdown_heading_anchors(markdown: &str) -> HashSet<String> {
     markdown
         .lines()
         .filter_map(|line| {
-            let heading = line.trim_start_matches('#');
+            let leading_spaces = line.bytes().take_while(|byte| *byte == b' ').count();
+            if leading_spaces > 3 {
+                return None;
+            }
+            let line = &line[leading_spaces..];
+            let marker_count = line.bytes().take_while(|byte| *byte == b'#').count();
+            if !(1..=6).contains(&marker_count) {
+                return None;
+            }
+            let heading = &line[marker_count..];
             heading.starts_with([' ', '\t']).then_some(heading)
         })
         .map(|line| {
@@ -213,6 +222,15 @@ fn markdown_heading_anchors_support_all_atx_levels() {
 }
 
 #[test]
+fn markdown_heading_anchors_reject_non_headings_and_excessive_markers() {
+    let anchors = markdown_heading_anchors(
+        "    # Indented code\nplain prose\n####### Too many markers\n# Valid heading\n",
+    );
+
+    assert_eq!(anchors, HashSet::from(["valid-heading".to_owned()]));
+}
+
+#[test]
 fn local_links_reject_traversal_and_percent_encoding() {
     let root = unique_fixture_root("safety");
     std::fs::create_dir_all(&root).expect("create fixture root");
@@ -258,9 +276,9 @@ fn contributor_route_links_to_authoritative_public_surfaces() {
         "README.md",
         "docs/THREAT_MODEL.md",
         "SECURITY.md",
-        ".github/ISSUE_TEMPLATE/bug_report.yml",
-        ".github/ISSUE_TEMPLATE/feature_request.yml",
-        ".github/ISSUE_TEMPLATE/adoption_help.yml",
+        "https://github.com/MarcoPorcellato/commit-ci-preflight/issues/new?template=bug_report.yml",
+        "https://github.com/MarcoPorcellato/commit-ci-preflight/issues/new?template=feature_request.yml",
+        "https://github.com/MarcoPorcellato/commit-ci-preflight/issues/new/choose",
         ".github/PULL_REQUEST_TEMPLATE.md",
     ] {
         assert!(

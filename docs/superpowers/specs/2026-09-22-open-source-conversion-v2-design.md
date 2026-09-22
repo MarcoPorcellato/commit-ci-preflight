@@ -92,7 +92,7 @@ than duplicating contracts.
 | Verify and try RC.2 | `docs/INSTALLATION.md` and `docs/TUTORIAL.md` | Try safely |
 | Adopt in another repository | `docs/ADOPTION_GUIDE.md` | Adopt CCP |
 | Understand operational constraints | `docs/BETA_SUPPORT.md` and `docs/THREAT_MODEL.md` | Support and limits |
-| Contribute safely | new `CONTRIBUTING.md` | Contribute |
+| Contribute safely | `CONTRIBUTING.md` | Contribute |
 
 The installation, beta-support, and README status lines will be corrected as
 one atomic documentation change. They must link to the actual RC.2 release and
@@ -121,7 +121,7 @@ or publish machine-specific details.
 
 ### Included in the first implementation tranche
 
-- Create `CONTRIBUTING.md` in the repository root. It will direct contributors
+- Update `CONTRIBUTING.md` in the repository root. It will direct contributors
   to scope, local checks, public-claim boundaries, issue forms, pull-request
   evidence, and documentation conventions without duplicating the existing PR
   template.
@@ -135,7 +135,7 @@ or publish machine-specific details.
 
 - `SECURITY.md`: add only after confirming an active private vulnerability
   reporting route and supported-version policy.
-- `CODE_OF_CONDUCT.md`, `SUPPORT.md`, and Discussions: add only after defining
+- `CODE_OF_CONDUCT.md` and Discussions: add only after defining
   a monitorable response/routing policy. No response-time promise is implied.
 - `CITATION.cff`: add only if the maintainer wants a formal software-citation
   surface and approves correct author/version metadata.
@@ -171,7 +171,7 @@ claims.
 
 ### PR B: Contributor route and navigation
 
-Add `CONTRIBUTING.md`, link existing issue/PR surfaces, and improve document
+Update `CONTRIBUTING.md`, link existing issue/PR surfaces, and improve document
 navigation. Add contract tests for authoritative links and contribution-route
 presence. Do not add security or support promises in this slice.
 

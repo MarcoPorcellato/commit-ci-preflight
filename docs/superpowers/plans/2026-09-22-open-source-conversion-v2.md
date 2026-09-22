@@ -115,10 +115,10 @@
 
   Expected: both pass.
 
-## Task 3: Add a minimal contributor entry point and route existing forms
+## Task 3: Update the contributor entry point and route existing forms
 
 **Files:**
-- Create: `CONTRIBUTING.md`
+- Modify: `CONTRIBUTING.md`
 - Modify: `README.md`
 - Modify: `tests/public_documentation_contract.rs`
 - Modify: `tests/release_hardening_contract.rs`
@@ -135,9 +135,9 @@
   cargo test --locked --test public_documentation_contract current_public_documents_have_valid_local_links
   ```
 
-  Expected: failure because `CONTRIBUTING.md` does not exist.
+  Expected: failure until the authoritative contributor routes are present.
 
-- [ ] **Step 3: Write `CONTRIBUTING.md` in plain English.**
+- [ ] **Step 3: Update `CONTRIBUTING.md` in plain English.**
 
   Include:
 
@@ -202,7 +202,7 @@
 
   ```console
   git diff --check e4b05c13bef4ed2e458f7e09551618304039b21b...HEAD
-  git diff -- e4b05c13bef4ed2e458f7e09551618304039b21b...HEAD -- README.md CONTRIBUTING.md docs/INSTALLATION.md docs/BETA_SUPPORT.md docs/REPOSITORY_PRESENTATION.md CHANGELOG.md tests/public_documentation_contract.rs tests/release_hardening_contract.rs
+  git diff e4b05c13bef4ed2e458f7e09551618304039b21b...HEAD -- README.md CONTRIBUTING.md docs/INSTALLATION.md docs/BETA_SUPPORT.md docs/REPOSITORY_PRESENTATION.md CHANGELOG.md tests/public_documentation_contract.rs tests/release_hardening_contract.rs
   ```
 
   Verify no private paths, user names, raw local commands, credentials, receipts, cached outputs, or unproven quantitative claims reached public prose.
