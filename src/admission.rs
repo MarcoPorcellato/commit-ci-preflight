@@ -2355,6 +2355,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reconciliation_apply_releases_locks_after_missing_later_target_error() {
+        let c = coordinator("reconcile-lock-release");
+        c.initialize().expect("initialize");
+        let first = "00000000000000000014";
+        fixture_ticket(&c, first, valid_marker(first));
+        fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
+        write_lease_fixture(&c, first, "active", 1, 1);
+        let missing = "00000000000000000015".to_owned();
+        let result = c.reconcile_apply_with_timeout(
+            &[first.to_owned(), missing],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+        assert!(matches!(result, Err(AdmissionReconciliationError::Admission(_))));
+        let follow_up = c
+            .reconcile_apply_with_timeout(
+                &[first.to_owned()],
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .expect("follow-up apply");
+        assert_eq!(follow_up.outcomes, vec![outcome(first, "quarantined")]);
+    }
+
     fn wait_for_ticket_count(root: &Path, expected: usize) {
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
