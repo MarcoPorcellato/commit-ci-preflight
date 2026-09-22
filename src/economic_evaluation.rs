@@ -119,6 +119,16 @@ pub fn evaluate_worksheet(
         match event.outcome {
             EventOutcome::Success => {
                 outcome_counts.success += 1;
+                if event.hosted_scope_id.is_empty() || event.local_scope_id.is_empty() {
+                    return Err(EvaluationError(
+                        "successful event scope IDs must be non-empty".into(),
+                    ));
+                }
+                if event.hosted_scope_id != event.local_scope_id {
+                    return Err(EvaluationError(
+                        "hosted_scope_id must equal local_scope_id".into(),
+                    ));
+                }
                 let hosted_dispatched =
                     required(event.hosted_dispatched_at_seconds, "hosted dispatch")?;
                 let hosted_started = required(
@@ -134,16 +144,30 @@ pub fn evaluate_worksheet(
                     required(event.local_verified_at_seconds, "local verification")?;
                 let preparation = required(event.local_preparation_seconds, "local preparation")?;
 
-                hosted_queues.push(hosted_started.saturating_sub(hosted_dispatched));
-                hosted_end_to_end.push(hosted_completed.saturating_sub(hosted_dispatched));
-                local_execution.push(local_completed.saturating_sub(local_started));
-                local_end_to_end.push(local_verified.saturating_sub(local_started));
+                if hosted_dispatched > hosted_started
+                    || hosted_started > hosted_completed
+                    || local_started > local_completed
+                    || local_completed > local_verified
+                {
+                    return Err(EvaluationError("timestamps must be monotonic".into()));
+                }
+
+                hosted_queues.push(hosted_started - hosted_dispatched);
+                hosted_end_to_end.push(hosted_completed - hosted_dispatched);
+                local_execution.push(local_completed - local_started);
+                local_end_to_end.push(local_verified - local_started);
                 local_preparation.push(preparation);
 
                 let baseline = rounded_sum(&event.hosted_job_seconds)?;
                 let retained = rounded_sum(&event.retained_hosted_job_seconds)?;
+                let event_avoided_minutes = baseline
+                    .checked_sub(retained)
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        EvaluationError("successful event must avoid rounded hosted minutes".into())
+                    })?;
                 avoided_minutes = avoided_minutes
-                    .checked_add(baseline.saturating_sub(retained))
+                    .checked_add(event_avoided_minutes)
                     .ok_or_else(|| EvaluationError("avoided minute total overflowed".into()))?;
             }
             EventOutcome::Failure => outcome_counts.failure += 1,
@@ -188,6 +212,9 @@ fn required(value: Option<u64>, name: &str) -> Result<u64, EvaluationError> {
 }
 
 fn rounded_sum(durations: &[u64]) -> Result<u64, EvaluationError> {
+    if durations.is_empty() || durations.contains(&0) {
+        return Err(EvaluationError("job durations must be non-zero".into()));
+    }
     durations.iter().try_fold(0_u64, |total, seconds| {
         total
             .checked_add(seconds.div_ceil(60))

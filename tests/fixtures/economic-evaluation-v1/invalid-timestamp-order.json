@@ -1,0 +1,5 @@
+{
+  "schema_version": "economic-evaluation-v1",
+  "runner_rate_microusd_per_minute": 6000,
+  "events": [{"outcome":"success","hosted_scope_id":"scope","local_scope_id":"scope","hosted_dispatched_at_seconds":100,"hosted_runner_started_at_seconds":110,"hosted_completed_at_seconds":280,"hosted_job_seconds":[61,61],"retained_hosted_job_seconds":[60,60],"local_started_at_seconds":300,"local_completed_at_seconds":360,"local_verified_at_seconds":350,"local_preparation_seconds":5}]
+}
