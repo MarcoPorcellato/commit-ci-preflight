@@ -76,6 +76,19 @@ supported recovery procedure.
 Use the [cross-activity coordination runbook](COORDINATION_RUNBOOK.md) for the
 owner handoff and safe-recovery matrix.
 
+### Retained admission tickets
+
+Run `admission reconcile --json` for bounded read-only preview; preserve its
+report and status output. Apply only with separate exact authorization and
+explicit `--ticket-id` values. Inspect bounded result, then rerun fresh
+`admission status --json`, `docker ps -q`, and `resource status --json`.
+
+`active: false` never overrides `unknown`, malformed, or contradictory evidence.
+Do not manually delete/quarantine tickets, locks, leases, counters, journals,
+or admission root. `recover status/apply` is journal-only, not ticket repair.
+Reconciliation is cooperative, trusted-local state handling, not host/process
+identity attestation.
+
 ## Run ended but no receipt exists
 
 A receipt is the final product of successful orchestration, not a start marker.

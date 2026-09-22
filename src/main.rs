@@ -28,7 +28,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use commit_ci_preflight::admission::{
     ADMISSION_STATUS_SCHEMA_VERSION, AdmissionCoordinator, AdmissionError, AdmissionGuard,
-    DEFAULT_QUEUE_TIMEOUT, DEFAULT_STATUS_TIMEOUT,
+    AdmissionReconciliationError, AdmissionReconciliationOutcomeV1, DEFAULT_QUEUE_TIMEOUT,
+    DEFAULT_STATUS_TIMEOUT, MAX_QUEUE_TICKETS,
 };
 use commit_ci_preflight::benchmark::{
     BenchmarkError, run_benchmark, verify_benchmark_document, write_new_receipt,
@@ -471,6 +472,21 @@ enum AdmissionCommand {
         #[arg(long)]
         json: bool,
         /// Maximum time to wait for a consistent status snapshot.
+        #[arg(long, default_value_t = DEFAULT_STATUS_TIMEOUT.as_secs())]
+        timeout_seconds: u64,
+    },
+    /// Preview or apply explicit admission-ticket reconciliation.
+    Reconcile {
+        /// Apply reconciliation; requires one or more --ticket-id values.
+        #[arg(long)]
+        apply: bool,
+        /// Exact ticket identifier; repeat for multiple selected tickets.
+        #[arg(long = "ticket-id")]
+        ticket_ids: Vec<String>,
+        /// Emit the bounded machine-readable reconciliation report.
+        #[arg(long)]
+        json: bool,
+        /// Maximum time to wait for reconciliation locks.
         #[arg(long, default_value_t = DEFAULT_STATUS_TIMEOUT.as_secs())]
         timeout_seconds: u64,
     },
@@ -2020,7 +2036,284 @@ fn run_admission_command(action: AdmissionCommand) -> Result<(), CliError> {
             }
             Ok(())
         }
+        AdmissionCommand::Reconcile {
+            apply,
+            ticket_ids,
+            json,
+            timeout_seconds,
+        } => {
+            if !apply && !ticket_ids.is_empty() {
+                return Err(CliError::usage(CliMessageError(
+                    "--ticket-id requires --apply",
+                )));
+            }
+            if apply && ticket_ids.is_empty() {
+                return Err(CliError::usage(CliMessageError(
+                    "--apply requires at least one --ticket-id",
+                )));
+            }
+            if timeout_seconds == 0 {
+                return Err(CliError::usage(CliMessageError(
+                    "--timeout-seconds must be greater than zero",
+                )));
+            }
+            if ticket_ids
+                .iter()
+                .any(|id| id.len() != 20 || !id.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                return Err(CliError::usage(CliMessageError(
+                    "--ticket-id must contain exactly 20 ASCII digits",
+                )));
+            }
+            let mut canonical_ticket_ids = ticket_ids.clone();
+            canonical_ticket_ids.sort();
+            canonical_ticket_ids.dedup();
+            if canonical_ticket_ids.len() != ticket_ids.len() {
+                return Err(CliError::usage(CliMessageError(
+                    "--ticket-id values must be unique",
+                )));
+            }
+            if canonical_ticket_ids.len() > MAX_QUEUE_TICKETS {
+                return Err(CliError::usage(CliMessageError(
+                    "--ticket-id values exceed the maximum allowed count",
+                )));
+            }
+            let cancellation = CancellationToken::default();
+            install_cancellation_handler(&cancellation)?;
+            let timeout = Duration::from_secs(timeout_seconds);
+            let mode = if apply {
+                AdmissionReconciliationCliModeV1::Apply
+            } else {
+                AdmissionReconciliationCliModeV1::Preview
+            };
+            let coordinator = match AdmissionCoordinator::platform() {
+                Ok(coordinator) => coordinator,
+                Err(error) => {
+                    return render_reconciliation_error(
+                        mode,
+                        &canonical_ticket_ids,
+                        AdmissionReconciliationError::Admission(error),
+                        json,
+                    );
+                }
+            };
+            if apply {
+                let report = match coordinator.reconcile_apply_with_timeout(
+                    &canonical_ticket_ids,
+                    timeout,
+                    &cancellation,
+                ) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        return render_reconciliation_error(
+                            mode,
+                            &canonical_ticket_ids,
+                            error,
+                            json,
+                        );
+                    }
+                };
+                render_reconciliation_report(
+                    &AdmissionReconciliationCliReportV1 {
+                        schema_version: "1.0",
+                        mode,
+                        reason_category: "completed",
+                        outcomes: report.outcomes,
+                    },
+                    json,
+                )?;
+            } else {
+                let report =
+                    match coordinator.reconcile_preview_with_timeout(timeout, &cancellation) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            return render_reconciliation_error(mode, &[], error, json);
+                        }
+                    };
+                render_reconciliation_report(
+                    &AdmissionReconciliationCliReportV1 {
+                        schema_version: "1.0",
+                        mode,
+                        reason_category: "completed",
+                        outcomes: report
+                            .candidates
+                            .into_iter()
+                            .map(|candidate| AdmissionReconciliationOutcomeV1 {
+                                ticket_id: candidate.ticket_id,
+                                classification: candidate.classification,
+                            })
+                            .collect(),
+                    },
+                    json,
+                )?;
+            }
+            Ok(())
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+enum AdmissionReconciliationCliModeV1 {
+    Preview,
+    Apply,
+}
+
+#[derive(Debug, Serialize)]
+struct AdmissionReconciliationCliReportV1 {
+    schema_version: &'static str,
+    mode: AdmissionReconciliationCliModeV1,
+    reason_category: &'static str,
+    outcomes: Vec<AdmissionReconciliationOutcomeV1>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum AdmissionReconciliationCliExit {
+    Blocked,
+    Partial,
+    Interrupted,
+    Internal,
+}
+
+fn render_reconciliation_error(
+    mode: AdmissionReconciliationCliModeV1,
+    ticket_ids: &[String],
+    error: AdmissionReconciliationError,
+    json: bool,
+) -> Result<(), CliError> {
+    let (reason_category, outcomes, terminal) = match error {
+        AdmissionReconciliationError::Blocked(reason) => (
+            reason,
+            blocked_reconciliation_outcomes(ticket_ids),
+            AdmissionReconciliationCliExit::Blocked,
+        ),
+        AdmissionReconciliationError::Partial { reason, report } => (
+            reason,
+            report.outcomes,
+            AdmissionReconciliationCliExit::Partial,
+        ),
+        AdmissionReconciliationError::Admission(AdmissionError::InvalidTimeout) => {
+            return Err(CliError::usage(CliMessageError(
+                "--timeout-seconds is outside the allowed range",
+            )));
+        }
+        AdmissionReconciliationError::Admission(error) => {
+            let (reason, terminal) = bounded_reconciliation_admission_error(&error);
+            (
+                reason,
+                blocked_reconciliation_outcomes(ticket_ids),
+                terminal,
+            )
+        }
+    };
+    render_reconciliation_report(
+        &AdmissionReconciliationCliReportV1 {
+            schema_version: "1.0",
+            mode,
+            reason_category,
+            outcomes,
+        },
+        json,
+    )?;
+    Err(CliError::ReconciliationOutcome(terminal))
+}
+
+fn blocked_reconciliation_outcomes(ticket_ids: &[String]) -> Vec<AdmissionReconciliationOutcomeV1> {
+    ticket_ids
+        .iter()
+        .map(|ticket_id| AdmissionReconciliationOutcomeV1 {
+            ticket_id: ticket_id.clone(),
+            classification: "blocked".to_owned(),
+        })
+        .collect()
+}
+
+fn bounded_reconciliation_admission_error(
+    error: &AdmissionError,
+) -> (&'static str, AdmissionReconciliationCliExit) {
+    match error {
+        AdmissionError::Timeout => ("timeout", AdmissionReconciliationCliExit::Interrupted),
+        AdmissionError::Cancelled => ("cancelled", AdmissionReconciliationCliExit::Interrupted),
+        AdmissionError::QueueFull => ("queue_full", AdmissionReconciliationCliExit::Blocked),
+        AdmissionError::NoPersistentDefault => (
+            "platform_unavailable",
+            AdmissionReconciliationCliExit::Blocked,
+        ),
+        AdmissionError::InvalidTimeout => {
+            ("invalid_timeout", AdmissionReconciliationCliExit::Internal)
+        }
+        AdmissionError::UnsafePath(_) => (
+            "unsafe_platform_path",
+            AdmissionReconciliationCliExit::Blocked,
+        ),
+        AdmissionError::UnsafeLayout(_) => {
+            ("invalid_layout", AdmissionReconciliationCliExit::Blocked)
+        }
+        AdmissionError::ForeignOwner(_) => {
+            ("foreign_owner", AdmissionReconciliationCliExit::Blocked)
+        }
+        AdmissionError::ForeignTicket(_) => (
+            "foreign_or_malformed_ticket",
+            AdmissionReconciliationCliExit::Blocked,
+        ),
+        AdmissionError::MalformedTicket(_) => (
+            "foreign_or_malformed_ticket",
+            AdmissionReconciliationCliExit::Blocked,
+        ),
+        AdmissionError::ForeignLease(_) => (
+            "foreign_or_malformed_lease",
+            AdmissionReconciliationCliExit::Blocked,
+        ),
+        AdmissionError::MalformedLease(_) => (
+            "foreign_or_malformed_lease",
+            AdmissionReconciliationCliExit::Blocked,
+        ),
+        AdmissionError::RecoveryRequired(_) => {
+            ("recovery_required", AdmissionReconciliationCliExit::Blocked)
+        }
+        AdmissionError::MalformedCounter(_) => {
+            ("malformed_counter", AdmissionReconciliationCliExit::Blocked)
+        }
+        AdmissionError::TicketCounterExhausted => (
+            "ticket_counter_exhausted",
+            AdmissionReconciliationCliExit::Blocked,
+        ),
+        AdmissionError::Clock => (
+            "clock_unavailable",
+            AdmissionReconciliationCliExit::Internal,
+        ),
+        AdmissionError::CurrentDirectory(_)
+        | AdmissionError::ReadDir(_)
+        | AdmissionError::Io { .. }
+        | AdmissionError::Lock { .. }
+        | AdmissionError::Json(_) => (
+            "operational_failure",
+            AdmissionReconciliationCliExit::Internal,
+        ),
+    }
+}
+
+fn render_reconciliation_report(
+    report: &AdmissionReconciliationCliReportV1,
+    json: bool,
+) -> Result<(), CliError> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(report).map_err(CliError::internal)?
+        );
+    } else {
+        println!("Admission reconciliation schema: {}", report.schema_version);
+        println!("Mode: {:?}", report.mode);
+        println!("Reason category: {}", report.reason_category);
+        println!("Outcomes:");
+        for outcome in &report.outcomes {
+            println!("  - {}: {}", outcome.ticket_id, outcome.classification);
+        }
+        if matches!(report.mode, AdmissionReconciliationCliModeV1::Preview) {
+            println!("Read-only: no state was changed.");
+        }
+    }
+    Ok(())
 }
 
 fn run_resource_command(action: ResourceAction) -> Result<(), CliError> {
@@ -2897,6 +3190,7 @@ enum CliError {
     Run(RunError),
     RunJournal(RunJournalError),
     RunOutcome(EvidenceStatus),
+    ReconciliationOutcome(AdmissionReconciliationCliExit),
     Matrix(MatrixError),
     Verification(VerificationError),
     VerifyOutcome(VerificationDecision),
@@ -2930,6 +3224,10 @@ impl CliError {
             Self::RunOutcome(EvidenceStatus::Fail) => 1,
             Self::RunOutcome(EvidenceStatus::Pending | EvidenceStatus::NotRun) => 5,
             Self::RunOutcome(EvidenceStatus::Pass) => 0,
+            Self::ReconciliationOutcome(AdmissionReconciliationCliExit::Blocked) => 4,
+            Self::ReconciliationOutcome(AdmissionReconciliationCliExit::Partial) => 1,
+            Self::ReconciliationOutcome(AdmissionReconciliationCliExit::Interrupted) => 5,
+            Self::ReconciliationOutcome(AdmissionReconciliationCliExit::Internal) => 70,
             Self::Matrix(error) => match error {
                 MatrixError::Run(RunError::ResourcePressure) => 4,
                 MatrixError::Runtime(error) => error.exit_code(),
@@ -2966,6 +3264,18 @@ impl fmt::Display for CliError {
             Self::Run(error) => write!(formatter, "{error}"),
             Self::RunJournal(error) => write!(formatter, "{error}"),
             Self::RunOutcome(status) => write!(formatter, "run completed with {status:?}"),
+            Self::ReconciliationOutcome(AdmissionReconciliationCliExit::Blocked) => {
+                formatter.write_str("admission reconciliation was blocked")
+            }
+            Self::ReconciliationOutcome(AdmissionReconciliationCliExit::Partial) => {
+                formatter.write_str("admission reconciliation completed partially")
+            }
+            Self::ReconciliationOutcome(AdmissionReconciliationCliExit::Interrupted) => {
+                formatter.write_str("admission reconciliation was interrupted")
+            }
+            Self::ReconciliationOutcome(AdmissionReconciliationCliExit::Internal) => {
+                formatter.write_str("admission reconciliation failed safely")
+            }
             Self::Matrix(error) => write!(formatter, "{error}"),
             Self::Verification(error) => write!(formatter, "{error}"),
             Self::VerifyOutcome(decision) => {
@@ -2997,6 +3307,7 @@ impl std::error::Error for CliError {
             Self::Run(error) => Some(error),
             Self::RunJournal(error) => Some(error),
             Self::RunOutcome(_) => None,
+            Self::ReconciliationOutcome(_) => None,
             Self::Matrix(error) => Some(error),
             Self::Verification(error) => Some(error),
             Self::VerifyOutcome(_) => None,
