@@ -1,14 +1,14 @@
 # Installation and artifact verification
 
-## Release status
+## RC.2 candidate status
 
-Commit CI Preflight `v0.1.0-rc.1` is published as a GitHub prerelease. Its
-reviewed assets are an unsigned macOS arm64 archive and `SHA256SUMS`; GitHub
-also generates source archives from the exact tag. There is no crate, Homebrew
-formula, Winget package, container image, or signed artifact. Download only
-from the
-[`v0.1.0-rc.1` release page](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.1)
-or build from a reviewed source commit.
+`v0.1.0-rc.2` is a planned GitHub prerelease candidate. Until a separately
+authorized publication creates its exact tag and release page, it is not a
+downloadable release. The candidate workflow produces an unsigned macOS arm64 archive,
+`SHA256SUMS`, and an in-archive `RELEASE_MANIFEST.json`; GitHub will
+also generate source archives from the exact tag after publication. There is no crate, Homebrew
+formula, Winget package, container image, or signed artifact.
+Build only from a reviewed source commit while RC.2 remains unpublished.
 
 ## Prerequisites
 
@@ -68,20 +68,22 @@ The bounded packaging script builds the current host target and never publishes
 anything:
 
 ```console
-scripts/build_release_candidate.sh /absolute/output/directory
+scripts/build_release_candidate.sh --release-label v0.1.0-rc.2 /absolute/output/directory
 ```
 
 It creates:
 
-- one `commit-ci-preflight-v0.1.0-<target>.tar.gz` archive;
-- `SHA256SUMS` for that exact archive.
+- one `commit-ci-preflight-v0.1.0-rc.2-<target>.tar.gz` archive;
+- `SHA256SUMS` for the maintainer-uploaded archive asset; and
+- `RELEASE_MANIFEST.json` inside the archive, binding its label, source commit,
+  Cargo package version, target, and archive name.
 
 The archive contains the host binary, `LICENSE`, `NOTICE`, `README.md`, the SPDX
 SBOM, third-party notices, adoption, installation, troubleshooting, rollback,
-threat-model, support, and tutorial documents, plus the inactive
+threat-model, support, tutorial, economic, and time-to-feedback documents, plus the inactive
 cross-repository GitHub gate template. The script refuses a relative output
-path, checks that release metadata is current, builds with `--locked`, and does
-not tag, push, upload, sign, or publish.
+path or a non-empty output directory, checks that release metadata is current,
+builds with `--locked`, and does not tag, push, upload, sign, or publish.
 
 ## Verify checksums
 
@@ -106,9 +108,18 @@ Get-FileHash .\commit-ci-preflight-v0.1.0-<target>.tar.gz -Algorithm SHA256
 ```
 
 A matching checksum proves only byte integrity relative to the separately
-obtained checksum file. It does not establish publisher identity. Release
-signing remains intentionally out of scope until key custody has its own ADR
-and authorization.
+obtained checksum file. Extract the archive and inspect its source binding:
+
+```console
+tar -xzf commit-ci-preflight-v0.1.0-rc.2-<target>.tar.gz
+sed -n '1,120p' commit-ci-preflight-v0.1.0-rc.2-<target>/RELEASE_MANIFEST.json
+```
+
+The manifest binds the selected source commit and target but does not sign the
+asset. `SHA256SUMS` covers maintainer-uploaded archives only; GitHub-generated
+source archives are identified by their exact public tag and repository
+reference, not by this local checksum file. Release signing remains intentionally
+out of scope until key custody has its own ADR and authorization.
 
 ## First smoke test
 

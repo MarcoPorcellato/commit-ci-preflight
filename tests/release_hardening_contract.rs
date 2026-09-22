@@ -68,6 +68,9 @@ fn public_readme_is_human_first_and_truthfully_differentiated() {
     }
     assert!(README.contains("not an identity attestation"));
     assert!(README.contains("does not execute marketplace actions"));
+    assert!(README.contains("v0.1.0-rc.2 prerelease"));
+    assert!(README.contains("Time-to-feedback evaluation"));
+    assert!(!README.contains("guaranteed savings"));
 }
 
 #[test]
@@ -131,7 +134,10 @@ fn third_party_notices_include_inventory_and_deduplicated_texts() {
 #[test]
 fn release_candidate_builder_is_local_bounded_and_non_publishing() {
     for required in [
+        "usage: scripts/build_release_candidate.sh --release-label v0.1.0-rc.N /absolute/output/directory",
+        "release_label=",
         "git status --porcelain --untracked-files=all",
+        "git rev-parse --verify HEAD",
         "generate_release_metadata -- --check",
         "cargo test --locked --quiet --test release_hardening_contract",
         "cargo build --locked --release --bin commit-ci-preflight",
@@ -145,7 +151,12 @@ fn release_candidate_builder_is_local_bounded_and_non_publishing() {
         "docs/THREAT_MODEL.md",
         "docs/BETA_SUPPORT.md",
         "docs/TUTORIAL.md",
+        "docs/TIME_TO_FEEDBACK_EVALUATION.md",
+        "docs/ECONOMIC_QUALIFICATION.md",
         "examples/github/receipt-gate.yml.example",
+        "RELEASE_MANIFEST.json",
+        "release_label",
+        "source_commit",
         "mktemp -d",
         "rm -rf -- \"$stage_root\"",
         "SHA256SUMS",
@@ -174,10 +185,14 @@ fn release_candidate_builder_is_local_bounded_and_non_publishing() {
 #[test]
 fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.starts_with("# Installation and artifact verification"));
-    assert!(INSTALLATION.contains("published as a GitHub prerelease"));
+    assert!(INSTALLATION.contains("v0.1.0-rc.2` is a planned GitHub prerelease candidate"));
+    assert!(INSTALLATION.contains("not a\ndownloadable release"));
     assert!(INSTALLATION.contains("unsigned macOS arm64 archive"));
     assert!(INSTALLATION.contains("There is no crate, Homebrew"));
     assert!(INSTALLATION.contains("or signed artifact"));
+    assert!(INSTALLATION.contains("--release-label v0.1.0-rc.2"));
+    assert!(INSTALLATION.contains("RELEASE_MANIFEST.json"));
+    assert!(INSTALLATION.contains("does not sign the\nasset"));
     assert!(ROLLBACK.starts_with("# Upgrade, rollback, and uninstall"));
     assert!(ROLLBACK.contains("does not remove"));
     assert!(THREAT_MODEL.starts_with("# Threat model and review closure"));
@@ -186,11 +201,13 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(THREAT_MODEL.contains("never executes\npull-request-controlled code"));
     assert!(!THREAT_MODEL.contains("No `pull_request_target` execution"));
     assert!(BETA_SUPPORT.starts_with("# Beta limitations and support policy"));
-    assert!(BETA_SUPPORT.contains("| `PUBLISHED_RC` |"));
+    assert!(BETA_SUPPORT.contains("v0.1.0-rc.2"));
+    assert!(BETA_SUPPORT.contains("| `PLANNED_RC` |"));
     assert!(
         BETA_SUPPORT.contains("Registry packages and signed release artifacts | `NOT_PUBLISHED`")
     );
     assert!(BETA_SUPPORT.contains("Complete project `run` path on Windows x86_64 | `PENDING`"));
+    assert!(BETA_SUPPORT.contains("Complete project `run` path on Linux x86_64 | `PENDING`"));
     assert!(TUTORIAL.starts_with("# End-to-end tutorial"));
     assert!(TUTORIAL.contains("does not prove who ran the command"));
 }

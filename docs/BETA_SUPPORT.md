@@ -2,9 +2,11 @@
 
 ## Current status
 
-Commit CI Preflight `v0.1.0-rc.1` is a public GitHub prerelease under
-Apache-2.0. It is not approved for security-sensitive production enforcement
-without an operator review of the threat model, policy, and local runtime.
+Commit CI Preflight `v0.1.0-rc.2` is a planned GitHub prerelease candidate
+under Apache-2.0. It is not published until a separate owner authorization
+creates its exact tag and GitHub release. It is not approved for
+security-sensitive production enforcement without an operator review of the
+threat model, policy, and local runtime.
 
 ## Qualification matrix
 
@@ -15,7 +17,7 @@ without an operator review of the threat model, policy, and local runtime.
 | Fixed benchmark on native Linux x86_64 | `QUALIFIED` | Standard `ubuntu-24.04` runner receipt independently verified |
 | Fixed benchmark on native Windows x86_64 | `QUALIFIED` | Standard `windows-2025` runner receipt independently verified |
 | Ordinary hosted pull-request CI | `ACTIVE_BOUNDARY` | Linux and macOS execute the complete deterministic suite; Windows compiles every test target without execution |
-| Unsigned macOS arm64 archive in GitHub prerelease `v0.1.0-rc.1` | `PUBLISHED_RC` | Exact tagged source, archive checksum, SBOM, notices, and rollback evidence |
+| Unsigned macOS arm64 archive candidate for `v0.1.0-rc.2` | `PLANNED_RC` | Source-bound archive, checksum, SBOM, notices, and rollback verification must pass before separately authorized publication |
 | Complete project `run` path on Linux x86_64 | `PENDING` | Benchmark evidence is not full runtime qualification |
 | Complete project `run` path on Windows x86_64 | `PENDING` | Benchmark evidence is not full runtime qualification |
 | Docker Desktop and other Docker-compatible engines | `COMPATIBLE_UNQUALIFIED` | Adapter contract exists; no complete platform receipt is claimed |
