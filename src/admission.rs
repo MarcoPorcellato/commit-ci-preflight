@@ -23,6 +23,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
 use fs2::FileExt;
@@ -146,7 +148,10 @@ pub struct AdmissionReconciliationApplyReportV1 {
 pub enum AdmissionReconciliationError {
     Admission(AdmissionError),
     Blocked(&'static str),
-    QuarantineCollision,
+    Partial {
+        reason: &'static str,
+        report: AdmissionReconciliationApplyReportV1,
+    },
 }
 
 impl From<AdmissionError> for AdmissionReconciliationError {
@@ -579,10 +584,10 @@ impl AdmissionCoordinator {
                 return Err(AdmissionReconciliationError::Blocked("missing_slot_lock"));
             }
         };
-        let mut locked = Vec::new();
+        let mut locked: Vec<(File, PathBuf, u64, u64)> = Vec::new();
         macro_rules! reject {
             ($reason:expr) => {{
-                for (file, _path) in locked.drain(..) {
+                for (file, _path, ..) in locked.drain(..) {
                     let _ = FileExt::unlock(&file);
                 }
                 let _ = FileExt::unlock(&slot);
@@ -627,38 +632,67 @@ impl AdmissionCoordinator {
                     reject!("live_or_future_lease");
                 }
             }
-            locked.push((file, path));
+            let descriptor_metadata = file.metadata().map_err(|source| {
+                AdmissionReconciliationError::Admission(AdmissionError::Io {
+                    path: path.clone(),
+                    source,
+                })
+            })?;
+            #[cfg(unix)]
+            let (dev, ino) = (descriptor_metadata.dev(), descriptor_metadata.ino());
+            #[cfg(not(unix))]
+            let (dev, ino) = (descriptor_metadata.len(), 0);
+            locked.push((file, path, dev, ino));
         }
         let mut outcomes = Vec::new();
-        for (id, (_file, path)) in canonical.iter().zip(locked.iter()) {
+        for (id, (_file, path, dev, ino)) in canonical.iter().zip(locked.iter()) {
+            let current = fs::symlink_metadata(path).map_err(|source| {
+                AdmissionReconciliationError::Admission(AdmissionError::Io {
+                    path: path.clone(),
+                    source,
+                })
+            })?;
+            #[cfg(unix)]
+            let same_object = current.is_file() && current.dev() == *dev && current.ino() == *ino;
+            #[cfg(not(unix))]
+            let same_object = current.is_file() && current.len() == *dev;
+            if !same_object {
+                reject!("selected_ticket_changed");
+            }
             self.remove_lease(id)?;
             match self.quarantine_file_no_replace(path) {
                 Ok(()) => outcomes.push(AdmissionReconciliationOutcomeV1 {
-                    ticket_id: id.clone(),
+                    ticket_id: (*id).to_owned(),
                     classification: "quarantined".to_owned(),
                 }),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     outcomes.push(AdmissionReconciliationOutcomeV1 {
-                        ticket_id: id.clone(),
+                        ticket_id: (*id).to_owned(),
                         classification: "partial_quarantine_collision".to_owned(),
                     });
-                    for (file, _) in &locked {
+                    for (file, _, ..) in &locked {
                         let _ = FileExt::unlock(file);
                     }
                     let _ = FileExt::unlock(&slot);
                     let _ = unlock(&mut queue);
-                    return Err(AdmissionReconciliationError::QuarantineCollision);
+                    return Err(AdmissionReconciliationError::Partial {
+                        reason: "quarantine_collision",
+                        report: AdmissionReconciliationApplyReportV1 {
+                            schema_version: "1.0".to_owned(),
+                            outcomes,
+                        },
+                    });
                 }
                 Err(error) => {
                     outcomes.push(AdmissionReconciliationOutcomeV1 {
-                        ticket_id: id.clone(),
+                        ticket_id: (*id).to_owned(),
                         classification: "partial_move_failed".to_owned(),
                     });
                     let _ = error;
                 }
             }
         }
-        for (file, _) in locked {
+        for (file, _, ..) in locked {
             FileExt::unlock(&file).map_err(|source| {
                 AdmissionReconciliationError::Admission(AdmissionError::Lock {
                     path: self.root.join(TICKETS_DIR),
