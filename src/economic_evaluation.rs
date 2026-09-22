@@ -20,6 +20,7 @@ const SCHEMA_VERSION: &str = "economic-evaluation-v1";
 const MEASURED_MINIMUM: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvaluationWorksheet {
     pub schema_version: String,
     pub runner_rate_microusd_per_minute: u64,
@@ -27,6 +28,7 @@ pub struct EvaluationWorksheet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvaluationEvent {
     pub outcome: EventOutcome,
     pub hosted_scope_id: String,

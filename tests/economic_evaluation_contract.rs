@@ -60,6 +60,17 @@ fn even_sample_medians_use_the_arithmetic_midpoint() {
 }
 
 #[test]
+fn worksheet_rejects_unknown_fields() {
+    let input = include_str!("fixtures/economic-evaluation-v1/valid-ten-events.json").replacen(
+        "\"runner_rate_microusd_per_minute\": 6000,",
+        "\"runner_rate_microusd_per_minute\": 6000,\n  \"unknown_field\": true,",
+        1,
+    );
+
+    assert!(serde_json::from_str::<EvaluationWorksheet>(&input).is_err());
+}
+
+#[test]
 fn mismatched_test_scopes_fail_before_aggregation() {
     let worksheet = fixture("invalid-scope-mismatch.json");
     assert!(
