@@ -2000,6 +2000,8 @@ mod tests {
         .expect("remove");
         std::os::unix::fs::symlink(c.root().join(OWNER_FILE), &path).expect("symlink");
         let before = tree_bytes(c.root());
+        let target_before = fs::read_link(&path).expect("link target");
+        let metadata_before = fs::symlink_metadata(&path).expect("link metadata");
         let result =
             c.reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default());
         assert!(matches!(
@@ -2009,6 +2011,13 @@ mod tests {
             ))
         ));
         assert_eq!(before, tree_bytes(c.root()));
+        assert_eq!(target_before, fs::read_link(&path).expect("link target"));
+        assert_eq!(
+            metadata_before.file_type(),
+            fs::symlink_metadata(&path)
+                .expect("link metadata")
+                .file_type()
+        );
     }
 
     #[test]
@@ -2063,6 +2072,21 @@ mod tests {
         let id = "00000000000000000007";
         fixture_ticket(&c, id, valid_marker(id));
         write_lease_fixture(&c, id, "unknown", 4_000_000_000, 1);
+        let before = tree_bytes(c.root());
+        let report = c
+            .reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
+            .expect("preview");
+        assert_eq!(report.candidates[0].classification, "blocked_invalid_lease");
+        assert_eq!(before, tree_bytes(c.root()));
+    }
+
+    #[test]
+    fn reconciliation_preview_blocks_timestamp_inconsistent_active_lease() {
+        let c = coordinator("reconcile-inconsistent-lease");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000008";
+        fixture_ticket(&c, id, valid_marker(id));
+        write_lease_fixture(&c, id, "active", 4_000_000_001, 4_000_000_000);
         let before = tree_bytes(c.root());
         let report = c
             .reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
