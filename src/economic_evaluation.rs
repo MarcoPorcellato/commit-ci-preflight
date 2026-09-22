@@ -224,7 +224,9 @@ fn rounded_sum(durations: &[u64]) -> Result<u64, EvaluationError> {
 
 fn median(mut values: Vec<u64>) -> u64 {
     values.sort_unstable();
-    values[values.len() / 2]
+    let upper = values.len() / 2;
+    let lower = (values.len() - 1) / 2;
+    values[lower] + (values[upper] - values[lower]) / 2
 }
 
 fn range(values: &[u64]) -> u64 {

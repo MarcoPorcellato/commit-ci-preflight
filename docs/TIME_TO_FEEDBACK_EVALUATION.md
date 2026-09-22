@@ -108,6 +108,9 @@ preparation values. It separately includes the number of comparable successes,
 excluded events, all outcome counts, avoided rounded hosted minutes, and
 avoided GitHub charge in micro-USD.
 
+For an even-sized sample, the evaluator uses the arithmetic midpoint of the two
+central integer-second values, rounded down to the nearest whole second.
+
 The report deliberately does not calculate a universal speed-up percentage.
 Use its medians and ranges to describe the observed context, including local
 preparation cost and retained remote gates.

@@ -43,6 +43,23 @@ fn ten_equivalent_successes_produce_measured_time_and_cost_fields() {
 }
 
 #[test]
+fn even_sample_medians_use_the_arithmetic_midpoint() {
+    let mut worksheet = fixture("valid-ten-events.json");
+    worksheet.events.truncate(2);
+    worksheet.events[0].hosted_completed_at_seconds = Some(1010);
+    worksheet.events[0].local_completed_at_seconds = Some(2005);
+    worksheet.events[0].local_verified_at_seconds = Some(2010);
+    worksheet.events[1].hosted_completed_at_seconds = Some(3020);
+    worksheet.events[1].local_completed_at_seconds = Some(4010);
+    worksheet.events[1].local_verified_at_seconds = Some(4020);
+
+    let report = evaluate_worksheet(&worksheet).expect("evaluate even sample");
+
+    assert_eq!(report.hosted_median_end_to_end_seconds, 15);
+    assert_eq!(report.local_median_end_to_end_seconds, 15);
+}
+
+#[test]
 fn mismatched_test_scopes_fail_before_aggregation() {
     let worksheet = fixture("invalid-scope-mismatch.json");
     assert!(
