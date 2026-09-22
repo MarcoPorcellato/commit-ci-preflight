@@ -4,15 +4,21 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: scripts/build_release_candidate.sh /absolute/output/directory" >&2
+  echo "usage: scripts/build_release_candidate.sh --release-label v0.1.0-rc.N /absolute/output/directory" >&2
   exit 64
 }
 
-if [[ "$#" -ne 1 ]]; then
+if [[ "$#" -ne 3 || "$1" != "--release-label" ]]; then
   usage
 fi
 
-output_dir="$1"
+release_label="$2"
+output_dir="$3"
+if [[ ! "$release_label" =~ ^v0\.1\.0-rc\.[1-9][0-9]*$ ]]; then
+  echo "release label must match v0.1.0-rc.N where N is a positive integer" >&2
+  exit 64
+fi
+
 case "$output_dir" in
   /*) ;;
   *)
@@ -28,6 +34,8 @@ if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
   echo "release candidate build requires a clean Git checkout" >&2
   exit 2
 fi
+
+source_commit="$(git rev-parse --verify HEAD)"
 
 cargo run --locked --quiet --example generate_release_metadata -- --check
 cargo test --locked --quiet --test release_hardening_contract
@@ -46,15 +54,20 @@ if [[ -z "$target" ]]; then
   exit 2
 fi
 
-archive_base="commit-ci-preflight-v${version}-${target}"
+archive_base="commit-ci-preflight-${release_label}-${target}"
 archive_path="${output_dir}/${archive_base}.tar.gz"
 checksum_path="${output_dir}/SHA256SUMS"
-if [[ -e "$archive_path" || -e "$checksum_path" ]]; then
-  echo "refusing to overwrite an existing release candidate or checksum manifest" >&2
+if [[ -e "$output_dir" && ! -d "$output_dir" ]]; then
+  echo "release candidate output path must be a directory" >&2
   exit 2
 fi
 
 mkdir -p "$output_dir"
+if [[ -n "$(find "$output_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  echo "release candidate output directory must be empty" >&2
+  exit 2
+fi
+
 stage_root="$(mktemp -d "${TMPDIR:-/tmp}/ccp-release-candidate.XXXXXX")"
 stage_dir="${stage_root}/${archive_base}"
 cleanup() {
@@ -73,9 +86,15 @@ install -m 0644 \
   docs/UPGRADE_AND_ROLLBACK.md \
   docs/THREAT_MODEL.md \
   docs/BETA_SUPPORT.md \
+  docs/ECONOMIC_QUALIFICATION.md \
+  docs/TIME_TO_FEEDBACK_EVALUATION.md \
   docs/TUTORIAL.md \
   "$stage_dir/docs/"
 install -m 0644 examples/github/receipt-gate.yml.example "$stage_dir/examples/github/"
+
+manifest_path="$stage_dir/RELEASE_MANIFEST.json"
+printf '{\n  "release_label": "%s",\n  "source_commit": "%s",\n  "cargo_package_version": "%s",\n  "target": "%s",\n  "asset_name": "%s.tar.gz"\n}\n' \
+  "$release_label" "$source_commit" "$version" "$target" "$archive_base" > "$manifest_path"
 
 COPYFILE_DISABLE=1 tar -czf "$archive_path" -C "$stage_root" "$archive_base"
 
@@ -97,4 +116,8 @@ fi
 
 echo "release candidate: $archive_path"
 echo "checksums: $checksum_path"
+echo "release label: $release_label"
+echo "source commit: $source_commit"
+echo "RELEASE_MANIFEST.json binds the label, source commit, package version, target, and archive name"
+echo "SHA256SUMS binds maintainer-uploaded archive assets; GitHub-generated source archives are not local assets"
 echo "no tag, signature, upload, package publication, or GitHub Release was created"
