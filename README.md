@@ -119,6 +119,12 @@ For a real PASS and receipt, use the [clean-room tutorial](docs/TUTORIAL.md).
 It first creates a separate Git repository for the fixture; running the example
 configuration against this source checkout would validate the wrong repository.
 
+Heavy `run`, `benchmark`, and `guard exec` commands share one host-wide,
+cooperating FIFO slot. On macOS, `macos-v5` requires at least 20% available
+memory and 3 GiB reclaimable uncompressed memory. Static swap occupancy is a
+companion pressure signal rather than an independent veto; details and the
+watchdog boundary are in the local run contract.
+
 ### 2. Run the clean-room demo
 
 Follow the [end-to-end tutorial](docs/TUTORIAL.md). It copies a tiny public Rust

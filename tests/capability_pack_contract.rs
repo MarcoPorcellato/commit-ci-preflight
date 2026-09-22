@@ -19,9 +19,21 @@ use commit_ci_preflight::capability_pack::{
 };
 const PINNED_SCHEMA: &str = include_str!("../schema/capability-pack-v1.schema.json");
 use commit_ci_preflight::config::{ConfigError, RuntimeKind};
+use commit_ci_preflight::process::{
+    CancellationToken, CapturedStream, CleanupStatus, ExitOutcome, GenerationGuard, ProcessError,
+    ProcessRequest, ProcessResult, ProcessSupervisor, ProcessTermination, RunIdentity,
+    SupervisorPort,
+};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, VecDeque};
+use std::ffi::{OsStr, OsString};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use std::time::Duration;
 
 const VALID: &str = include_str!("fixtures/capability-pack-v1/valid-minimal.toml");
 const UNKNOWN_FIELD: &str = include_str!("fixtures/capability-pack-v1/unknown-field.toml");
@@ -40,6 +52,701 @@ const PINNED_CANONICAL: &[u8] =
 const PINNED_EXPANSION: &[u8] =
     include_bytes!("fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json");
 static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static HISTORICAL_GIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct ScriptedSupervisor {
+    requests: Mutex<Vec<ProcessRequest>>,
+    responses: Mutex<VecDeque<Result<ProcessResult, ProcessError>>>,
+}
+
+impl Default for ScriptedSupervisor {
+    fn default() -> Self {
+        Self::with_responses([])
+    }
+}
+
+impl ScriptedSupervisor {
+    fn with_success_stdout(stdout: &[u8]) -> Self {
+        Self::with_responses([scripted_success(stdout)])
+    }
+
+    fn with_result(result: Result<ProcessResult, ProcessError>) -> Self {
+        Self::with_responses([result])
+    }
+
+    fn with_responses(
+        responses: impl IntoIterator<Item = Result<ProcessResult, ProcessError>>,
+    ) -> Self {
+        Self {
+            requests: Mutex::new(Vec::new()),
+            responses: Mutex::new(responses.into_iter().collect()),
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        self.requests.lock().expect("scripted request lock").len()
+    }
+
+    fn only_request(&self) -> ProcessRequest {
+        let requests = self.requests.lock().expect("scripted request lock");
+        assert_eq!(requests.len(), 1);
+        requests[0].clone()
+    }
+
+    fn requests(&self) -> Vec<ProcessRequest> {
+        self.requests.lock().expect("scripted request lock").clone()
+    }
+}
+
+impl SupervisorPort for ScriptedSupervisor {
+    fn execute(
+        &self,
+        request: &ProcessRequest,
+        _cancellation: &CancellationToken,
+        _generation: &GenerationGuard,
+    ) -> Result<ProcessResult, ProcessError> {
+        self.requests
+            .lock()
+            .expect("scripted request lock")
+            .push(request.clone());
+        let response = self
+            .responses
+            .lock()
+            .expect("scripted response lock")
+            .pop_front()
+            .unwrap_or(Err(ProcessError::Invariant("unexpected Git request")));
+        response.map(|mut result| {
+            result.identity = request.identity.clone();
+            result
+        })
+    }
+}
+
+fn scripted_result(
+    stdout: &[u8],
+    stderr: &[u8],
+    termination: ProcessTermination,
+    exit: Option<ExitOutcome>,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+) -> ProcessResult {
+    ProcessResult {
+        identity: RunIdentity {
+            project: "scripted-supervisor".to_owned(),
+            commit: None,
+            config_digest: "sha256:scripted".to_owned(),
+            generation: "test".to_owned(),
+        },
+        termination,
+        cleanup: CleanupStatus::Verified,
+        exit,
+        stdout: CapturedStream::from_captured(stdout.to_vec(), stdout_truncated),
+        stderr: CapturedStream::from_captured(stderr.to_vec(), stderr_truncated),
+        elapsed_millis: 0,
+    }
+}
+
+fn scripted_success(stdout: &[u8]) -> Result<ProcessResult, ProcessError> {
+    Ok(scripted_result(
+        stdout,
+        b"",
+        ProcessTermination::Completed,
+        Some(ExitOutcome {
+            success: true,
+            code: Some(0),
+        }),
+        false,
+        false,
+    ))
+}
+
+fn scripted_nonzero(stderr: &[u8]) -> Result<ProcessResult, ProcessError> {
+    Ok(scripted_result(
+        b"",
+        stderr,
+        ProcessTermination::Completed,
+        Some(ExitOutcome {
+            success: false,
+            code: Some(1),
+        }),
+        false,
+        false,
+    ))
+}
+
+fn scripted_timeout() -> Result<ProcessResult, ProcessError> {
+    Ok(scripted_result(
+        b"",
+        b"",
+        ProcessTermination::TimedOut,
+        None,
+        false,
+        false,
+    ))
+}
+
+fn scripted_truncated_stdout() -> Result<ProcessResult, ProcessError> {
+    Ok(scripted_result(
+        b"commit\n",
+        b"",
+        ProcessTermination::Completed,
+        Some(ExitOutcome {
+            success: true,
+            code: Some(0),
+        }),
+        true,
+        false,
+    ))
+}
+
+fn scripted_truncated_stderr() -> Result<ProcessResult, ProcessError> {
+    Ok(scripted_result(
+        b"commit\n",
+        b"truncated",
+        ProcessTermination::Completed,
+        Some(ExitOutcome {
+            success: true,
+            code: Some(0),
+        }),
+        false,
+        true,
+    ))
+}
+
+fn scripted_output_error() -> ProcessError {
+    ProcessError::Output(io::Error::other("scripted read failure"))
+}
+
+fn scripted_cleanup_error() -> ProcessError {
+    ProcessError::CleanupUncertain {
+        stage: "scripted cleanup",
+        source: io::Error::other("scripted cleanup failure"),
+    }
+}
+
+fn repo_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+const M2_BASE_COMMIT: &str = "2e6286cc23584d5e82842aacf106c3bb5e7462df";
+const HISTORICAL_CAPTURE_BYTES: usize = 65_536;
+
+#[derive(Debug, PartialEq, Eq)]
+enum HistoricalManifestError {
+    InvalidRoot,
+    InvalidObject,
+    UnpinnedObject,
+    InvalidPath,
+    DeclaredSizeTooLarge,
+    Process,
+    Identity,
+    Termination,
+    Cleanup,
+    Exit,
+    Truncated,
+    Utf8,
+    BaseNotCommit,
+    PathNotBlob,
+    Length,
+    Manifest,
+    Digest,
+}
+
+struct HistoricalGitReader<'a, R: SupervisorPort> {
+    root: &'a Path,
+    supervisor: &'a R,
+}
+
+impl<'a, R: SupervisorPort> HistoricalGitReader<'a, R> {
+    fn new(root: &'a Path, supervisor: &'a R) -> Self {
+        Self { root, supervisor }
+    }
+
+    fn object_type(&self, object: &str) -> Result<String, HistoricalManifestError> {
+        if !is_lowercase_hex_object_id(object) {
+            return Err(HistoricalManifestError::InvalidObject);
+        }
+        if object != M2_BASE_COMMIT {
+            return Err(HistoricalManifestError::UnpinnedObject);
+        }
+        let object_type = self.raw_object_type(object)?;
+        if object_type != "commit" {
+            return Err(HistoricalManifestError::BaseNotCommit);
+        }
+        Ok(object_type)
+    }
+
+    fn blob(&self, path: &str, declared_bytes: u64) -> Result<Vec<u8>, HistoricalManifestError> {
+        if !is_safe_historical_path(path) {
+            return Err(HistoricalManifestError::InvalidPath);
+        }
+        let declared_bytes = usize::try_from(declared_bytes)
+            .map_err(|_| HistoricalManifestError::DeclaredSizeTooLarge)?;
+        if declared_bytes > HISTORICAL_CAPTURE_BYTES {
+            return Err(HistoricalManifestError::DeclaredSizeTooLarge);
+        }
+
+        self.object_type(M2_BASE_COMMIT)?;
+        let revision = format!("{M2_BASE_COMMIT}:{path}");
+        if self.raw_object_type(&revision)? != "blob" {
+            return Err(HistoricalManifestError::PathNotBlob);
+        }
+        let bytes = self.execute_git(vec!["cat-file".into(), "blob".into(), revision.into()])?;
+        if bytes.len() != declared_bytes {
+            return Err(HistoricalManifestError::Length);
+        }
+        Ok(bytes)
+    }
+
+    fn raw_object_type(&self, object: &str) -> Result<String, HistoricalManifestError> {
+        let bytes = self.execute_git(vec!["cat-file".into(), "-t".into(), object.into()])?;
+        let object_type = std::str::from_utf8(&bytes)
+            .map_err(|_| HistoricalManifestError::Utf8)?
+            .strip_suffix('\n')
+            .ok_or(HistoricalManifestError::Utf8)?;
+        if object_type.contains('\n') || !matches!(object_type, "commit" | "blob" | "tree") {
+            return Err(HistoricalManifestError::Utf8);
+        }
+        Ok(object_type.to_owned())
+    }
+
+    fn execute_git(&self, mut command: Vec<OsString>) -> Result<Vec<u8>, HistoricalManifestError> {
+        if !self.root.is_absolute() {
+            return Err(HistoricalManifestError::InvalidRoot);
+        }
+        let mut argv = vec![
+            "--no-replace-objects".into(),
+            "--no-lazy-fetch".into(),
+            "-C".into(),
+            self.root.as_os_str().to_os_string(),
+        ];
+        argv.append(&mut command);
+        let request = historical_request(self.root, argv);
+        let cancellation = CancellationToken::default();
+        let generation = GenerationGuard::new(request.identity.clone());
+        let result = self
+            .supervisor
+            .execute(&request, &cancellation, &generation)
+            .map_err(|_| HistoricalManifestError::Process)?;
+        validate_historical_process_result(&request, result)
+    }
+}
+
+fn historical_git_environment() -> BTreeMap<OsString, OsString> {
+    BTreeMap::from([
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_NO_REPLACE_OBJECTS".into(), "1".into()),
+        ("GIT_NO_LAZY_FETCH".into(), "1".into()),
+        ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
+        ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+        (
+            "PATH".into(),
+            std::env::var_os("PATH").expect("test runner PATH"),
+        ),
+    ])
+}
+
+fn historical_request(root: &Path, argv: Vec<OsString>) -> ProcessRequest {
+    ProcessRequest {
+        identity: RunIdentity {
+            project: "m2-historical-contract".to_owned(),
+            commit: Some(M2_BASE_COMMIT.to_owned()),
+            config_digest: "sha256:m2-historical-contract".to_owned(),
+            generation: format!(
+                "historical-{}",
+                HISTORICAL_GIT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ),
+        },
+        program: "git".into(),
+        argv,
+        current_dir: root.to_path_buf(),
+        environment: historical_git_environment(),
+        timeout: Duration::from_secs(2),
+        max_capture_bytes: HISTORICAL_CAPTURE_BYTES,
+    }
+}
+
+fn validate_historical_process_result(
+    request: &ProcessRequest,
+    result: ProcessResult,
+) -> Result<Vec<u8>, HistoricalManifestError> {
+    if result.identity != request.identity {
+        return Err(HistoricalManifestError::Identity);
+    }
+    if result.termination != ProcessTermination::Completed {
+        return Err(HistoricalManifestError::Termination);
+    }
+    if result.cleanup != CleanupStatus::Verified {
+        return Err(HistoricalManifestError::Cleanup);
+    }
+    if !result.exit.is_some_and(|exit| exit.success) {
+        return Err(HistoricalManifestError::Exit);
+    }
+    if result.stdout.truncated || result.stderr.truncated {
+        return Err(HistoricalManifestError::Truncated);
+    }
+    Ok(result.stdout.bytes)
+}
+
+fn is_lowercase_hex_object_id(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn is_safe_historical_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('\0')
+        && !value.contains(':')
+        && !value.contains('\\')
+        && !Path::new(value).is_absolute()
+        && Path::new(value)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+const M2_LEGACY_MANIFEST_PATH: &str =
+    "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest.json";
+const M2_CORRECTED_MANIFEST_PATH: &str = "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest-v1.1.json";
+const EXPECTED_M2_PATHS: [&str; 18] = [
+    "CHANGELOG.md",
+    "docs/CAPABILITY_PACKS.md",
+    "schema/capability-pack-v1.schema.json",
+    "src/capability_pack.rs",
+    "src/lib.rs",
+    "tests/capability_pack_contract.rs",
+    "tests/fixtures/capability-pack-v1/dependency-cycle.toml",
+    "tests/fixtures/capability-pack-v1/invalid-image.toml",
+    "tests/fixtures/capability-pack-v1/invalid-license.toml",
+    "tests/fixtures/capability-pack-v1/invalid-path.toml",
+    "tests/fixtures/capability-pack-v1/invalid-provenance.toml",
+    "tests/fixtures/capability-pack-v1/shell-entrypoint.toml",
+    "tests/fixtures/capability-pack-v1/unknown-field.toml",
+    "tests/fixtures/capability-pack-v1/unknown-version.toml",
+    "tests/fixtures/capability-pack-v1/valid-minimal.canonical.json",
+    "tests/fixtures/capability-pack-v1/valid-minimal-reordered.toml",
+    "tests/fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json",
+    "tests/fixtures/capability-pack-v1/valid-minimal.toml",
+];
+
+fn parsed_m2_manifest() -> serde_json::Value {
+    read_legacy_m2_manifest(repo_root()).expect("read checked-in legacy M2 manifest")
+}
+
+fn read_legacy_m2_manifest(root: &Path) -> Result<serde_json::Value, HistoricalManifestError> {
+    read_m2_manifest_at(root, M2_LEGACY_MANIFEST_PATH)
+}
+
+fn read_corrected_m2_manifest(root: &Path) -> Result<serde_json::Value, HistoricalManifestError> {
+    read_m2_manifest_at(root, M2_CORRECTED_MANIFEST_PATH)
+}
+
+fn read_m2_manifest_at(
+    root: &Path,
+    relative_path: &str,
+) -> Result<serde_json::Value, HistoricalManifestError> {
+    let bytes =
+        std::fs::read(root.join(relative_path)).map_err(|_| HistoricalManifestError::Manifest)?;
+    serde_json::from_slice(&bytes).map_err(|_| HistoricalManifestError::Manifest)
+}
+
+fn verify_m2_manifest_historical<R: SupervisorPort>(
+    root: &Path,
+    manifest: &serde_json::Value,
+    reader: &HistoricalGitReader<'_, R>,
+) -> Result<(), HistoricalManifestError> {
+    if !root.is_absolute() {
+        return Err(HistoricalManifestError::InvalidRoot);
+    }
+    let object = manifest
+        .as_object()
+        .ok_or(HistoricalManifestError::Manifest)?;
+    if !has_exact_keys(object, &["base_commit", "files", "schema_version"])
+        || manifest["schema_version"].as_str() != Some("1.0")
+        || manifest["base_commit"].as_str() != Some(M2_BASE_COMMIT)
+    {
+        return Err(HistoricalManifestError::Manifest);
+    }
+    let entries = manifest["files"]
+        .as_array()
+        .ok_or(HistoricalManifestError::Manifest)?;
+    if entries.len() != EXPECTED_M2_PATHS.len() {
+        return Err(HistoricalManifestError::Manifest);
+    }
+
+    let mut validated_entries = Vec::with_capacity(entries.len());
+    for (entry, expected_path) in entries.iter().zip(EXPECTED_M2_PATHS) {
+        let entry = entry.as_object().ok_or(HistoricalManifestError::Manifest)?;
+        if !has_exact_keys(entry, &["bytes", "path", "sha256"]) {
+            return Err(HistoricalManifestError::Manifest);
+        }
+        let path = entry["path"]
+            .as_str()
+            .filter(|path| *path == expected_path && is_safe_historical_path(path))
+            .ok_or(HistoricalManifestError::Manifest)?;
+        let bytes = entry["bytes"]
+            .as_u64()
+            .filter(|bytes| *bytes <= HISTORICAL_CAPTURE_BYTES as u64)
+            .ok_or(HistoricalManifestError::DeclaredSizeTooLarge)?;
+        let digest = entry["sha256"]
+            .as_str()
+            .filter(|digest| is_lowercase_sha256_digest(digest))
+            .ok_or(HistoricalManifestError::Digest)?;
+        validated_entries.push((path, bytes, digest));
+    }
+
+    for (path, declared_bytes, declared_digest) in validated_entries {
+        let bytes = reader.blob(path, declared_bytes)?;
+        if u64::try_from(bytes.len()).map_err(|_| HistoricalManifestError::Length)?
+            != declared_bytes
+        {
+            return Err(HistoricalManifestError::Length);
+        }
+        if sha256_prefixed(&bytes) != declared_digest {
+            return Err(HistoricalManifestError::Digest);
+        }
+    }
+    Ok(())
+}
+
+fn has_exact_keys(object: &serde_json::Map<String, serde_json::Value>, expected: &[&str]) -> bool {
+    object.len() == expected.len()
+        && object
+            .keys()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+}
+
+fn is_lowercase_sha256_digest(value: &str) -> bool {
+    value.len() == 71
+        && value.starts_with("sha256:")
+        && value[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let digest = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{digest}")
+}
+
+#[test]
+fn historical_reader_rejects_invalid_input_without_calling_git() {
+    let supervisor = ScriptedSupervisor::default();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert!(reader.object_type("not-a-commit").is_err());
+    assert!(reader.blob("../CHANGELOG.md", 1).is_err());
+    assert!(reader.blob("CHANGELOG.md:other", 1).is_err());
+    assert_eq!(supervisor.call_count(), 0);
+}
+
+#[test]
+fn historical_reader_rejects_oversized_declaration_without_calling_git() {
+    let supervisor = ScriptedSupervisor::default();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert!(
+        reader
+            .blob("CHANGELOG.md", (HISTORICAL_CAPTURE_BYTES + 1) as u64)
+            .is_err()
+    );
+    assert_eq!(supervisor.call_count(), 0);
+}
+
+#[test]
+fn historical_reader_builds_hardened_git_request() {
+    let supervisor = ScriptedSupervisor::with_success_stdout(b"commit\n");
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert_eq!(reader.object_type(M2_BASE_COMMIT).unwrap(), "commit");
+    let request = supervisor.only_request();
+    assert_eq!(request.program, "git");
+    assert_eq!(request.timeout, Duration::from_secs(2));
+    assert_eq!(request.max_capture_bytes, HISTORICAL_CAPTURE_BYTES);
+    assert_eq!(request.environment, historical_git_environment());
+    assert_eq!(
+        request.argv,
+        vec![
+            "--no-replace-objects".into(),
+            "--no-lazy-fetch".into(),
+            "-C".into(),
+            repo_root().as_os_str().to_os_string(),
+            "cat-file".into(),
+            "-t".into(),
+            M2_BASE_COMMIT.into(),
+        ]
+    );
+}
+
+#[test]
+fn historical_git_environment_preserves_path_for_git_resolution() {
+    let expected_path = std::env::var_os("PATH").expect("test runner PATH");
+
+    assert_eq!(
+        historical_git_environment().get(OsStr::new("PATH")),
+        Some(&expected_path)
+    );
+}
+
+#[test]
+fn historical_reader_assigns_distinct_generations_to_each_git_request() {
+    let supervisor = ScriptedSupervisor::with_responses([
+        scripted_success(b"commit\n"),
+        scripted_success(b"commit\n"),
+    ]);
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert!(reader.object_type(M2_BASE_COMMIT).is_ok());
+    assert!(reader.object_type(M2_BASE_COMMIT).is_ok());
+    let requests = supervisor.requests();
+    assert_ne!(
+        requests[0].identity.generation,
+        requests[1].identity.generation
+    );
+}
+
+#[test]
+fn historical_reader_rejects_non_commit_base() {
+    let supervisor = ScriptedSupervisor::with_success_stdout(b"tree\n");
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+    assert!(reader.object_type(M2_BASE_COMMIT).is_err());
+}
+
+#[test]
+fn historical_reader_rejects_missing_or_non_blob_path() {
+    let supervisor = ScriptedSupervisor::with_responses([
+        scripted_success(b"commit\n"),
+        scripted_nonzero(b"missing\n"),
+    ]);
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+    assert!(reader.blob("CHANGELOG.md", 1).is_err());
+}
+
+#[test]
+fn historical_reader_rejects_non_blob_path() {
+    let supervisor = ScriptedSupervisor::with_responses([
+        scripted_success(b"commit\n"),
+        scripted_success(b"tree\n"),
+    ]);
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+    assert!(reader.blob("CHANGELOG.md", 1).is_err());
+}
+
+#[test]
+fn historical_reader_rejects_timeout_and_truncated_capture() {
+    let timeout_supervisor = ScriptedSupervisor::with_result(scripted_timeout());
+    let timeout_reader = HistoricalGitReader::new(repo_root(), &timeout_supervisor);
+    assert!(timeout_reader.object_type(M2_BASE_COMMIT).is_err());
+
+    let truncated_supervisor = ScriptedSupervisor::with_result(scripted_truncated_stdout());
+    let truncated_reader = HistoricalGitReader::new(repo_root(), &truncated_supervisor);
+    assert!(truncated_reader.object_type(M2_BASE_COMMIT).is_err());
+
+    let stderr_supervisor = ScriptedSupervisor::with_result(scripted_truncated_stderr());
+    let stderr_reader = HistoricalGitReader::new(repo_root(), &stderr_supervisor);
+    assert!(stderr_reader.object_type(M2_BASE_COMMIT).is_err());
+}
+
+#[test]
+fn historical_reader_rejects_supervisor_and_cleanup_errors() {
+    let output_supervisor = ScriptedSupervisor::with_result(Err(scripted_output_error()));
+    let output_reader = HistoricalGitReader::new(repo_root(), &output_supervisor);
+    assert!(output_reader.object_type(M2_BASE_COMMIT).is_err());
+
+    let cleanup_supervisor = ScriptedSupervisor::with_result(Err(scripted_cleanup_error()));
+    let cleanup_reader = HistoricalGitReader::new(repo_root(), &cleanup_supervisor);
+    assert!(cleanup_reader.object_type(M2_BASE_COMMIT).is_err());
+}
+
+#[test]
+fn historical_reader_rejects_blob_length_mismatch() {
+    let supervisor = ScriptedSupervisor::with_responses([
+        scripted_success(b"commit\n"),
+        scripted_success(b"blob\n"),
+        scripted_success(b"short"),
+    ]);
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+    assert!(reader.blob("CHANGELOG.md", 6).is_err());
+}
+
+#[test]
+fn m2_manifest_rejects_missing_historical_blob_without_live_tree_fallback() {
+    let manifest = parsed_m2_manifest();
+    let supervisor = ScriptedSupervisor::with_responses([
+        scripted_success(b"commit\n"),
+        scripted_nonzero(b"missing\n"),
+    ]);
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert!(verify_m2_manifest_historical(repo_root(), &manifest, &reader).is_err());
+    assert_eq!(supervisor.call_count(), 2);
+}
+
+#[test]
+fn m2_manifest_rejects_bad_declared_length_before_historical_read() {
+    let mut manifest = parsed_m2_manifest();
+    manifest["files"][0]["bytes"] = serde_json::json!(65_537_u64);
+    let supervisor = ScriptedSupervisor::default();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert!(verify_m2_manifest_historical(repo_root(), &manifest, &reader).is_err());
+    assert_eq!(supervisor.call_count(), 0);
+}
+
+#[test]
+fn m2_manifest_rejects_malformed_shape_and_digest_before_historical_read() {
+    let mut malformed = parsed_m2_manifest();
+    malformed["unexpected"] = serde_json::json!(true);
+    let malformed_supervisor = ScriptedSupervisor::default();
+    let malformed_reader = HistoricalGitReader::new(repo_root(), &malformed_supervisor);
+    assert!(verify_m2_manifest_historical(repo_root(), &malformed, &malformed_reader).is_err());
+    assert_eq!(malformed_supervisor.call_count(), 0);
+
+    let mut bad_digest = parsed_m2_manifest();
+    bad_digest["files"][0]["sha256"] = serde_json::json!("sha256:ABC");
+    let digest_supervisor = ScriptedSupervisor::default();
+    let digest_reader = HistoricalGitReader::new(repo_root(), &digest_supervisor);
+    assert!(verify_m2_manifest_historical(repo_root(), &bad_digest, &digest_reader).is_err());
+    assert_eq!(digest_supervisor.call_count(), 0);
+
+    let mut reordered = parsed_m2_manifest();
+    reordered["files"]
+        .as_array_mut()
+        .expect("M2 files")
+        .swap(0, 1);
+    let reordered_supervisor = ScriptedSupervisor::default();
+    let reordered_reader = HistoricalGitReader::new(repo_root(), &reordered_supervisor);
+    assert!(verify_m2_manifest_historical(repo_root(), &reordered, &reordered_reader).is_err());
+    assert_eq!(reordered_supervisor.call_count(), 0);
+
+    let mut unexpected_entry_key = parsed_m2_manifest();
+    unexpected_entry_key["files"][17]["unexpected"] = serde_json::json!(true);
+    let entry_supervisor = ScriptedSupervisor::default();
+    let entry_reader = HistoricalGitReader::new(repo_root(), &entry_supervisor);
+    assert!(
+        verify_m2_manifest_historical(repo_root(), &unexpected_entry_key, &entry_reader).is_err()
+    );
+    assert_eq!(entry_supervisor.call_count(), 0);
+}
+
+#[test]
+fn m2_corrected_manifest_rejects_same_length_wrong_digest() {
+    let mut manifest = read_corrected_m2_manifest(repo_root()).expect("read corrected M2 manifest");
+    manifest["files"][17]["sha256"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    let supervisor = ProcessSupervisor::standard();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    assert_eq!(
+        verify_m2_manifest_historical(repo_root(), &manifest, &reader),
+        Err(HistoricalManifestError::Digest)
+    );
+}
 
 #[test]
 fn generated_capability_pack_schema_matches_pinned_bytes() {
@@ -51,82 +758,31 @@ fn generated_capability_pack_schema_matches_pinned_bytes() {
 }
 
 #[test]
-fn m2_manifest_matches_exact_file_bytes() {
-    const EXPECTED_PATHS: [&str; 18] = [
-        "CHANGELOG.md",
-        "docs/CAPABILITY_PACKS.md",
-        "schema/capability-pack-v1.schema.json",
-        "src/capability_pack.rs",
-        "src/lib.rs",
-        "tests/capability_pack_contract.rs",
-        "tests/fixtures/capability-pack-v1/dependency-cycle.toml",
-        "tests/fixtures/capability-pack-v1/invalid-image.toml",
-        "tests/fixtures/capability-pack-v1/invalid-license.toml",
-        "tests/fixtures/capability-pack-v1/invalid-path.toml",
-        "tests/fixtures/capability-pack-v1/invalid-provenance.toml",
-        "tests/fixtures/capability-pack-v1/shell-entrypoint.toml",
-        "tests/fixtures/capability-pack-v1/unknown-field.toml",
-        "tests/fixtures/capability-pack-v1/unknown-version.toml",
-        "tests/fixtures/capability-pack-v1/valid-minimal.canonical.json",
-        "tests/fixtures/capability-pack-v1/valid-minimal-reordered.toml",
-        "tests/fixtures/capability-pack-v1/valid-minimal.strict-clippy.expansion.json",
-        "tests/fixtures/capability-pack-v1/valid-minimal.toml",
-    ];
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let manifest_path = root.join(
-        "docs/superpowers/programmes/2026-08-30-capability-packs-clean-architecture/m2-manifest.json",
-    );
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).expect("read M2 manifest"))
-            .expect("parse M2 manifest");
-    let object = manifest.as_object().expect("M2 manifest object");
+fn m2_legacy_manifest_is_preserved_and_rejected() {
+    let bytes =
+        std::fs::read(repo_root().join(M2_LEGACY_MANIFEST_PATH)).expect("read legacy M2 manifest");
     assert_eq!(
-        object
-            .keys()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from(["base_commit", "files", "schema_version"])
+        sha256_prefixed(&bytes),
+        "sha256:a0aa38b4ac04ac8eaff0c591825bd50da2d53830fe649c79122b3849a358c80d"
     );
-    assert_eq!(manifest["schema_version"], "1.0");
-    assert_eq!(
-        manifest["base_commit"],
-        "2e6286cc23584d5e82842aacf106c3bb5e7462df"
-    );
-    let entries = manifest["files"].as_array().expect("M2 manifest files");
-    let paths = entries
-        .iter()
-        .map(|entry| {
-            let entry = entry.as_object().expect("M2 manifest file entry");
-            assert_eq!(
-                entry
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<std::collections::BTreeSet<_>>(),
-                std::collections::BTreeSet::from(["bytes", "path", "sha256"])
-            );
-            entry["path"].as_str().expect("M2 manifest path")
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(paths, EXPECTED_PATHS);
+    let manifest = read_legacy_m2_manifest(repo_root()).expect("parse legacy M2 manifest");
+    let supervisor = ProcessSupervisor::standard();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
 
-    for entry in entries {
-        let relative = entry["path"].as_str().expect("M2 manifest path");
-        let bytes = std::fs::read(root.join(relative)).expect("read manifested file");
-        assert_eq!(
-            entry["bytes"].as_u64(),
-            Some(bytes.len() as u64),
-            "{relative}"
-        );
-        let digest = Sha256::digest(&bytes)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        assert_eq!(
-            entry["sha256"].as_str(),
-            Some(format!("sha256:{digest}").as_str()),
-            "{relative}"
-        );
-    }
+    assert_eq!(
+        verify_m2_manifest_historical(repo_root(), &manifest, &reader),
+        Err(HistoricalManifestError::Length)
+    );
+}
+
+#[test]
+fn m2_corrected_manifest_matches_historical_git_objects() {
+    let manifest = read_corrected_m2_manifest(repo_root()).expect("read corrected M2 manifest");
+    let supervisor = ProcessSupervisor::standard();
+    let reader = HistoricalGitReader::new(repo_root(), &supervisor);
+
+    verify_m2_manifest_historical(repo_root(), &manifest, &reader)
+        .expect("corrected historical M2 closure");
 }
 
 fn valid_binding() -> CapabilityPackBindingV1 {

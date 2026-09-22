@@ -69,15 +69,15 @@ child runtime timeout. Both guard timeouts default to six hours, are capped at
 4. Acquire the host-wide admission slot for `run`, `benchmark`, or `guard exec`,
    immediately before heavy execution, waiting cooperatively with cancellation
    until the selected timeout.
-5. On macOS, take a fresh strict `macos-v4` host-memory sample after slot
+5. On macOS, take a fresh strict `macos-v5` host-memory sample after slot
    acquisition. Denied, malformed, contradictory, timed-out, or uncertain
    samples release the slot and stop without starting heavy work. Linux and
    Windows report resource protection as unsupported and not enforced.
-   Admission requires at least 20% available memory, 3 GiB reclaimable
-   uncompressed memory, and swap no higher than the smaller of 8 GiB and 30%
-   of physical RAM. Boundaries are inclusive and independently mandatory.
-   Compression alone is advisory; it denies admission only at 70% or more
-   together with another pressure signal.
+   Admission requires at least 20% available memory and 3 GiB reclaimable
+   uncompressed memory. Static swap occupancy is a companion pressure signal,
+   not an independent pre-start denial. Boundaries are inclusive and
+   independently mandatory. Compression alone is advisory; it denies admission
+   only at 70% or more together with another pressure signal.
 6. For `run`, require a valid 40-hex Git commit and a clean checkout. The configured
    receipt output itself is excluded from this dirty check.
 7. For schema `1.3` `run`, before any journal, source snapshot, workspace, or

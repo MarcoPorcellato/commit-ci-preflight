@@ -16,6 +16,7 @@ const GITHUB_GATE: &str = include_str!("../docs/GITHUB_GATE.md");
 const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 const RUST_TOOLCHAIN: &str = include_str!("../rust-toolchain.toml");
 const CHECKOUT_SHA: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
+const M2_BASE_COMMIT: &str = "2e6286cc23584d5e82842aacf106c3bb5e7462df";
 
 #[test]
 fn public_repository_uses_full_standard_hosted_rust_ci() {
@@ -124,6 +125,46 @@ fn runner_temp_is_resolved_inside_the_test_step() {
         .and_then(|env| mapping_get(env, "CCP_TEST_ROOT"))
         .and_then(YamlOwned::as_str);
     assert_eq!(test_root, Some("${{ runner.temp }}/ccp-tests"));
+}
+
+#[test]
+fn historical_m2_base_is_retained_and_verified_before_hosted_suite() {
+    let documents = saphyr::YamlOwned::load_from_str(WORKFLOW).expect("hosted CI YAML");
+    let root = documents[0].as_mapping().expect("workflow mapping");
+    let jobs = mapping_get(root, "jobs")
+        .and_then(YamlOwned::as_mapping)
+        .expect("jobs mapping");
+    let test_job = mapping_get(jobs, "test")
+        .and_then(YamlOwned::as_mapping)
+        .expect("test job mapping");
+    let steps = mapping_get(test_job, "steps")
+        .and_then(YamlOwned::as_sequence)
+        .expect("test steps");
+    let fetch_step = steps
+        .iter()
+        .filter_map(YamlOwned::as_mapping)
+        .find(|step| {
+            mapping_get(step, "name").and_then(YamlOwned::as_str)
+                == Some("Fetch immutable M2 base object")
+        })
+        .expect("immutable M2 fetch step");
+    let fetch_script = mapping_get(fetch_step, "run")
+        .and_then(YamlOwned::as_str)
+        .expect("immutable M2 fetch script");
+    let base_commit = mapping_get(fetch_step, "env")
+        .and_then(YamlOwned::as_mapping)
+        .and_then(|env| mapping_get(env, "M2_BASE_COMMIT"))
+        .and_then(YamlOwned::as_str);
+
+    assert!(
+        fetch_script.contains("${M2_BASE_COMMIT}:refs/ccp/m2/${M2_BASE_COMMIT}"),
+        "M2 fetch must retain the exact object under a private hash-named ref"
+    );
+    assert!(
+        fetch_script.contains("git cat-file -e \"${M2_BASE_COMMIT}^{commit}\""),
+        "M2 fetch must prove the exact commit object is locally readable before the suite"
+    );
+    assert_eq!(base_commit, Some(M2_BASE_COMMIT));
 }
 
 #[test]

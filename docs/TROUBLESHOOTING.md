@@ -153,12 +153,11 @@ explicit persistent cache root and retain the old one for review.
 
 ## macOS resource guard denies a run
 
-The `macos-v4` guard evaluates swap, available/reclaimable memory, compressor
+The `macos-v5` guard evaluates swap, available/reclaimable memory, compressor
 pressure, and sample certainty. Admission requires at least 20% available
-memory and 3 GiB reclaimable memory, and permits swap through the smaller of
-8 GiB and 30% of physical RAM. Those three limits are independently mandatory.
-Compression alone is advisory; even extreme compression denies only when it
-accompanies another pressure signal.
+memory and 3 GiB reclaimable memory. Static swap occupancy is a companion
+signal, not an independent denial. Compression alone is advisory; even extreme
+compression denies only when it accompanies another pressure signal.
 
 ```console
 commit-ci-preflight resource status --json
@@ -169,9 +168,8 @@ not evidence that a running workload is unsafe. Soft cancellation requires at
 least two signals among low available memory, low reclaimable memory, at least
 55% compression, at least 4 GiB swap, or at least 1 GiB swap growth across the
 30-second trend window. The compound condition must persist for 15 samples.
-Immediate cancellation remains for critically low available/reclaimable
-memory, 8 GiB swap, or at least 70% compression accompanied by another pressure
-signal.
+Immediate cancellation remains for critically low available/reclaimable memory
+or at least 70% compression accompanied by another pressure signal.
 
 Close or finish memory-heavy work and retry later. Do not modify coordinator
 files, disable the guard, or infer that a machine with free swap is safe. Linux
