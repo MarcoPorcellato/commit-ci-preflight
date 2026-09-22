@@ -194,6 +194,13 @@ These are bounded observations, not a universal savings promise. The detailed
 inputs, arithmetic, privacy boundary, and limits are in
 [Economic qualification and measured savings](docs/ECONOMIC_QUALIFICATION.md).
 
+Local CCP can also reduce queue and end-to-end feedback delay when it is
+measured against equivalent work. That is a separate observation from avoided
+GitHub charges: local hardware, cold dependencies, preparation overhead, and
+retained remote gates can reverse the result. Use the
+[time-to-feedback evaluation method](docs/TIME_TO_FEEDBACK_EVALUATION.md)
+before making a public speed claim.
+
 ## Cost model
 
 Pricing and quotas vary by account and date, so treat the formula below as a

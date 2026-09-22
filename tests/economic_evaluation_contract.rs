@@ -133,3 +133,30 @@ fn zero_rate_reports_no_github_charge_avoided() {
         .expect("valid zero-rate worksheet");
     assert_eq!(report.avoided_github_charge_microusd, 0);
 }
+
+#[test]
+fn example_emits_a_privacy_preserving_json_report() {
+    let output = std::process::Command::new(env!("CARGO"))
+        .args([
+            "run",
+            "--locked",
+            "--quiet",
+            "--example",
+            "evaluate_economic_case_study",
+            "--",
+            "tests/fixtures/economic-evaluation-v1/valid-ten-events.json",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("run example");
+    assert!(
+        output.status.success(),
+        "example stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(report["classification"], "measured");
+    assert_eq!(report["hosted_median_end_to_end_seconds"], 180);
+    assert_eq!(report["local_median_end_to_end_seconds"], 72);
+    assert!(report.get("events").is_none());
+}

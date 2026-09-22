@@ -33,6 +33,19 @@ The first three are measured or bounded-estimated below, as labeled. Net
 savings are not yet certified. CCP should not be run solely to claim savings
 when local operating cost is unknown or greater than the avoided GitHub charge.
 
+## Time-to-feedback
+
+Money and feedback delay are different measurements. Local CCP can avoid
+hosted queue delay and may reduce end-to-end feedback time for equivalent work,
+but slower local hardware, cold dependencies, or preparation overhead can make
+it slower instead. The August 2026 case studies below quantify remote compute
+and charges only; they do not claim measured local time-to-feedback.
+
+Use the [time-to-feedback evaluation method](TIME_TO_FEEDBACK_EVALUATION.md)
+before publishing a timing claim. It requires comparable scope, visible failed
+and cancelled events, local-preparation disclosure, median/range reporting,
+and labels a sample with fewer than ten comparable successes as exploratory.
+
 ## Results at a glance
 
 | Case | Measured comparison | GitHub compute avoided | Claim |
