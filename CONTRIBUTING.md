@@ -83,11 +83,11 @@ purpose, enabled features, license, and transitive-risk review.
 ## Choose the right public route
 
 - Report incorrect behavior or a trust-boundary gap with the
-  [bug-report form](.github/ISSUE_TEMPLATE/bug_report.yml).
+  [bug-report form](https://github.com/MarcoPorcellato/commit-ci-preflight/issues/new?template=bug_report.yml).
 - Propose a bounded capability or documentation improvement with the
-  [feature-request form](.github/ISSUE_TEMPLATE/feature_request.yml).
+  [feature-request form](https://github.com/MarcoPorcellato/commit-ci-preflight/issues/new?template=feature_request.yml).
 - Ask about fit, setup, or a first trial with the
-  [adoption-help form](.github/ISSUE_TEMPLATE/adoption_help.yml).
+  [issue chooser](https://github.com/MarcoPorcellato/commit-ci-preflight/issues/new/choose) and select **Adoption help**.
 - Follow the existing [pull-request template](.github/PULL_REQUEST_TEMPLATE.md)
   for scope, evidence, rollback, and public-claim hygiene. Do not duplicate
   that checklist in the pull request description.

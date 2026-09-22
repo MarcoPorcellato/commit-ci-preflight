@@ -5,14 +5,19 @@ the local plan, runtime probe, dry run, real container execution, receipt, and
 independent policy verification without connecting a self-hosted runner or
 executing a marketplace action.
 
-## 1. Build the CLI
+## 1. Use a verified CLI
 
-From a reviewed Commit CI Preflight checkout:
+First follow the [installation guide](INSTALLATION.md) to verify the published
+macOS arm64 prerelease. Reuse that verified executable here:
 
 ```console
-cargo build --locked
-./target/debug/commit-ci-preflight --version
+CCP_BIN=/absolute/path/to/commit-ci-preflight
+"$CCP_BIN" --version
 ```
+
+To obtain the public fixture below without rebuilding the CLI, clone or inspect
+a reviewed Commit CI Preflight source checkout and copy only
+`examples/projects/rust` from it.
 
 ## 2. Create a disposable Git repository
 
@@ -37,12 +42,6 @@ The fixture has no proprietary data and pins an official multi-platform Rust
 image by OCI digest. Its check container has network disabled. Choose a
 persistent cache outside the repository and outside temporary directories, for
 example `/absolute/persistent/ccp-demo-cache`.
-
-Set the CLI path explicitly in the commands below:
-
-```console
-CCP_BIN=/absolute/path/to/commit-ci-preflight/target/debug/commit-ci-preflight
-```
 
 ## 3. Inspect before execution
 
