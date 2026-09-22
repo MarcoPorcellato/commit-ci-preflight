@@ -810,14 +810,14 @@ impl AdmissionCoordinator {
             return Err(AdmissionReconciliationError::Blocked("malformed_target"));
         }
         if !self.root_exists()? {
-            return Err(AdmissionReconciliationError::Blocked("unknown_ticket"));
+            return Err(AdmissionReconciliationError::Blocked("unknown_target"));
         }
         if !self.valid_owner_marker_exists()? {
             return Err(AdmissionReconciliationError::Admission(
                 AdmissionError::ForeignOwner(self.root.join(OWNER_FILE)),
             ));
         }
-        self.validate_layout(true)?;
+        self.validate_reconciliation_apply_layout()?;
         let mut queue = self.lock_queue_until(&deadline, cancellation)?;
         let slot_path = self.root.join(SLOT_LOCK);
         let slot = match open_existing_lock_file(&slot_path)? {
@@ -847,8 +847,13 @@ impl AdmissionCoordinator {
             ReconciliationApplyLocks::new(queue, slot, self.reconciliation_test_controls.clone());
         #[cfg(not(test))]
         let mut locks = ReconciliationApplyLocks::new(queue, slot);
+        if !self.valid_owner_marker_exists()? {
+            return Err(AdmissionReconciliationError::Blocked("invalid_layout"));
+        }
+        self.validate_reconciliation_apply_layout()?;
         #[cfg(test)]
         self.reach_reconciliation_gate(ReconciliationTestGatePoint::AfterExclusion);
+        self.validate_reconciliation_lease_namespace(&deadline, cancellation)?;
         macro_rules! reject {
             ($reason:expr) => {{
                 return Err(AdmissionReconciliationError::Blocked($reason));
@@ -884,7 +889,7 @@ impl AdmissionCoordinator {
                 .read_lease(id)
                 .map_err(AdmissionReconciliationError::Admission)?
             {
-                if !lease_is_semantically_valid(&lease) || lease.state != "active" {
+                if !lease_is_semantically_valid(&lease) {
                     reject!("invalid_lease");
                 }
                 if !lease_is_expired(&lease) {
@@ -1836,6 +1841,165 @@ impl AdmissionCoordinator {
         }
         Ok(())
     }
+
+    fn validate_reconciliation_apply_layout(&self) -> Result<(), AdmissionReconciliationError> {
+        match self.validate_layout(true) {
+            Ok(()) => {}
+            Err(AdmissionError::UnsafeLayout(_) | AdmissionError::ForeignOwner(_)) => {
+                return Err(AdmissionReconciliationError::Blocked("invalid_layout"));
+            }
+            Err(error) => return Err(AdmissionReconciliationError::Admission(error)),
+        }
+        for name in [OWNER_FILE, QUEUE_LOCK, SLOT_LOCK] {
+            let path = self.root.join(name);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(AdmissionReconciliationError::Blocked("invalid_layout"));
+                }
+                Err(source) => {
+                    return Err(AdmissionReconciliationError::Admission(
+                        AdmissionError::Io { path, source },
+                    ));
+                }
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(AdmissionReconciliationError::Blocked("invalid_layout"));
+            }
+        }
+        for name in [TICKETS_DIR, LEASES_DIR, QUARANTINE_DIR] {
+            let path = self.root.join(name);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(AdmissionReconciliationError::Blocked("invalid_layout"));
+                }
+                Err(source) => {
+                    return Err(AdmissionReconciliationError::Admission(
+                        AdmissionError::Io { path, source },
+                    ));
+                }
+            };
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AdmissionReconciliationError::Blocked("invalid_layout"));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_reconciliation_lease_namespace(
+        &self,
+        deadline: &AdmissionDeadline,
+        cancellation: &CancellationToken,
+    ) -> Result<(), AdmissionReconciliationError> {
+        let directory = self.root.join(LEASES_DIR);
+        let entries = fs::read_dir(&directory).map_err(|source| {
+            AdmissionReconciliationError::Admission(AdmissionError::Io {
+                path: directory,
+                source,
+            })
+        })?;
+        let mut count = 0;
+        for entry in entries {
+            deadline.check(cancellation)?;
+            count += 1;
+            if count > MAX_QUEUE_TICKETS {
+                return Err(AdmissionReconciliationError::Blocked("too_many_leases"));
+            }
+            let entry = entry.map_err(|source| {
+                AdmissionReconciliationError::Admission(AdmissionError::ReadDir(source))
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|source| {
+                AdmissionReconciliationError::Admission(AdmissionError::Io {
+                    path: path.clone(),
+                    source,
+                })
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(AdmissionReconciliationError::Blocked(
+                    "foreign_or_malformed_lease",
+                ));
+            }
+            let Some(id) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix(LEASE_PREFIX))
+                .and_then(|name| name.strip_suffix(LEASE_SUFFIX))
+                .filter(|id| id.len() == 20 && id.bytes().all(|byte| byte.is_ascii_digit()))
+            else {
+                return Err(AdmissionReconciliationError::Blocked(
+                    "foreign_or_malformed_lease",
+                ));
+            };
+            let lease = match read_lease(&path) {
+                Ok(lease) => lease,
+                Err(AdmissionError::MalformedLease(_)) => {
+                    return Err(AdmissionReconciliationError::Blocked(
+                        "foreign_or_malformed_lease",
+                    ));
+                }
+                Err(error) => return Err(AdmissionReconciliationError::Admission(error)),
+            };
+            if lease.owner != "commit-ci-preflight"
+                || lease.purpose != "host-admission-lease"
+                || lease.schema_version != ADMISSION_SCHEMA_VERSION
+                || lease.owner_run_id != id
+                || !lease_is_semantically_valid(&lease)
+            {
+                return Err(AdmissionReconciliationError::Blocked(
+                    "foreign_or_malformed_lease",
+                ));
+            }
+            let ticket_path = self
+                .root
+                .join(TICKETS_DIR)
+                .join(format!("{TICKET_PREFIX}{id}{TICKET_SUFFIX}"));
+            let ticket_metadata = match fs::symlink_metadata(&ticket_path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(AdmissionReconciliationError::Blocked("lease_only_residue"));
+                }
+                Err(source) => {
+                    return Err(AdmissionReconciliationError::Admission(
+                        AdmissionError::Io {
+                            path: ticket_path,
+                            source,
+                        },
+                    ));
+                }
+            };
+            if ticket_metadata.file_type().is_symlink() || !ticket_metadata.is_file() {
+                return Err(AdmissionReconciliationError::Blocked(
+                    "unsafe_selected_ticket",
+                ));
+            }
+            let marker = match read_ticket(&ticket_path) {
+                Ok(marker) => marker,
+                Err(AdmissionError::MalformedTicket(_)) => {
+                    return Err(AdmissionReconciliationError::Blocked(
+                        "foreign_or_malformed_ticket",
+                    ));
+                }
+                Err(error) => return Err(AdmissionReconciliationError::Admission(error)),
+            };
+            if marker.owner != "commit-ci-preflight"
+                || marker.purpose != "host-admission-ticket"
+                || marker.schema_version != ADMISSION_SCHEMA_VERSION
+                || marker.ticket_id != id
+            {
+                return Err(AdmissionReconciliationError::Blocked(
+                    "foreign_or_malformed_ticket",
+                ));
+            }
+            if !lease_is_expired(&lease) {
+                return Err(AdmissionReconciliationError::Blocked(
+                    "slot_lease_contradiction",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct AdmissionGuard {
@@ -2223,6 +2387,9 @@ fn open_selected_ticket(path: &Path) -> Result<File, AdmissionReconciliationErro
             .custom_flags(O_NOFOLLOW)
             .open(path)
             .map_err(|source| {
+                if source.kind() == io::ErrorKind::NotFound {
+                    return AdmissionReconciliationError::Blocked("unknown_target");
+                }
                 let symlink = fs::symlink_metadata(path)
                     .map(|metadata| metadata.file_type().is_symlink())
                     .unwrap_or(false);
@@ -2898,7 +3065,7 @@ mod tests {
         fixture_ticket(&c, untouched, valid_marker(untouched));
         fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
         write_lease_fixture(&c, selected, "active", 1, 1);
-        write_lease_fixture(&c, untouched, "active", 4_000_000_000, 4_000_000_001);
+        write_lease_fixture(&c, untouched, "active", 1, 1);
         let counter = fs::read(c.root().join(NEXT_TICKET)).expect("counter");
         let report = c
             .reconcile_apply_with_timeout(
@@ -2924,6 +3091,77 @@ mod tests {
             counter,
             fs::read(c.root().join(NEXT_TICKET)).expect("counter")
         );
+    }
+
+    #[test]
+    fn reconciliation_apply_quarantines_selected_ticket_with_expired_queued_lease() {
+        let c = coordinator("reconcile-expired-queued-apply-review");
+        c.initialize().expect("initialize");
+        let id = "00000000000000000071";
+        let path = fixture_ticket(&c, id, valid_marker(id));
+        write_lease_fixture(&c, id, "queued", 1, 1);
+
+        let preview = c
+            .reconcile_preview_with_timeout(Duration::from_secs(1), &CancellationToken::default())
+            .expect("preview");
+        assert_eq!(
+            preview.candidates,
+            vec![AdmissionReconciliationCandidateV1 {
+                ticket_id: id.to_owned(),
+                classification: "eligible_expired_lease".to_owned(),
+            }]
+        );
+
+        let report = c
+            .reconcile_apply_with_timeout(
+                &[id.to_owned()],
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            )
+            .expect("apply accepts same expired queued lease as preview");
+
+        assert_eq!(report.outcomes, vec![outcome(id, "quarantined")]);
+        assert!(!path.exists());
+        assert!(!c.lease_path(id).exists());
+    }
+
+    #[test]
+    fn reconciliation_apply_rejects_incomplete_required_layout_without_mutation() {
+        for (ordinal, missing) in [
+            QUEUE_LOCK,
+            SLOT_LOCK,
+            TICKETS_DIR,
+            LEASES_DIR,
+            QUARANTINE_DIR,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let c = coordinator(&format!("reconcile-missing-layout-review-{ordinal}"));
+            c.initialize().expect("initialize");
+            let id = format!("{:020}", 72 + ordinal);
+            fixture_ticket(&c, &id, valid_marker(&id));
+            let path = c.root().join(missing);
+            if path.is_dir() {
+                fs::remove_dir_all(&path).expect("remove required directory fixture");
+            } else {
+                fs::remove_file(&path).expect("remove required file fixture");
+            }
+            let before = tree_bytes(c.root());
+
+            let result = c.reconcile_apply_with_timeout(
+                &[id],
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            );
+
+            assert!(matches!(
+                result,
+                Err(AdmissionReconciliationError::Blocked("invalid_layout"))
+            ));
+            assert_eq!(before, tree_bytes(c.root()));
+            assert!(!path.exists());
+        }
     }
 
     #[test]
@@ -3834,7 +4072,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_apply_releases_locks_after_missing_later_target_error() {
+    fn reconciliation_apply_returns_bounded_unknown_target_and_preserves_state() {
         let c = coordinator("reconcile-lock-release");
         c.initialize().expect("initialize");
         let first = "00000000000000000014";
@@ -3842,6 +4080,7 @@ mod tests {
         fs::write(c.root().join(NEXT_TICKET), b"1\n").expect("counter");
         write_lease_fixture(&c, first, "active", 1, 1);
         let missing = "00000000000000000015".to_owned();
+        let before = tree_bytes(c.root());
         assert_eq!(c.reconciliation_cleanup_runs(), 0);
         let result = c.reconcile_apply_with_timeout(
             &[first.to_owned(), missing],
@@ -3850,8 +4089,9 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(AdmissionReconciliationError::Admission(_))
+            Err(AdmissionReconciliationError::Blocked("unknown_target"))
         ));
+        assert_eq!(before, tree_bytes(c.root()));
         assert_eq!(c.reconciliation_cleanup_runs(), 1);
         let follow_up = c
             .reconcile_apply_with_timeout(
@@ -3861,6 +4101,105 @@ mod tests {
             )
             .expect("follow-up apply");
         assert_eq!(follow_up.outcomes, vec![outcome(first, "quarantined")]);
+    }
+
+    #[test]
+    fn reconciliation_apply_blocks_lease_only_residue_and_preserves_state() {
+        let c = coordinator("reconcile-lease-only-review");
+        c.initialize().expect("initialize");
+        let selected = "00000000000000000077";
+        let lease_only = "00000000000000000078";
+        expired_ticket(&c, selected);
+        write_lease_fixture(&c, lease_only, "active", 1, 1);
+        let before = tree_bytes(c.root());
+
+        let result = c.reconcile_apply_with_timeout(
+            &[selected.to_owned()],
+            Duration::from_secs(1),
+            &CancellationToken::default(),
+        );
+
+        assert!(matches!(
+            result,
+            Err(AdmissionReconciliationError::Blocked("lease_only_residue"))
+        ));
+        assert_eq!(before, tree_bytes(c.root()));
+    }
+
+    #[test]
+    fn reconciliation_apply_blocks_unselected_live_or_future_lease_and_preserves_state() {
+        let now = unix_seconds().expect("clock");
+        for (ordinal, acquired, heartbeat) in [(0, now, now), (1, 4_000_000_000, 4_000_000_001)] {
+            let c = coordinator(&format!("reconcile-unselected-live-review-{ordinal}"));
+            c.initialize().expect("initialize");
+            let selected = format!("{:020}", 79 + ordinal * 2);
+            let unselected = format!("{:020}", 80 + ordinal * 2);
+            expired_ticket(&c, &selected);
+            fixture_ticket(&c, &unselected, valid_marker(&unselected));
+            write_lease_fixture(&c, &unselected, "active", acquired, heartbeat);
+            let before = tree_bytes(c.root());
+
+            let result = c.reconcile_apply_with_timeout(
+                &[selected],
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            );
+
+            assert!(matches!(
+                result,
+                Err(AdmissionReconciliationError::Blocked(
+                    "slot_lease_contradiction"
+                ))
+            ));
+            assert_eq!(before, tree_bytes(c.root()));
+        }
+    }
+
+    #[test]
+    fn reconciliation_apply_blocks_foreign_or_malformed_lease_and_preserves_state() {
+        for ordinal in 0..3 {
+            let c = coordinator(&format!("reconcile-invalid-global-lease-review-{ordinal}"));
+            c.initialize().expect("initialize");
+            let selected = format!("{:020}", 83 + ordinal * 2);
+            let unselected = format!("{:020}", 84 + ordinal * 2);
+            expired_ticket(&c, &selected);
+            fixture_ticket(&c, &unselected, valid_marker(&unselected));
+            let bytes = if ordinal == 0 {
+                let lease = LeaseMarker {
+                    owner: "foreign".to_owned(),
+                    purpose: "host-admission-lease".to_owned(),
+                    schema_version: ADMISSION_SCHEMA_VERSION.to_owned(),
+                    owner_run_id: unselected.clone(),
+                    acquired_at_unix_seconds: 1,
+                    heartbeat_at_unix_seconds: 1,
+                    state: "active".to_owned(),
+                };
+                serde_json::to_vec(&lease).expect("foreign lease")
+            } else {
+                b"{".to_vec()
+            };
+            let lease_path = if ordinal == 2 {
+                c.root().join(LEASES_DIR).join("rogue-lease-name")
+            } else {
+                c.lease_path(&unselected)
+            };
+            fs::write(lease_path, bytes).expect("invalid lease fixture");
+            let before = tree_bytes(c.root());
+
+            let result = c.reconcile_apply_with_timeout(
+                &[selected],
+                Duration::from_secs(1),
+                &CancellationToken::default(),
+            );
+
+            assert!(matches!(
+                result,
+                Err(AdmissionReconciliationError::Blocked(
+                    "foreign_or_malformed_lease"
+                ))
+            ));
+            assert_eq!(before, tree_bytes(c.root()));
+        }
     }
 
     #[test]
