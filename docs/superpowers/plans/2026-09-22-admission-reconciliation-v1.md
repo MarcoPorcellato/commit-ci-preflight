@@ -134,7 +134,9 @@ Expected: compile failure; apply does not exist.
 - [ ] **Step 3: Implement prevalidation before any mutation.**
 
 Validate non-empty, unique canonical selected IDs. Hold bounded queue lock and
-retain slot lock. Open/lock every requested ticket, reread ticket and lease
+attempt the slot lock only once while queue is held. If it is busy, release
+queue and return a fixed blocked result; never wait for slot while holding
+queue. Retain both locks only after this succeeds. Open/lock every requested ticket, reread ticket and lease
 under locks, and reject the whole request for unknown, held, active/future,
 foreign, malformed, unsafe, lease-only residue, or contradictory state. A
 selected owned ticket without a matching lease is eligible; a lease-only
@@ -201,15 +203,19 @@ later canonical targets become `not_attempted`.
 
 - [ ] **Step 4: Add RED fault/race tests, then GREEN.**
 
-Inject a ticket-move and directory-sync failure after a successful lease removal
-and assert a partial error/report plus residual no-lease ticket and
-`not_attempted` later targets. Change selected ticket bytes after preview but
-before apply and assert apply blocks. Hold reconciliation at a deterministic
-barrier after queue/slot acquisition, start ordinary acquisition on another
-thread, prove it cannot enter, then release the barrier and assert both paths
-release their locks. At a second barrier after every selected descriptor has
-been read, replace one selected pathname and assert the all-target identity
-recheck blocks before any mutation.
+Inject lease-removal, ticket-move, lease/tickets/quarantine-directory-sync,
+timeout, and cancellation failures. Assert a partial error/report plus residual
+state and `not_attempted` later targets whenever a mutation already occurred.
+For every injected case, prove counter, journals, cache, unselected tickets,
+and locks remain reusable. Change selected ticket bytes after preview but before
+apply and assert apply blocks with a real before/after state comparison. Hold
+reconciliation at a deterministic barrier after queue/slot acquisition, start
+ordinary acquisition on another thread, prove it cannot enter, then release the
+barrier and assert both paths release their locks. Separately, hold an active
+guard, begin reconciliation, assert its immediate blocked return releases
+queue, then prove active-guard release succeeds. At a second barrier after
+every selected descriptor has been read, replace one selected pathname and
+assert the all-target identity recheck blocks before any mutation.
 
 Run: `cargo test --locked reconciliation_ -- --nocapture`
 

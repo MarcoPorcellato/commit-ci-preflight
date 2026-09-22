@@ -62,9 +62,12 @@ commands, environment values, process inventories, raw errors, and log data.
 The reconciler first confirms the existing owned root and strict layout without
 initializing or repairing it. It acquires the queue bookkeeping lock using the
 existing bounded deadline and cancellation behavior. While that lock is held,
-it obtains and retains the slot lock; inability to obtain the slot lock is a
-blocking live-or-unknown condition. This prevents an ordinary CCP acquisition
-from entering while reconciliation is deciding or mutating state.
+it attempts the slot lock without waiting. If the slot is busy, it releases the
+queue lock and returns a fixed blocked live-or-unknown result. It never waits
+for the slot while holding queue: an active guard releases its slot only after
+acquiring queue, and reversing that order would deadlock. Once both locks are
+held by reconciliation, ordinary CCP acquisition cannot enter while it decides
+or mutates state.
 
 For every selected ticket, apply opens the existing regular file without
 following links, acquires its exclusive advisory lock, rereads and validates
@@ -116,8 +119,11 @@ primitive on supported platforms and a documented fail-closed fallback where
 that guarantee cannot be established.
 
 All acquired ticket, slot, and queue locks are released on success, failure,
-timeout, and cancellation. No result claims all-or-nothing transactionality
-unless every selected outcome reached its terminal durable state.
+timeout, and cancellation. Tests cover busy-slot return plus active-guard
+release, lease removal, all affected directory syncs, move collision/failure,
+timeout, cancellation, and lock reuse. No result claims all-or-nothing
+transactionality unless every selected outcome reached its terminal durable
+state.
 
 Once any selected ticket changes, a later storage, synchronization, timeout, or
 cancellation failure returns a bounded partial report in canonical ticket
