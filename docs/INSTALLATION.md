@@ -145,7 +145,7 @@ sha256sum -c SHA256SUMS
 Windows PowerShell can compare the expected first field in `SHA256SUMS` with:
 
 ```powershell
-Get-FileHash .\commit-ci-preflight-v0.1.0-<target>.tar.gz -Algorithm SHA256
+Get-FileHash .\commit-ci-preflight-<release-label>-<target>.tar.gz -Algorithm SHA256
 ```
 
 A matching checksum proves only byte integrity relative to the separately

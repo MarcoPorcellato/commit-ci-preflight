@@ -32,13 +32,13 @@ versioned and must fail closed when unsupported.
 
 Never upgrade while another `run` uses the same managed cache root.
 
-## RC.2 candidate artifact verification
+## Prerelease candidate artifact verification
 
-Before replacing a binary with a `v0.1.0-rc.2` candidate, verify all four
+Before replacing a binary with a selected prerelease candidate, verify all four
 properties from the extracted candidate archive:
 
 1. `SHA256SUMS` matches the archive byte-for-byte.
-2. `RELEASE_MANIFEST.json` names the expected `v0.1.0-rc.2` release label.
+2. `RELEASE_MANIFEST.json` names the expected selected release label.
 3. `RELEASE_MANIFEST.json` records the exact reviewed source commit and the
    claimed host target.
 4. The candidate target matches the machine on which it will run.

@@ -221,9 +221,14 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.contains("or signed artifact"));
     assert!(INSTALLATION.contains("--release-label v0.1.0-rc.N"));
     assert!(INSTALLATION.contains("RELEASE_MANIFEST.json"));
+    assert!(INSTALLATION.contains(
+        "Get-FileHash .\\commit-ci-preflight-<release-label>-<target>.tar.gz -Algorithm SHA256"
+    ));
     assert!(INSTALLATION.contains("does not sign the\nasset"));
     assert!(ROLLBACK.starts_with("# Upgrade, rollback, and uninstall"));
     assert!(ROLLBACK.contains("does not remove"));
+    assert!(ROLLBACK.contains("selected prerelease candidate"));
+    assert!(!ROLLBACK.contains("v0.1.0-rc.2"));
     assert!(THREAT_MODEL.starts_with("# Threat model and review closure"));
     assert!(THREAT_MODEL.contains("does not treat a container as a complete sandbox"));
     assert!(THREAT_MODEL.contains("Identity overclaim"));
