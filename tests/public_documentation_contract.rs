@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const SOCIAL_PREVIEW_PNG: &[u8] = include_bytes!("../docs/assets/social-preview.png");
+const CONTRIBUTING: &str = include_str!("../CONTRIBUTING.md");
 
 fn unique_fixture_root(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -218,6 +219,7 @@ fn current_public_documents_have_valid_local_links() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     const PUBLIC_DOCUMENTS: &[&str] = &[
         "README.md",
+        "CONTRIBUTING.md",
         "SUPPORT.md",
         "docs/CASE_STUDY_PR71.md",
         "docs/INSTALLATION.md",
@@ -234,6 +236,25 @@ fn current_public_documents_have_valid_local_links() {
         .flat_map(|document| validate_local_links(root, Path::new(document)))
         .collect();
     assert!(findings.is_empty(), "documentation findings: {findings:?}");
+}
+
+#[test]
+fn contributor_route_links_to_authoritative_public_surfaces() {
+    for target in [
+        "README.md",
+        "docs/THREAT_MODEL.md",
+        "SECURITY.md",
+        ".github/ISSUE_TEMPLATE/bug_report.yml",
+        ".github/ISSUE_TEMPLATE/feature_request.yml",
+        ".github/ISSUE_TEMPLATE/adoption_help.yml",
+        ".github/PULL_REQUEST_TEMPLATE.md",
+    ] {
+        assert!(
+            CONTRIBUTING.contains(&format!("]({target})")),
+            "CONTRIBUTING.md is missing its route to {target}"
+        );
+    }
+    assert!(!CONTRIBUTING.contains("guarantee"));
 }
 
 #[test]

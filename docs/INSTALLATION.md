@@ -2,13 +2,16 @@
 
 ## RC.2 candidate status
 
-`v0.1.0-rc.2` is a planned GitHub prerelease candidate. Until a separately
-authorized publication creates its exact tag and release page, it is not a
-downloadable release. The candidate workflow produces an unsigned macOS arm64 archive,
-`SHA256SUMS`, and an in-archive `RELEASE_MANIFEST.json`; GitHub will
-also generate source archives from the exact tag after publication. There is no crate, Homebrew
-formula, Winget package, container image, or signed artifact.
-Build only from a reviewed source commit while RC.2 remains unpublished.
+`v0.1.0-rc.2` is a
+[published GitHub prerelease](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2).
+Start by verifying its unsigned macOS arm64 archive, `SHA256SUMS`, and
+in-archive `RELEASE_MANIFEST.json`. GitHub also provides source archives for
+the exact tag. There is no crate, Homebrew formula, Winget package, container
+image, or signed artifact.
+
+The release asset is byte-integrity-verifiable, not signed. Build from a
+reviewed source commit instead when the macOS arm64 prerelease artifact does
+not fit your platform or trust requirements.
 
 ## Prerequisites
 

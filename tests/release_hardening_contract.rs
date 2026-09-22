@@ -26,6 +26,7 @@ const THREAT_MODEL: &str = include_str!("../docs/THREAT_MODEL.md");
 const BETA_SUPPORT: &str = include_str!("../docs/BETA_SUPPORT.md");
 const TUTORIAL: &str = include_str!("../docs/TUTORIAL.md");
 const DEMO_RECEIPT: &str = include_str!("../docs/evidence/pr10/demo-rust-receipt.json");
+const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 
 #[test]
 fn public_readme_is_human_first_and_truthfully_differentiated() {
@@ -68,7 +69,14 @@ fn public_readme_is_human_first_and_truthfully_differentiated() {
     }
     assert!(README.contains("not an identity attestation"));
     assert!(README.contains("does not execute marketplace actions"));
-    assert!(README.contains("v0.1.0-rc.2 prerelease"));
+    assert!(README.contains("v0.1.0-rc.2 published prerelease"));
+    assert!(README.contains("Run heavy CI locally. Prove the exact commit on GitHub."));
+    assert!(README.contains("## Is CCP for this repository?"));
+    assert!(README.contains("## Start here"));
+    for path in ["Evaluate cost", "Try safely", "Adopt CCP"] {
+        assert!(README.contains(path), "missing README entry path: {path}");
+    }
+    assert!(README.contains("Public standard runners are free."));
     assert!(README.contains("Time-to-feedback evaluation"));
     assert!(!README.contains("guaranteed savings"));
 }
@@ -185,8 +193,13 @@ fn release_candidate_builder_is_local_bounded_and_non_publishing() {
 #[test]
 fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.starts_with("# Installation and artifact verification"));
-    assert!(INSTALLATION.contains("v0.1.0-rc.2` is a planned GitHub prerelease candidate"));
-    assert!(INSTALLATION.contains("not a\ndownloadable release"));
+    for document in [README, INSTALLATION, BETA_SUPPORT] {
+        assert!(document.contains("v0.1.0-rc.2"));
+    }
+    assert!(INSTALLATION.contains(
+        "https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2"
+    ));
+    assert!(INSTALLATION.contains("published GitHub prerelease"));
     assert!(INSTALLATION.contains("unsigned macOS arm64 archive"));
     assert!(INSTALLATION.contains("There is no crate, Homebrew"));
     assert!(INSTALLATION.contains("or signed artifact"));
@@ -201,8 +214,7 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(THREAT_MODEL.contains("never executes\npull-request-controlled code"));
     assert!(!THREAT_MODEL.contains("No `pull_request_target` execution"));
     assert!(BETA_SUPPORT.starts_with("# Beta limitations and support policy"));
-    assert!(BETA_SUPPORT.contains("v0.1.0-rc.2"));
-    assert!(BETA_SUPPORT.contains("| `PLANNED_RC` |"));
+    assert!(BETA_SUPPORT.contains("| `PUBLISHED_PRERELEASE` |"));
     assert!(
         BETA_SUPPORT.contains("Registry packages and signed release artifacts | `NOT_PUBLISHED`")
     );
@@ -210,6 +222,24 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(BETA_SUPPORT.contains("Complete project `run` path on Linux x86_64 | `PENDING`"));
     assert!(TUTORIAL.starts_with("# End-to-end tutorial"));
     assert!(TUTORIAL.contains("does not prove who ran the command"));
+    assert!(CHANGELOG.contains("Corrected public documentation to describe the published"));
+    for stale_claim in [
+        "planned GitHub prerelease candidate",
+        "not published until a separate owner authorization",
+    ] {
+        assert!(
+            !README.contains(stale_claim),
+            "README still contains stale release claim: {stale_claim}"
+        );
+        assert!(
+            !INSTALLATION.contains(stale_claim),
+            "installation guide still contains stale release claim: {stale_claim}"
+        );
+        assert!(
+            !BETA_SUPPORT.contains(stale_claim),
+            "beta support guide still contains stale release claim: {stale_claim}"
+        );
+    }
 }
 
 #[test]

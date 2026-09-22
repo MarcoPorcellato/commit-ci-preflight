@@ -8,19 +8,34 @@ run a reviewed plan on your machine, then let a small GitHub gate verify the
 exact pull-request head. It is for teams whose remote CI cost or queue time is
 growing without weakening review, security, or platform coverage.
 
-Start here:
+## Is CCP for this repository?
 
-- [PR #71 case study](docs/CASE_STUDY_PR71.md) — a bounded, public example.
-- [Economic qualification](docs/ECONOMIC_QUALIFICATION.md) — measured private-repository savings and limits.
-- [Clean-room tutorial](docs/TUTORIAL.md) — produce and verify a first receipt.
-- [Adoption guide](docs/ADOPTION_GUIDE.md) — decide whether CCP fits your repository.
+| Situation | Decision | Why |
+|---|---|---|
+| Standard GitHub-hosted CI in a public repository | **Keep hosted** | Standard public runners are free, so local execution does not create a billed-minute saving. |
+| Repeated, billed, deterministic container-friendly checks in a private repository | **Evaluate cost** | CCP may qualify when exact workflow, billing, and local-cost evidence support the split. |
+| Required local hardware or data-residency boundary | **Consider a non-economic trial** | A separate review can justify local evidence without describing it as monetary savings. |
+| Full GitHub Actions parity, trusted secrets, deployments, or identity-bound attestation | **Not a fit alone** | Keep the remote or native controls that provide those trust facts. |
 
-> Status: **v0.1.0-rc.2 prerelease candidate**. The source implementation and
-> native benchmark evidence are complete. RC.2 is not published until a
-> separately authorized exact tag and GitHub prerelease exist. Its planned
-> unsigned macOS arm64 archive will carry a SHA-256 manifest, SPDX SBOM, notices,
-> and source-binding manifest. No crate, Homebrew formula, Winget/Scoop package,
-> container image, or signed artifact is published.
+CCP's economic target is maintainers of private repositories with repeated,
+billed workflows; hardware or data-residency needs can justify a separately
+reviewed non-economic use case.
+
+## Start here
+
+- **[Evaluate cost](docs/ECONOMIC_QUALIFICATION.md)** — decide whether your
+  private workload is economically eligible and measure its limits.
+- **[Try safely](docs/TUTORIAL.md)** — produce and verify a first receipt in a
+  clean-room public fixture.
+- **[Adopt CCP](docs/ADOPTION_GUIDE.md)** — review the explicit repository
+  plan, retained GitHub controls, and rollout boundary.
+
+> Status: **v0.1.0-rc.2 published prerelease**. The source implementation and
+> native benchmark evidence are complete. Its
+> [unsigned macOS arm64 archive](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2)
+> ships with a SHA-256 manifest, SPDX SBOM, notices, and source-binding manifest.
+> No crate, Homebrew formula, Winget/Scoop package, container image, or signed
+> artifact is published.
 
 ## The problem
 
@@ -71,14 +86,9 @@ absolute home paths, and personal or machine identity fields.
 
 A receipt is integrity and policy evidence. It is not an identity attestation,
 a signature, or proof that arbitrary local and hosted workflows are identical.
-
-## Is CCP for this repository?
-
-| If your repository has… | CCP fit |
-|---|---|
-| deterministic, container-friendly checks and pinned runtime images | **Yes — start with a clean-room trial** |
-| trusted secrets, deployments, or platform-specific behavior | **Partial — retain the relevant remote/native jobs** |
-| a requirement for signed identity-bound attestations | **No — CCP is not that attestation system** |
+Read the [threat model](docs/THREAT_MODEL.md) and
+[beta support matrix](docs/BETA_SUPPORT.md) before relying on it for a
+repository decision.
 
 ## Quick start
 
@@ -88,7 +98,7 @@ GitHub, persistent cache setup, configuration and policy authoring, OrbStack or
 Docker-compatible execution, exact-commit receipts, the cross-repository gate,
 safe rollout, and rollback.
 
-### 1. Five-minute first inspection (no unpublished package install)
+### 1. Five-minute source inspection
 
 ```console
 git clone https://github.com/MarcoPorcellato/commit-ci-preflight.git
