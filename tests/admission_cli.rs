@@ -1,6 +1,6 @@
 use std::fs;
 use std::fs::File;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -16,7 +16,7 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_commit-ci-preflight")
 }
 
-fn command(home: &PathBuf) -> Command {
+fn command(home: &Path) -> Command {
     let mut c = Command::new(bin());
     c.env("HOME", home)
         .env("XDG_CACHE_HOME", home.join("cache"))
@@ -24,7 +24,7 @@ fn command(home: &PathBuf) -> Command {
     c
 }
 
-fn admission_root(home: &PathBuf) -> PathBuf {
+fn admission_root(home: &Path) -> PathBuf {
     if cfg!(target_os = "macos") {
         home.join("Library")
             .join("Caches")
@@ -37,7 +37,7 @@ fn admission_root(home: &PathBuf) -> PathBuf {
     }
 }
 
-fn owned_admission_root(home: &PathBuf) -> PathBuf {
+fn owned_admission_root(home: &Path) -> PathBuf {
     let root = admission_root(home);
     fs::create_dir_all(root.join("tickets")).unwrap();
     fs::create_dir(root.join("leases")).unwrap();
@@ -53,7 +53,7 @@ fn owned_admission_root(home: &PathBuf) -> PathBuf {
     root
 }
 
-fn ticket(root: &PathBuf, id: &str) {
+fn ticket(root: &Path, id: &str) {
     fs::write(
         root.join("tickets").join(format!("ticket-{id}.json")),
         format!(
@@ -63,7 +63,7 @@ fn ticket(root: &PathBuf, id: &str) {
     .unwrap();
 }
 
-fn expired_lease(root: &PathBuf, id: &str) {
+fn expired_lease(root: &Path, id: &str) {
     fs::write(
         root.join("leases").join(format!("lease-{id}.json")),
         format!(
