@@ -26,7 +26,7 @@ use commit_ci_preflight::process::{
 };
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -339,6 +339,10 @@ fn historical_git_environment() -> BTreeMap<OsString, OsString> {
         ("GIT_NO_LAZY_FETCH".into(), "1".into()),
         ("GIT_OPTIONAL_LOCKS".into(), "0".into()),
         ("GIT_LITERAL_PATHSPECS".into(), "1".into()),
+        (
+            "PATH".into(),
+            std::env::var_os("PATH").expect("test runner PATH"),
+        ),
     ])
 }
 
@@ -577,6 +581,16 @@ fn historical_reader_builds_hardened_git_request() {
             "-t".into(),
             M2_BASE_COMMIT.into(),
         ]
+    );
+}
+
+#[test]
+fn historical_git_environment_preserves_path_for_git_resolution() {
+    let expected_path = std::env::var_os("PATH").expect("test runner PATH");
+
+    assert_eq!(
+        historical_git_environment().get(OsStr::new("PATH")),
+        Some(&expected_path)
     );
 }
 
