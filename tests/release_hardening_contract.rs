@@ -68,6 +68,9 @@ fn public_readme_is_human_first_and_truthfully_differentiated() {
     }
     assert!(README.contains("not an identity attestation"));
     assert!(README.contains("does not execute marketplace actions"));
+    assert!(README.contains("v0.1.0-rc.2 prerelease"));
+    assert!(README.contains("Time-to-feedback evaluation"));
+    assert!(!README.contains("guaranteed savings"));
 }
 
 #[test]
@@ -198,11 +201,13 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(THREAT_MODEL.contains("never executes\npull-request-controlled code"));
     assert!(!THREAT_MODEL.contains("No `pull_request_target` execution"));
     assert!(BETA_SUPPORT.starts_with("# Beta limitations and support policy"));
-    assert!(BETA_SUPPORT.contains("| `PUBLISHED_RC` |"));
+    assert!(BETA_SUPPORT.contains("v0.1.0-rc.2"));
+    assert!(BETA_SUPPORT.contains("| `PLANNED_RC` |"));
     assert!(
         BETA_SUPPORT.contains("Registry packages and signed release artifacts | `NOT_PUBLISHED`")
     );
     assert!(BETA_SUPPORT.contains("Complete project `run` path on Windows x86_64 | `PENDING`"));
+    assert!(BETA_SUPPORT.contains("Complete project `run` path on Linux x86_64 | `PENDING`"));
     assert!(TUTORIAL.starts_with("# End-to-end tutorial"));
     assert!(TUTORIAL.contains("does not prove who ran the command"));
 }

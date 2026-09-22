@@ -9,6 +9,18 @@ Semantic Versioning after its first public release.
 
 ### Added
 
+- Added a source-bound `v0.1.0-rc.2` candidate-archive contract: a caller
+  supplies a validated RC label, the archive includes a public release manifest,
+  and an external SHA-256 manifest binds maintainer-uploaded archive bytes.
+  Publication, signing, package distribution, and automatic upgrades remain
+  separate owner decisions.
+
+- Added an offline, fixture-tested time-to-feedback and economic-evaluation
+  method. It reports comparable hosted/local timing, queue delay, retained
+  remote gates, local preparation, outcome exclusions, and rounded billable
+  minutes without claiming universal speed, public-runner monetary savings, or
+  unmeasured net savings.
+
 - Added the pre-1.0 additive Rust capability-pack contract and pinned schema;
   this does not change existing CLI or receipt schemas and does not enable
   official pack execution.

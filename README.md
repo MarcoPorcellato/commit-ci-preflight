@@ -15,11 +15,12 @@ Start here:
 - [Clean-room tutorial](docs/TUTORIAL.md) — produce and verify a first receipt.
 - [Adoption guide](docs/ADOPTION_GUIDE.md) — decide whether CCP fits your repository.
 
-> Status: **v0.1.0-rc.1 prerelease**. The source implementation and native
-> benchmark evidence are complete. The
-> [GitHub prerelease](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.1)
-> distributes an unsigned macOS arm64 archive and checksum. No crate, Homebrew
-> formula, Winget/Scoop package, container image, or signed artifact is published.
+> Status: **v0.1.0-rc.2 prerelease candidate**. The source implementation and
+> native benchmark evidence are complete. RC.2 is not published until a
+> separately authorized exact tag and GitHub prerelease exist. Its planned
+> unsigned macOS arm64 archive will carry a SHA-256 manifest, SPDX SBOM, notices,
+> and source-binding manifest. No crate, Homebrew formula, Winget/Scoop package,
+> container image, or signed artifact is published.
 
 ## The problem
 
@@ -198,7 +199,7 @@ Local CCP can also reduce queue and end-to-end feedback delay when it is
 measured against equivalent work. That is a separate observation from avoided
 GitHub charges: local hardware, cold dependencies, preparation overhead, and
 retained remote gates can reverse the result. Use the
-[time-to-feedback evaluation method](docs/TIME_TO_FEEDBACK_EVALUATION.md)
+[Time-to-feedback evaluation method](docs/TIME_TO_FEEDBACK_EVALUATION.md)
 before making a public speed claim.
 
 ## Cost model

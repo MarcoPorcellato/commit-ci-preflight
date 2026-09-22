@@ -224,6 +224,7 @@ fn current_public_documents_have_valid_local_links() {
         "docs/TUTORIAL.md",
         "docs/ADOPTION_GUIDE.md",
         "docs/BETA_SUPPORT.md",
+        "docs/TIME_TO_FEEDBACK_EVALUATION.md",
         "docs/REPOSITORY_PRESENTATION.md",
         "docs/THREAT_MODEL.md",
     ];
