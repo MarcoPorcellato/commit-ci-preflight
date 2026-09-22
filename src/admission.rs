@@ -1669,6 +1669,20 @@ mod tests {
         AdmissionCoordinator::test_at(root)
     }
 
+    fn wait_for_ticket_count(root: &Path, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let count = fs::read_dir(root.join(TICKETS_DIR))
+                .expect("read tickets")
+                .count();
+            if count == expected {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for tickets");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     struct ChildHandle {
         child: Child,
         output: BufReader<ChildStdout>,
@@ -1963,7 +1977,7 @@ mod tests {
         let waiter = thread::spawn(move || {
             waiter_coordinator.acquire(Duration::from_secs(2), &waiter_cancellation)
         });
-        thread::sleep(Duration::from_millis(60));
+        wait_for_ticket_count(coordinator.root(), 2);
         let status = coordinator.status().expect("status");
         assert_eq!(status.schema_version, ADMISSION_STATUS_SCHEMA_VERSION);
         assert!(status.active);
