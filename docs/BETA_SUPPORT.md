@@ -2,8 +2,8 @@
 
 ## Current status
 
-Commit CI Preflight `v0.1.0-rc.2` is a
-[published GitHub prerelease](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2)
+Commit CI Preflight has a
+[published GitHub prerelease](https://github.com/MarcoPorcellato/commit-ci-preflight/releases)
 under Apache-2.0. Its archive is unsigned and currently targets macOS arm64.
 It is not approved for security-sensitive production enforcement without an
 operator review of the threat model, policy, and local runtime.
@@ -17,7 +17,7 @@ operator review of the threat model, policy, and local runtime.
 | Fixed benchmark on native Linux x86_64 | `QUALIFIED` | Standard `ubuntu-24.04` runner receipt independently verified |
 | Fixed benchmark on native Windows x86_64 | `QUALIFIED` | Standard `windows-2025` runner receipt independently verified |
 | Ordinary hosted pull-request CI | `ACTIVE_BOUNDARY` | Linux and macOS execute the complete deterministic suite; Windows compiles every test target without execution |
-| Unsigned macOS arm64 archive for `v0.1.0-rc.2` | `PUBLISHED_PRERELEASE` | Published source-bound archive with checksum, SBOM, notices, and source-binding manifest; artifact signing remains unavailable |
+| Unsigned macOS arm64 archive for the published prerelease | `PUBLISHED_PRERELEASE` | Published source-bound archive with checksum, SBOM, notices, and `RELEASE_MANIFEST.json`; artifact signing remains unavailable |
 | Complete project `run` path on Linux x86_64 | `PENDING` | Benchmark evidence is not full runtime qualification |
 | Complete project `run` path on Windows x86_64 | `PENDING` | Benchmark evidence is not full runtime qualification |
 | Docker Desktop and other Docker-compatible engines | `COMPATIBLE_UNQUALIFIED` | Adapter contract exists; no complete platform receipt is claimed |

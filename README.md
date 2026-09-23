@@ -30,12 +30,11 @@ reviewed non-economic use case.
 - **[Adopt CCP](docs/ADOPTION_GUIDE.md)** — review the explicit repository
   plan, retained GitHub controls, and rollout boundary.
 
-> Status: **v0.1.0-rc.2 published prerelease**. The source implementation and
-> native benchmark evidence are complete. Its
-> [unsigned macOS arm64 archive](https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2)
-> ships with a SHA-256 manifest, SPDX SBOM, notices, and source-binding manifest.
-> No crate, Homebrew formula, Winget/Scoop package, container image, or signed
-> artifact is published.
+> Status: **public prerelease available on [GitHub Releases](https://github.com/MarcoPorcellato/commit-ci-preflight/releases)**.
+> The source implementation and native benchmark evidence are complete. Each
+> unsigned macOS arm64 archive ships with `SHA256SUMS`, an SPDX SBOM, notices,
+> and `RELEASE_MANIFEST.json` binding its source. No crate, Homebrew formula,
+> Winget/Scoop package, container image, or signed artifact is published.
 
 ## The problem
 

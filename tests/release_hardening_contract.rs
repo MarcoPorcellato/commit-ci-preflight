@@ -69,7 +69,9 @@ fn public_readme_is_human_first_and_truthfully_differentiated() {
     }
     assert!(README.contains("not an identity attestation"));
     assert!(README.contains("does not execute marketplace actions"));
-    assert!(README.contains("v0.1.0-rc.2 published prerelease"));
+    assert!(README.contains("GitHub Releases"));
+    assert!(README.contains("RELEASE_MANIFEST.json"));
+    assert!(!README.contains("v0.1.0-rc.2 published prerelease"));
     assert!(README.contains("Run heavy CI locally. Prove the exact commit on GitHub."));
     assert!(README.contains("## Is CCP for this repository?"));
     assert!(README.contains("## Start here"));
@@ -195,15 +197,18 @@ fn release_candidate_builder_is_local_bounded_and_non_publishing() {
 fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.starts_with("# Installation and artifact verification"));
     for document in [README, INSTALLATION, BETA_SUPPORT] {
-        assert!(document.contains("v0.1.0-rc.2"));
+        assert!(
+            document.contains("https://github.com/MarcoPorcellato/commit-ci-preflight/releases")
+        );
+        assert!(!document.contains("releases/tag/v0.1.0-rc.2"));
+        assert!(!document.contains("v0.1.0-rc.2 published prerelease"));
     }
-    assert!(INSTALLATION.contains(
-        "https://github.com/MarcoPorcellato/commit-ci-preflight/releases/tag/v0.1.0-rc.2"
-    ));
     assert!(INSTALLATION.contains("published GitHub prerelease"));
     assert!(INSTALLATION.contains("unsigned macOS arm64 archive"));
     assert!(INSTALLATION.contains("## Use the published macOS arm64 prerelease"));
-    assert!(INSTALLATION.contains("commit-ci-preflight-v0.1.0-rc.2-aarch64-apple-darwin.tar.gz"));
+    assert!(
+        INSTALLATION.contains("commit-ci-preflight-<release-label>-aarch64-apple-darwin.tar.gz")
+    );
     assert!(INSTALLATION.contains("if ! shasum -a 256 -c SHA256SUMS; then"));
     assert!(
         INSTALLATION
@@ -214,11 +219,16 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     assert!(INSTALLATION.contains("## Alternative: install from a reviewed source checkout"));
     assert!(INSTALLATION.contains("There is no crate, Homebrew"));
     assert!(INSTALLATION.contains("or signed artifact"));
-    assert!(INSTALLATION.contains("--release-label v0.1.0-rc.2"));
+    assert!(INSTALLATION.contains("--release-label v0.1.0-rc.N"));
     assert!(INSTALLATION.contains("RELEASE_MANIFEST.json"));
+    assert!(INSTALLATION.contains(
+        "Get-FileHash .\\commit-ci-preflight-<release-label>-<target>.tar.gz -Algorithm SHA256"
+    ));
     assert!(INSTALLATION.contains("does not sign the\nasset"));
     assert!(ROLLBACK.starts_with("# Upgrade, rollback, and uninstall"));
     assert!(ROLLBACK.contains("does not remove"));
+    assert!(ROLLBACK.contains("selected prerelease candidate"));
+    assert!(!ROLLBACK.contains("v0.1.0-rc.2"));
     assert!(THREAT_MODEL.starts_with("# Threat model and review closure"));
     assert!(THREAT_MODEL.contains("does not treat a container as a complete sandbox"));
     assert!(THREAT_MODEL.contains("Identity overclaim"));
@@ -238,7 +248,8 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
     ));
     assert!(!TUTORIAL.contains("cargo build --locked"));
     assert!(TUTORIAL.contains("does not prove who ran the command"));
-    assert!(CHANGELOG.contains("Corrected public documentation to describe the published"));
+    assert!(CHANGELOG.contains("## [0.1.0-rc.3]"));
+    assert!(CHANGELOG.contains("## [0.1.0-rc.2]"));
     for stale_claim in [
         "planned GitHub prerelease candidate",
         "not published until a separate owner authorization",
@@ -254,6 +265,41 @@ fn beta_documents_keep_release_and_security_boundaries_explicit() {
         assert!(
             !BETA_SUPPORT.contains(stale_claim),
             "beta support guide still contains stale release claim: {stale_claim}"
+        );
+    }
+}
+
+#[test]
+fn rc3_notes_describe_only_merged_scope_and_preserve_prerelease_boundaries() {
+    let rc3 = CHANGELOG
+        .split("## [0.1.0-rc.3]")
+        .nth(1)
+        .and_then(|section| section.split("## [").next())
+        .expect("RC.3 release-note section");
+
+    for expected in [
+        "clearer public onboarding",
+        "checksum-first installation guidance",
+        "explicit admission reconciliation",
+        "unsigned macOS arm64 prerelease archive",
+        "checksum-verifiable",
+        "not a publisher identity attestation",
+    ] {
+        assert!(rc3.contains(expected), "RC.3 notes missing: {expected}");
+    }
+    for forbidden in [
+        "PR #64",
+        "PR #74",
+        "is a signed release",
+        "includes a package manager channel",
+        "provides Windows runtime qualification",
+        "provides Linux runtime qualification",
+        "is stable support",
+        "guarantees savings",
+    ] {
+        assert!(
+            !rc3.contains(forbidden),
+            "RC.3 notes overclaim: {forbidden}"
         );
     }
 }
